@@ -26,8 +26,8 @@ jobs:
 
       - name: PowerShell syntax check
         shell: pwsh
-        run: ./scripts/Test-Syntax.ps1 -Path ./src,./scripts,./tests
+        run: ./scripts/Invoke-Ci.ps1 -Task syntax
 
       - name: Run Pester
         shell: pwsh
-        run: ./scripts/Invoke-Tests.ps1 -Output Detailed
+        run: ./scripts/Invoke-Ci.ps1 -Task test
