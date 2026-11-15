@@ -113,6 +113,20 @@ Describe 'Get-UupBuild' {
     }
 }
 
+Describe 'Build-Micpe.ps1 aria2 pre-seeding' {
+    It 'verifies aria2c against a pinned hash instead of trusting get_aria2.ps1' {
+        $build = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/Build-Micpe.ps1') -Raw
+        $build | Should -Match 'b9cd71b275af11b63c33457b0f43f2f2675937070c563e195f223efd7fa4c74b'
+        $build | Should -Match 'uupdump\.net/misc/aria2c\.exe'
+        $build | Should -Match 'hash mismatch'
+    }
+
+    It 'drains the downloader pause by feeding stdin' {
+        $build = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/Build-Micpe.ps1') -Raw
+        $build | Should -Match 'echo\. \|'
+    }
+}
+
 Describe 'Get-BaseWims' {
     It 'throws when the iso is missing' {
         { Get-BaseWims -IsoPath (Join-Path $script:TempRoot 'micpe-absent.iso') -OutDir $script:TempRoot } |

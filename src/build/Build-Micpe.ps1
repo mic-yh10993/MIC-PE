@@ -128,11 +128,39 @@ function Invoke-BaseStep {
     }
     Set-Content -LiteralPath $iniPath -Value $config -Encoding UTF8
 
+    Write-Step 'ensuring aria2c is present'
+    $filesDir = Join-Path $packageDir 'files'
+    if (-not (Test-Path -LiteralPath $filesDir)) {
+        New-Item -ItemType Directory -Path $filesDir -Force | Out-Null
+    }
+    $aria2 = Join-Path $filesDir 'aria2c.exe'
+    $ariaExpectHash = 'b9cd71b275af11b63c33457b0f43f2f2675937070c563e195f223efd7fa4c74b'
+    $needDownload = $true
+    if (Test-Path -LiteralPath $aria2) {
+        $existing = (Get-FileHash -LiteralPath $aria2 -Algorithm SHA256).Hash.ToLower()
+        $needDownload = ($existing -ne $ariaExpectHash)
+    }
+    if ($needDownload) {
+        # Fetch it ourselves: the bundled get_aria2.ps1 relies on Get-FileHash and
+        # fails when the runner's powershell resolves to a shell without it.
+        Invoke-WebRequest -Uri 'https://uupdump.net/misc/aria2c.exe' -OutFile $aria2 -TimeoutSec 300
+        $actual = (Get-FileHash -LiteralPath $aria2 -Algorithm SHA256).Hash.ToLower()
+        Assert-True -Condition ($actual -eq $ariaExpectHash) -Message (
+            "aria2c.exe hash mismatch: expected $ariaExpectHash, got $actual")
+        Write-SubStep 'aria2c.exe downloaded and verified'
+    }
+    else {
+        Write-SubStep 'aria2c.exe already verified'
+    }
+
     Write-Step 'converting UUP files into an ISO (this takes 40-90 minutes)'
     Push-Location $packageDir
     try {
         $downloader = Join-Path $packageDir 'uup_download_windows.cmd'
-        & cmd.exe /c "`"$downloader`"" | Out-Host
+        # The downloader ends with `pause`, which blocks an unattended run.
+        # Feed it newlines on stdin so it drains and exits.
+        $output = & cmd.exe /c "echo. | `"$downloader`"" 2>&1
+        $output | Out-Host
         Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "uup_download_windows.cmd failed with exit code $LASTEXITCODE"
     }
     finally {

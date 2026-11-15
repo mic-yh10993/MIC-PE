@@ -59,13 +59,14 @@ Describe 'Assert-ProbeResult' {
 Describe 'Get-StageProbeExpect' {
     It 'm1 only requires boot and share' {
         $expect = Get-StageProbeExpect -Stage 'm1'
-        $expect.Keys | Should -Be @('boot', 'share')
+        @($expect.Keys | Sort-Object) | Should -Be @('boot', 'share')
+        $expect.Count | Should -Be 2
     }
 
     It 'all maps to the m7 expectations' {
         $fromAll = Get-StageProbeExpect -Stage 'all'
         $fromM7 = Get-StageProbeExpect -Stage 'm7'
-        $fromAll.Keys | Should -Be $fromM7.Keys
+        @($fromAll.Keys | Sort-Object) | Should -Be @($fromM7.Keys | Sort-Object)
         foreach ($key in $fromM7.Keys) { $fromAll[$key] | Should -Be $fromM7[$key] }
     }
 
