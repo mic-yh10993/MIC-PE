@@ -109,16 +109,22 @@ function Invoke-BaseStep {
     $packageDir = New-UupDownloadPackage -Uuid $uup.Uuid -OutDir $baseDir -Lang 'zh-cn' -Edition 'professional'
 
     $iniPath = Join-Path $packageDir 'ConvertConfig.ini'
+    # SkipApps MUST stay 0: the UWP apps we copy into the PE (Settings, Photos,
+    # Media Player, Calculator) live inside install.wim, and skipping them
+    # would leave nothing to extract.
+    # ResetBase stays 0 because component-baseline resets have broken UWP
+    # provisioning in the field. install.wim is never packaged into our ISO, so
+    # there is no size benefit to either anyway.
     $config = Set-ConvertConfig -IniPath $iniPath -Overrides @{
-        Edition     = 'professional'
-        NoUpdates   = '1'
-        SkipApps    = '1'
-        SkipEdge    = '1'
-        ResetBase   = '1'
-        NetFx3      = '0'
-        Wim2Swm     = '0'
-        Esd         = '0'
-        Cleanup     = '1'
+        AddUpdates = '0'
+        Cleanup    = '1'
+        ResetBase  = '0'
+        SkipApps   = '0'
+        SkipEdge   = '1'
+        NetFx3     = '0'
+        wim2esd    = '0'
+        wim2swm    = '0'
+        StartVirtual = '0'
     }
     Set-Content -LiteralPath $iniPath -Value $config -Encoding UTF8
 

@@ -5,31 +5,66 @@ BeforeAll {
 }
 
 Describe 'Set-ConvertConfig' {
-    It 'replaces existing keys and preserves comments and order' {
-        $f = New-TemporaryFile
-        @'
+    BeforeAll {
+        $script:RealIni = @'
 ; this is a comment
-[Convert]
-Edition=Professional
-ResetBase=1
-'@ | Set-Content -LiteralPath $f
+[convert-UUP]
+AutoStart    =1
+AddUpdates   =0
+ResetBase    =0
+SkipEdge     =0
 
-        $out = Set-ConvertConfig -IniPath $f -Overrides @{ Edition = 'Professional'; ResetBase = '0'; SkipEdge = '1' }
-        $out | Should -Match '^; this is a comment'
-        $out | Should -Match 'ResetBase=0'
-        $out | Should -Match 'SkipEdge=1'
-        ($out -split "`r?`n" | Where-Object { $_ -match '^Edition=' }) | Should -Be 'Edition=Professional'
+[Store_Apps]
+SkipApps     =0
+'@
     }
 
-    It 'appends missing keys under the Convert section' {
+    It 'replaces existing keys and preserves comments' {
         $f = New-TemporaryFile
-        @'
-[Convert]
-Edition=Professional
-'@ | Set-Content -LiteralPath $f
+        Set-Content -LiteralPath $f -Value $script:RealIni
+
+        $out = Set-ConvertConfig -IniPath $f -Overrides @{ ResetBase = '1'; SkipApps = '1' }
+        $out | Should -Match '^; this is a comment'
+        ($out -split "`r?`n" | Where-Object { $_ -match '^ResetBase' }) | Should -Match '1'
+        ($out -split "`r?`n" | Where-Object { $_ -match '^SkipApps' }) | Should -Match '1'
+    }
+
+    It 'keeps a key inside its own section' {
+        $f = New-TemporaryFile
+        Set-Content -LiteralPath $f -Value $script:RealIni
 
         $out = Set-ConvertConfig -IniPath $f -Overrides @{ SkipApps = '1' }
-        $out | Should -Match 'SkipApps=1'
+        $lines = $out -split "`r?`n"
+        $storeIndex = [Array]::IndexOf($lines, '[Store_Apps]')
+        $skipIndex = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^SkipApps') { $skipIndex = $i; break }
+        }
+        $skipIndex | Should -BeGreaterThan $storeIndex
+    }
+
+    It 'inserts an unknown key into the first section rather than the file end' {
+        $f = New-TemporaryFile
+        Set-Content -LiteralPath $f -Value $script:RealIni
+
+        $out = Set-ConvertConfig -IniPath $f -Overrides @{ NeverSeen = '7' }
+        $lines = $out -split "`r?`n"
+        $firstSection = [Array]::IndexOf($lines, '[convert-UUP]')
+        $secondSection = [Array]::IndexOf($lines, '[Store_Apps]')
+        $inserted = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^NeverSeen') { $inserted = $i; break }
+        }
+        $inserted | Should -BeGreaterThan $firstSection
+        $inserted | Should -BeLessThan $secondSection
+    }
+
+    It 'does not duplicate a key that already exists' {
+        $f = New-TemporaryFile
+        Set-Content -LiteralPath $f -Value $script:RealIni
+
+        $out = Set-ConvertConfig -IniPath $f -Overrides @{ SkipEdge = '1' }
+        @($out -split "`r?`n" | Where-Object { $_ -match '^SkipEdge' }).Count | Should -Be 1
     }
 
     It 'throws when the ini is missing' {
