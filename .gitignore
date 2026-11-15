@@ -1,0 +1,35 @@
+# Build artifacts and downloaded payloads
+*.wim
+*.esd
+*.swm
+*.iso
+*.zip
+*.7z
+*.msi
+*.cab
+*.exe
+*.dll
+!tools/**/*.exe
+!tests/fixtures/**/*.exe
+
+# Local work directories
+/work/
+/out/
+/artifacts/
+/tmp/
+*.log
+
+# PowerShell
+*.ps1xml
+!src/**/*.ps1xml
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python (generators)
+__pycache__/
+*.pyc
