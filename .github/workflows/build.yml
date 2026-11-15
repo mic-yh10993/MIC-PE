@@ -1,0 +1,125 @@
+name: Build MICPE
+
+run-name: "MICPE ${{ inputs.stage }} ${{ inputs.build }} x64 zh-CN"
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "构建到哪一期（m1 只有 cmd；m7 是完整成品）"
+        type: choice
+        options: [m1, m2, m3, m4, m5, m6, m7, all]
+        default: m1
+        required: true
+      build:
+        description: "UUP dump 构建号（26200 = 25H2 最新修订）"
+        type: string
+        default: "26200"
+        required: true
+      office:
+        description: "内置 Office 2016 绿色版（+330 MB）"
+        type: boolean
+        default: false
+      chrome:
+        description: "内置 Chrome（+280 MB）"
+        type: boolean
+        default: false
+      verify:
+        description: "验证档位：full=含 QEMU 运行时自验证；static=只做静态与结构；none=只出产物"
+        type: choice
+        options: [full, static, none]
+        default: full
+        required: true
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-micpe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ISO
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          . ./src/build/lib/Common.ps1
+          . ./src/build/lib/Disk.ps1
+          $removed = Remove-RunnerBloat
+          Get-PSDrive -PSProvider FileSystem |
+            Where-Object { $_.Free } |
+            ForEach-Object { Write-Host ("{0}  free {1:N1} GB" -f $_.Root, ($_.Free / 1GB)) }
+
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # wimlib and 7-Zip are the only extractors the build needs.
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip)) {
+            choco install 7zip -y --no-progress
+          }
+          $sevenZip | Out-Null
+
+          if (-not (Get-Command wimlib-imagex -ErrorAction SilentlyContinue)) {
+            choco install wimlib -y --no-progress
+          }
+
+          # oscdimg ships in the ADK. Installing the full ADK is slow, but the
+          # deployment tools package is the documented source for it.
+          $oscdimg = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe' -ErrorAction SilentlyContinue
+          if (-not $oscdimg) {
+            choco install windows-adk -y --no-progress --ignore-checksums
+          }
+
+          foreach ($tool in 'wimlib-imagex', 'oscdimg', '7z') {
+            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+            if ($cmd) { Write-Host ("{0} -> {1}" -f $tool, $cmd.Source) }
+            else { Write-Host ("{0} not on PATH" -f $tool) }
+          }
+
+      - name: Build
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_STAGE: ${{ inputs.stage || 'all' }}
+          IN_BUILD: ${{ inputs.build || '26200' }}
+          IN_OFFICE: ${{ inputs.office }}
+          IN_CHROME: ${{ inputs.chrome }}
+        run: |
+          $buildArgs = @{ Stage = $env:IN_STAGE }
+          if ($env:IN_BUILD) { $buildArgs.Build = $env:IN_BUILD }
+          if ($env:IN_OFFICE -eq 'true') { $buildArgs.Office = $true }
+          if ($env:IN_CHROME -eq 'true') { $buildArgs.Chrome = $true }
+
+          ./src/build/Build-Micpe.ps1 @buildArgs
+
+      - name: Upload ISO
+        if: env.ISO_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: micpe-iso-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
+          path: ${{ env.ISO_PATH }}
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload boot.wim
+        if: env.BOOT_WIM_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: micpe-bootwim-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
+          path: ${{ env.BOOT_WIM_PATH }}
+          retention-days: 30
+          compression-level: 0
