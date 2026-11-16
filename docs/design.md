@@ -414,9 +414,9 @@ QEMU 以 `-monitor tcp:127.0.0.1:4444,server,nowait` 启动，CI 连上后发 `s
 
 **预期耗时**（TCG，4 vCPU，`-m 4096`）：M1（约 500 MB wim）3–6 分钟；M4/M5（约 2.3 GB）12–25 分钟。仍在 360 分钟上限内。
 
-**CI 判定失败时的可诊断性**：每次 L3 都上传 `probe.txt`、`shot*.png`、`qemu.log`、`serial.log` 四个 artifact。失败原因从 `probe.txt` 的 `key=value` 直接可读，不需要复现。
+**CI 判定失败时的可诊断性**：每次 L3 都上传 `probe.txt`、`shot*.ppm`、`qemu.log`、`serial.log` 四个 artifact。失败原因从 `probe.txt` 的 `key=value` 直接可读，不需要复现。
 
-**人工只剩两件事**：① 出成品后你自己在真机/U 盘上验一次；② 想看观感时下载 artifact 里的 `shot.png`。M1–M7 的迭代不再需要你在虚拟机上跑。
+**人工只剩两件事**：① 出成品后你自己在真机/U 盘上验一次；② 想看观感时下载 artifact 里的 `shot.ppm`。M1–M7 的迭代不再需要你在虚拟机上跑。
 
 ## 7. 风险与对策
 

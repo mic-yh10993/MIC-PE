@@ -85,8 +85,49 @@ Describe 'Save-QemuScreenshot wiring' {
         $script:qemuVerify | Should -Match 'AddMinutes\(10\)'
     }
 
-    It 'collects PNG evidence, not just the PPM ratio input' {
-        $script:qemuVerify | Should -Match 'shot-\{0:d2\}\.png'
+    It 'collects PPM evidence: screendump writes P6 PPM whatever the suffix is' {
+        $script:qemuVerify | Should -Match 'shot-\{0:d2\}\.ppm'
+        $script:qemuVerify | Should -Not -Match 'shot-\{0:d2\}\.png'
+    }
+
+    It 'keeps the PPM file as the uploaded evidence instead of deleting it' {
+        $script:qemuVerify | Should -Not -Match 'MICPE_KEEP_PPM'
+    }
+}
+
+Describe 'Send-QemuBootKey' {
+    It 'answers the boot prompt with Enter over the monitor' {
+        Mock Invoke-MonitorCommand {}
+        Send-QemuBootKey -Port '4444'
+        Should -Invoke Invoke-MonitorCommand -Times 1 -Exactly -ParameterFilter {
+            $Command -eq 'sendkey ret'
+        }
+    }
+
+    It 'never fails the run when the monitor is unreachable' {
+        Mock Invoke-MonitorCommand { throw 'no monitor' }
+        { Send-QemuBootKey -Port '4444' } | Should -Not -Throw
+    }
+}
+
+Describe 'Invoke-QemuVerify boot key' {
+    BeforeAll {
+        $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
+    }
+
+    It 'sends the boot key shortly after QEMU starts and repeats once' {
+        $script:qemuVerify | Should -Match 'Send-QemuBootKey'
+        $script:qemuVerify | Should -Match 'BootKeyDelaySec'
+        $script:qemuVerify | Should -Match 'bootKeysSent'
+    }
+
+    It 'brings a screenshot forward after the first keypress for early evidence' {
+        $script:qemuVerify | Should -Match 'earlyShotAt'
+    }
+
+    It 'returns PPM screenshots, not PNG' {
+        $script:qemuVerify | Should -Match "\-Filter '\*\.ppm'"
+        $script:qemuVerify | Should -Not -Match "\-Filter '\*\.png'"
     }
 }
 

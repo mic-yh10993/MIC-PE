@@ -758,7 +758,7 @@ if ('${{ inputs.verify }}' -eq 'full') {
 }
 ```
 
-上传 artifact：`probe.txt`、`shots/*.png`、`qemu.log`。
+上传 artifact：`probe.txt`、`shots/*.ppm`、`qemu.log`。
 
 ```bash
 git add src/ci .github/workflows tests/ProbeAssert.Tests.ps1 tests/QemuArgs.Tests.ps1
@@ -766,7 +766,7 @@ git commit -m "feat(ci): end-to-end qemu verification with vvfat probe channel"
 git push && gh workflow run build.yml -f stage=m1 -f build=26200 -f verify=full
 ```
 
-Expected: workflow 成功；artifact 里 `probe.txt` 含 `boot=1` 与 `share=1`；`shots/shot-*.png` 里能看到 cmd 窗口（非全黑）。
+Expected: workflow 成功；artifact 里 `probe.txt` 含 `boot=1` 与 `share=1`；`shots/shot-*.ppm` 里能看到 cmd 窗口（非全黑）。
 
 - [ ] **Step 6: 每个后续阶段声明自己的 probe 期望**
 
@@ -868,7 +868,7 @@ git push && gh workflow run build.yml -f stage=m2 -f build=26200
 gh workflow run build.yml -f stage=m2 -f build=26200 -f verify=full
 ```
 
-Expected: `probe.txt` 的 `explorer=1`、`shell_ready=1`、`dwm=1`；`shots/shot-01.png` 的非黑像素比例 > 8%。未通过时看 artifact 的 `PECMD.LOG` 与 `probe.txt`，每次只改一个变量。
+Expected: `probe.txt` 的 `explorer=1`、`shell_ready=1`、`dwm=1`；`shots/shot-01.ppm` 的非黑像素比例 > 8%。未通过时看 artifact 的 `PECMD.LOG` 与 `probe.txt`，每次只改一个变量。
 
 ---
 
@@ -1190,7 +1190,7 @@ git push && gh workflow run build.yml -f stage=m5 -f build=26200
 gh workflow run build.yml -f stage=m5 -f build=26200 -f verify=full
 ```
 
-Expected: `brand=1`。probe 读 hive 断言 OEM 六个值（Manufacturer=MICPE、Model=SYSTEM-Intel-MIC、SupportURL 指向 B 站、SupportProvider、Logo 路径）、`RegisteredOwner`/`RegisteredOrganization`、`oemlogo.bmp` 尺寸 120×120；截图确认壁纸已生效（`shots/shot-01.png` 与仓库 `assets/wallpaper.jpg` 的 8×8 缩略图差异度低于阈值）。
+Expected: `brand=1`。probe 读 hive 断言 OEM 六个值（Manufacturer=MICPE、Model=SYSTEM-Intel-MIC、SupportURL 指向 B 站、SupportProvider、Logo 路径）、`RegisteredOwner`/`RegisteredOrganization`、`oemlogo.bmp` 尺寸 120×120；截图确认壁纸已生效（`shots/shot-01.ppm` 与仓库 `assets/wallpaper.jpg` 的 8×8 缩略图差异度低于阈值）。
 
 ---
 
@@ -1453,7 +1453,7 @@ git push && gh workflow run build.yml -f stage=m6 -f build=26200
 gh workflow run build.yml -f stage=m6 -f build=26200 -f verify=full
 ```
 
-Expected: 四种场景的 probe 全部符合上表；`shots/shot-0*.png` 能看到装机工具窗口（非黑像素 > 5%）。
+Expected: 四种场景的 probe 全部符合上表；`shots/shot-0*.ppm` 能看到装机工具窗口（非黑像素 > 5%）。
 
 ---
 

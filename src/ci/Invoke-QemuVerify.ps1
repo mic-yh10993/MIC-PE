@@ -17,7 +17,10 @@
       any time. Screenshots are evidence for humans, not the pass/fail signal.
 
     Boot entry: the ISO is attached as a CD-ROM and the firmware boots it directly,
-    which is how a real machine would boot a DVD.
+    which is how a real machine would boot a DVD. The Windows boot sector
+    asks "Press any key to boot from CD or DVD..."; the verifier answers it
+    with Enter shortly after start (see Send-QemuBootKey), because with no
+    other boot device the guest otherwise sits at that prompt forever.
 #>
 
 [CmdletBinding()]
@@ -163,6 +166,28 @@ function ConvertTo-MonitorPath {
     return ($Path -replace '\\', '/')
 }
 
+function Send-QemuBootKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Port
+    )
+
+    # The Windows ISO boot sector waits on "Press any key to boot from CD or
+    # DVD..." and, with no other boot device attached, just sits there: run
+    # 43912243734 produced 5 identical screenshots of that prompt over 45
+    # minutes, and the PE never started. Answer it with Enter so the PE
+    # actually boots. Best effort: a missed key must not fail the run, the
+    # caller repeats once.
+    try {
+        Invoke-MonitorCommand -Port $Port -Command 'sendkey ret'
+        Write-Host '    boot key sent (sendkey ret)'
+    }
+    catch {
+        Write-Host "!!! boot key failed: $($_.Exception.Message)"
+    }
+}
+
 function Save-QemuScreenshot {
     [CmdletBinding()]
     param(
@@ -177,27 +202,20 @@ function Save-QemuScreenshot {
     )
 
     $ppm = Join-Path $ScreenshotDir ("shot-{0:d2}.ppm" -f $ShotIndex)
-    $png = Join-Path $ScreenshotDir ("shot-{0:d2}.png" -f $ShotIndex)
     try {
+        # QEMU's screendump writes P6 PPM data whatever the file suffix is,
+        # so the evidence file is named .ppm and kept: it is both the
+        # machine-readable ratio input and the human-readable evidence the
+        # upload step collects. (The previous .png copy was PPM bytes under
+        # a PNG name, which strict viewers refuse to open.)
         Invoke-MonitorCommand -Port $Port -Command "screendump `"$(ConvertTo-MonitorPath -Path $ppm)`""
         if (Test-Path -LiteralPath $ppm) {
             $ratio = Measure-PpmNonBlackRatio -PpmPath $ppm
             $ratio | Set-Content -LiteralPath ($ppm -replace '\.ppm$', '.ratio.txt')
             Write-Host ("    screenshot {0}: {1:P1} non-black" -f (Split-Path -Leaf $ppm), $ratio)
-            if ($env:MICPE_KEEP_PPM -ne '1') {
-                Remove-Item -LiteralPath $ppm -Force -ErrorAction SilentlyContinue
-            }
         }
         else {
             Write-Host "!!! screendump produced no PPM file: $ppm"
-        }
-
-        # The PPM is the machine-readable ratio input; the PNG is the
-        # human-readable evidence the upload step collects. Best effort:
-        # a missing PNG must not fail the run.
-        Invoke-MonitorCommand -Port $Port -Command "screendump `"$(ConvertTo-MonitorPath -Path $png)`""
-        if (-not (Test-Path -LiteralPath $png)) {
-            Write-Host "!!! screendump produced no PNG file: $png"
         }
     }
     catch {
@@ -337,7 +355,15 @@ function Invoke-QemuVerify {
 
         [string[]] $DataDisks,
 
-        [string] $ProbeFileName = 'micpe-probe.txt'
+        [string] $ProbeFileName = 'micpe-probe.txt',
+
+        # Seconds after QEMU starts before answering the "Press any key to
+        # boot from CD or DVD..." prompt, and seconds later to repeat once.
+        # SeaBIOS under TCG is slow, so the first press may land before the
+        # prompt appears; the repeat covers the late-appearing prompt.
+        [int] $BootKeyDelaySec = 15,
+
+        [int] $BootKeyRepeatSec = 15
     )
 
     if (-not (Test-Path -LiteralPath $Iso)) {
@@ -366,6 +392,9 @@ function Invoke-QemuVerify {
     $deadline = (Get-Date).AddMinutes($TimeoutMin)
     $shotIndex = 0
     $nextShotAt = (Get-Date).AddMinutes(10)
+    $bootKeyAt = (Get-Date).AddSeconds($BootKeyDelaySec)
+    $bootKeyRepeatAt = if ($BootKeyRepeatSec -gt 0) { $bootKeyAt.AddSeconds($BootKeyRepeatSec) } else { $null }
+    $bootKeysSent = 0
     $probe = @{}
 
     try {
@@ -373,6 +402,23 @@ function Invoke-QemuVerify {
             if ($process.HasExited) {
                 Write-Host "!!! qemu exited early with code $($process.ExitCode)"
                 break
+            }
+
+            # Answer the "Press any key to boot from CD or DVD..." prompt:
+            # without a key the guest sits at the prompt forever (run
+            # 43912243734). Send once, then once more shortly after in case
+            # the first press landed before the prompt appeared.
+            if ($bootKeysSent -eq 0 -and (Get-Date) -ge $bootKeyAt) {
+                Send-QemuBootKey -Port $MonitorPort
+                $bootKeysSent = 1
+                # Bring the next screenshot forward so there is early
+                # evidence of whether the PE started booting.
+                $earlyShotAt = (Get-Date).AddSeconds(45)
+                if ($earlyShotAt -lt $nextShotAt) { $nextShotAt = $earlyShotAt }
+            }
+            elseif ($bootKeysSent -eq 1 -and $bootKeyRepeatAt -and (Get-Date) -ge $bootKeyRepeatAt -and -not (Test-Path -LiteralPath $probePath)) {
+                Send-QemuBootKey -Port $MonitorPort
+                $bootKeysSent = 2
             }
 
             if (Test-Path -LiteralPath $probePath) {
@@ -424,7 +470,7 @@ function Invoke-QemuVerify {
         ProbePath   = $probePath
         ProbeText   = $content
         ProbeSeen   = ($null -ne $content)
-        Screenshots = if ($ScreenshotDir) { @(Get-ChildItem -LiteralPath $ScreenshotDir -Filter '*.png' -File) } else { @() }
+        Screenshots = if ($ScreenshotDir) { @(Get-ChildItem -LiteralPath $ScreenshotDir -Filter '*.ppm' -File) } else { @() }
         QemuLog     = $LogPath
     }
 }
