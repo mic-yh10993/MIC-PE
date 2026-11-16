@@ -31,6 +31,12 @@ param(
     [ValidateSet('auto', 'uefi', 'bios')]
     [string] $Firmware = 'auto',
 
+    # Passed through to the verifier when set (e.g. by the workflow's
+    # "Ensure OVMF firmware" step); empty means "let the verifier find
+    # it". Same dot-source trap as $Firmware: the helper declares this
+    # name too, so it is saved and restored around the dot-source below.
+    [string] $FirmwarePath,
+
     [switch] $KeepRawScreenshots
 )
 
@@ -47,12 +53,13 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # empty and the Invoke-QemuVerify call died on parameter binding (runs
 # 43884981629 and 43891758991 both failed exactly this way). Save the three
 # colliding parameters first and restore them right after.
-$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware }
+$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware; FirmwarePath = $FirmwarePath }
 . (Join-Path $PSScriptRoot 'Invoke-QemuVerify.ps1') -ParseOnly
 $Iso = $dotSourceParams.Iso
 $TimeoutMin = $dotSourceParams.TimeoutMin
 $QemuPath = $dotSourceParams.QemuPath
 $Firmware = $dotSourceParams.Firmware
+$FirmwarePath = $dotSourceParams.FirmwarePath
 
 if (-not $WorkDir) {
     $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) "micpe-verify-$Stage"
@@ -73,7 +80,8 @@ Write-SubStep "iso: $Iso"
 Write-SubStep "share: $shareDir"
 
 $result = Invoke-QemuVerify -Iso $Iso -ShareDir $shareDir -TimeoutMin $TimeoutMin `
-    -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -Firmware $Firmware
+    -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -Firmware $Firmware `
+    -FirmwarePath $FirmwarePath
 
 if (-not $result.ProbeSeen) {
     Write-Host ''

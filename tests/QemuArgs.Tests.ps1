@@ -142,6 +142,92 @@ Describe 'Find-OvmfCode' {
         New-Item -ItemType File -Path $ovmf -Force | Out-Null
         Find-OvmfCode -QemuPath $script:fakeQemu | Should -Be $ovmf
     }
+
+    It 'finds edk2-x86_64-code.fd under the share directory' {
+        # QEMU renamed its bundled UEFI firmware from OVMF_CODE.fd to
+        # edk2-x86_64-code.fd in 9.0; the runner's QEMU 11.1.0 ships only
+        # the new name (verified against the official 11.1.0 installer,
+        # SHA-512 matched). A fresh fake install is used here because the
+        # shared one above already has an OVMF_CODE.fd in it.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-edk2-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $exe = Join-Path $dir 'qemu-system-x86_64.exe'
+        New-Item -ItemType File -Path $exe -Force | Out-Null
+        $shareDir = Join-Path $dir 'share'
+        New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+        $edk2 = Join-Path $shareDir 'edk2-x86_64-code.fd'
+        New-Item -ItemType File -Path $edk2 -Force | Out-Null
+        Find-OvmfCode -QemuPath $exe | Should -Be $edk2
+    }
+
+    It 'prefers OVMF_CODE.fd when both names are present' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-both-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $exe = Join-Path $dir 'qemu-system-x86_64.exe'
+        New-Item -ItemType File -Path $exe -Force | Out-Null
+        $shareDir = Join-Path $dir 'share'
+        New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+        $ovmf = Join-Path $shareDir 'OVMF_CODE.fd'
+        New-Item -ItemType File -Path $ovmf -Force | Out-Null
+        $edk2 = Join-Path $shareDir 'edk2-x86_64-code.fd'
+        New-Item -ItemType File -Path $edk2 -Force | Out-Null
+        Find-OvmfCode -QemuPath $exe | Should -Be $ovmf
+    }
+
+    It 'does not mistake the secure-code variant for bootable firmware' {
+        # edk2-x86_64-secure-code.fd only runs on q35 with SMM; the
+        # verifier uses the default i440fx machine, so it must not count.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-secure-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $exe = Join-Path $dir 'qemu-system-x86_64.exe'
+        New-Item -ItemType File -Path $exe -Force | Out-Null
+        $shareDir = Join-Path $dir 'share'
+        New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+        $secure = Join-Path $shareDir 'edk2-x86_64-secure-code.fd'
+        New-Item -ItemType File -Path $secure -Force | Out-Null
+        Find-OvmfCode -QemuPath $exe | Should -BeNullOrEmpty
+    }
+
+    It 'finds edk2-x86_64-code.fd through the recursive fallback' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-deep-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $exe = Join-Path $dir 'qemu-system-x86_64.exe'
+        New-Item -ItemType File -Path $exe -Force | Out-Null
+        $deepDir = Join-Path (Join-Path $dir 'share') 'firmware'
+        New-Item -ItemType Directory -Path $deepDir -Force | Out-Null
+        $edk2 = Join-Path $deepDir 'edk2-x86_64-code.fd'
+        New-Item -ItemType File -Path $edk2 -Force | Out-Null
+        Find-OvmfCode -QemuPath $exe | Should -Be $edk2
+    }
+}
+
+Describe 'Format-MonitorReply' {
+    It 'strips ANSI colour and cursor escapes from the monitor reply' {
+        $reply = "$([char]27)[31;1mQEMU 11.1.0 monitor$([char]27)[0m (qemu) "
+        Format-MonitorReply -Reply $reply | Should -Be 'QEMU 11.1.0 monitor (qemu)'
+    }
+
+    It 'collapses newlines and repeated whitespace' {
+        Format-MonitorReply -Reply "sendkey ret`n`n  (qemu)   (qemu)" |
+            Should -Be 'sendkey ret (qemu) (qemu)'
+    }
+
+    It 'truncates a long reply instead of flooding the build log' {
+        $long = 'x' * 250
+        $out = Format-MonitorReply -Reply $long
+        $out.Length | Should -Be 203
+        $out | Should -Match '\.\.\.$'
+    }
+
+    It 'returns an empty string for an empty reply' {
+        Format-MonitorReply -Reply '' | Should -Be ''
+        Format-MonitorReply -Reply $null | Should -Be ''
+    }
+
+    It 'keeps the error words Send-QemuBootKey looks for' {
+        Format-MonitorReply -Reply "Error: unknown command`n(qemu) " |
+            Should -Match 'Error: unknown command'
+    }
 }
 
 Describe 'Invoke-QemuVerify firmware selection' {

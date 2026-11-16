@@ -191,6 +191,30 @@ function ConvertTo-MonitorPath {
     return ($Path -replace '\\', '/')
 }
 
+function Format-MonitorReply {
+    [CmdletBinding()]
+    param(
+        [string] $Reply,
+
+        [int] $MaxLength = 200
+    )
+
+    # The monitor's readline echoes the command back with ANSI colour and
+    # cursor escapes, and repeats the (qemu) prompt per line: run
+    # 43965120455 logged several hundred characters of escape soup per
+    # keypress. Strip the escapes, collapse the whitespace, and cap the
+    # length so the build log stays readable. The raw reply is still
+    # returned by Invoke-MonitorCommand for callers that need it.
+    if (-not $Reply) { return '' }
+    $flat = $Reply -replace "`e\[[0-9;?]*[A-Za-z]", ''
+    $flat = $flat -replace "`e\][^\x07]*`a", ''
+    $flat = ($flat -replace '\s+', ' ').Trim()
+    if ($flat.Length -gt $MaxLength) {
+        $flat = $flat.Substring(0, $MaxLength) + '...'
+    }
+    return $flat
+}
+
 function Send-QemuBootKey {
     [CmdletBinding()]
     param(
@@ -208,7 +232,7 @@ function Send-QemuBootKey {
     # show up in the log instead of vanishing.
     try {
         $response = Invoke-MonitorCommand -Port $Port -Command 'sendkey ret' -ReadResponse
-        $flat = if ($response) { ($response -replace '\s+', ' ').Trim() } else { '' }
+        $flat = Format-MonitorReply -Reply $response
         if ($flat -match 'error|unknown|invalid') {
             Write-Host "!!! boot key rejected by monitor: $flat"
         }
@@ -235,6 +259,15 @@ function Find-OvmfCode {
     # verifier prefers UEFI boot and the whole sendkey problem disappears.
     # The choco QEMU layout on the runner is not pinned down, so check the
     # usual spots and fall back to a shallow search under the QEMU dir.
+    #
+    # Two names are tried, in order: QEMU renamed its bundled UEFI
+    # firmware from OVMF_CODE.fd to edk2-x86_64-code.fd in 9.0, and the
+    # runner's QEMU 11.1.0 ships only the new name (verified against the
+    # official 11.1.0 installer, SHA-512 matched: it contains
+    # share/edk2-x86_64-code.fd and no OVMF_CODE.fd). The secure-code
+    # variant is deliberately NOT matched: it only runs on q35 with SMM,
+    # and the verifier uses the default i440fx machine.
+    $searchNames = @('OVMF_CODE.fd', 'edk2-x86_64-code.fd')
     $dirs = [System.Collections.Generic.List[string]]::new()
     $qemuExe = $null
     if ($QemuPath -and (Test-Path -LiteralPath $QemuPath -ErrorAction SilentlyContinue)) {
@@ -253,17 +286,21 @@ function Find-OvmfCode {
         $dirs.Add('C:\Program Files (x86)\qemu')
     }
 
-    foreach ($dir in $dirs) {
-        foreach ($sub in @('', 'share', 'share\qemu')) {
-            $candidate = Join-Path (Join-Path $dir $sub) 'OVMF_CODE.fd'
-            if ($null -ne $candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    foreach ($name in $searchNames) {
+        foreach ($dir in $dirs) {
+            foreach ($sub in @('', 'share', 'share\qemu')) {
+                $candidate = Join-Path (Join-Path $dir $sub) $name
+                if ($null -ne $candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+            }
         }
     }
     foreach ($dir in $dirs) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        $found = Get-ChildItem -LiteralPath $dir -Recurse -Depth 2 -Filter 'OVMF_CODE*.fd' `
-            -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) { return $found.FullName }
+        foreach ($name in $searchNames) {
+            $found = Get-ChildItem -LiteralPath $dir -Recurse -Depth 2 -Filter $name `
+                -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { return $found.FullName }
+        }
     }
     return $null
 }

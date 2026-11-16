@@ -123,12 +123,36 @@ jobs:
           if (-not (Test-Path -LiteralPath $qemu)) { throw 'qemu-system-x86_64 not found after install' }
           "QEMU_PATH=$qemu" | Add-Content -LiteralPath $env:GITHUB_ENV
 
+      - name: Ensure OVMF firmware
+        if: inputs.verify == 'full'
+        shell: pwsh
+        run: |
+          # QEMU ships its UEFI firmware next to the emulator (OVMF_CODE.fd
+          # on old releases, edk2-x86_64-code.fd since QEMU 9.0; the
+          # official 11.1.0 installer was verified to contain
+          # share/edk2-x86_64-code.fd). The verifier needs UEFI: the
+          # Windows ISO's EFI bootloader has no "Press any key" prompt, so
+          # the whole sendkey problem disappears -- but only if the
+          # firmware is really there. If it is not found, fail fast here
+          # with a clear error instead of silently falling back to SeaBIOS
+          # and burning 45 minutes at the boot prompt (runs 43912243734
+          # through 43965120455 all died exactly that way).
+          . ./src/ci/Invoke-QemuVerify.ps1 -ParseOnly
+          $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
+          $ovmf = Find-OvmfCode -QemuPath $qemu
+          if (-not $ovmf) {
+            throw 'No UEFI firmware found near the QEMU install (looked for OVMF_CODE.fd and edk2-x86_64-code.fd); cannot verify with UEFI'
+          }
+          Write-Host "firmware: $ovmf"
+          "OVMF_PATH=$ovmf" | Add-Content -LiteralPath $env:GITHUB_ENV
+
       - name: Verify in QEMU
         if: inputs.verify == 'full'
         shell: pwsh
         env:
           IN_STAGE: ${{ inputs.stage || 'all' }}
           IN_ISO: ${{ env.ISO_PATH }}
+          IN_OVMF: ${{ env.OVMF_PATH }}
         run: |
           # The ISO path is resolved by the runner into IN_ISO (the same
           # mechanism that already carries IN_STAGE and the upload steps'
@@ -145,9 +169,21 @@ jobs:
           if (-not (Test-Path -LiteralPath $iso)) {
             throw "Verify in QEMU: ISO file not found at '$iso'"
           }
+          # The firmware path is resolved by the runner into IN_OVMF (same
+          # step-level env mapping as IN_ISO above). UEFI is forced: the
+          # "Ensure OVMF firmware" step already proved the file exists, so
+          # a missing path here means the wiring broke, not the firmware.
+          $ovmf = if ($env:IN_OVMF) { $env:IN_OVMF } elseif ($env:OVMF_PATH) { $env:OVMF_PATH } else { '' }
+          if (-not $ovmf) {
+            throw 'Verify in QEMU: no OVMF path was passed (IN_OVMF and OVMF_PATH are both empty); the Ensure OVMF firmware step did not export OVMF_PATH'
+          }
+          if (-not (Test-Path -LiteralPath $ovmf)) {
+            throw "Verify in QEMU: OVMF firmware file not found at '$ovmf'"
+          }
           $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
           ./src/ci/Test-Stage.ps1 -Iso $iso -Stage $env:IN_STAGE `
-            -WorkDir "$env:GITHUB_WORKSPACE\verify-out" -QemuPath $qemu -TimeoutMin 45
+            -WorkDir "$env:GITHUB_WORKSPACE\verify-out" -QemuPath $qemu -TimeoutMin 45 `
+            -Firmware uefi -FirmwarePath $ovmf
 
       - name: Verify (static)
         if: inputs.verify == 'static'

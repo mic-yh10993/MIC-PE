@@ -102,6 +102,24 @@ Describe 'build.yml verify wiring' {
         $script:buildScript | Should -Match 'Add-Content -LiteralPath \$env:GITHUB_ENV'
     }
 
+    It 'ensures the OVMF firmware exists before the QEMU verifier runs' {
+        $script:buildYml | Should -Match 'Ensure OVMF firmware'
+        $script:buildYml | Should -Match 'Find-OvmfCode'
+        $script:buildYml | Should -Match 'OVMF_PATH='
+        $script:buildYml | Should -Match 'No UEFI firmware found'
+    }
+
+    It 'forces UEFI boot in the QEMU verifier with the resolved firmware path' {
+        $script:buildYml | Should -Match '-Firmware uefi'
+        $script:buildYml | Should -Match '-FirmwarePath'
+        $script:buildYml | Should -Match 'IN_OVMF:'
+    }
+
+    It 'fails fast in the verify step when the OVMF path is empty or missing' {
+        $script:buildYml | Should -Match 'no OVMF path was passed'
+        $script:buildYml | Should -Match "OVMF firmware file not found at"
+    }
+
     It 'saves and restores -Iso across the dot-source of the QEMU helper' {
         # Dot-sourcing Invoke-QemuVerify.ps1 binds its param block in the
         # caller scope and resets $Iso/$TimeoutMin/$QemuPath to their
@@ -119,6 +137,11 @@ Describe 'build.yml verify wiring' {
         # save/restore treatment, or it silently resets to 'auto'.
         $script:testStage | Should -Match 'Firmware = \$Firmware'
         $script:testStage | Should -Match '\$Firmware = \$dotSourceParams\.Firmware'
+        # $FirmwarePath is declared by the helper too, so it needs the
+        # same treatment, or it silently resets to '' and the verifier
+        # falls back to searching for the firmware itself.
+        $script:testStage | Should -Match 'FirmwarePath = \$FirmwarePath'
+        $script:testStage | Should -Match '\$FirmwarePath = \$dotSourceParams\.FirmwarePath'
     }
 
     It 'does not nest the GITHUB_ENV exports inside the step-summary block' {
