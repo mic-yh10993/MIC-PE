@@ -19,8 +19,9 @@
     Boot entry: the ISO is attached as a CD-ROM and the firmware boots it directly,
     which is how a real machine would boot a DVD. The Windows boot sector
     asks "Press any key to boot from CD or DVD..."; the verifier answers it
-    with Enter shortly after start (see Send-QemuBootKey), because with no
-    other boot device the guest otherwise sits at that prompt forever.
+    with Enter repeatedly until the probe appears (see Send-QemuBootKey),
+    because a single early press can land before the prompt is displayed
+    and the guest then sits at that prompt forever.
 #>
 
 [CmdletBinding()]
@@ -358,12 +359,15 @@ function Invoke-QemuVerify {
         [string] $ProbeFileName = 'micpe-probe.txt',
 
         # Seconds after QEMU starts before answering the "Press any key to
-        # boot from CD or DVD..." prompt, and seconds later to repeat once.
-        # SeaBIOS under TCG is slow, so the first press may land before the
-        # prompt appears; the repeat covers the late-appearing prompt.
+        # boot from CD or DVD..." prompt, and the interval for repeating it.
+        # SeaBIOS under TCG is slow: run 43939552552 sent the key at +21s
+        # and +32s, but the prompt only appeared later, so both presses
+        # were lost and the guest sat at the prompt for 45 minutes. The
+        # key is therefore sent repeatedly until the probe appears; an
+        # Enter landing in the PE's cmd prompt is just an empty line.
         [int] $BootKeyDelaySec = 15,
 
-        [int] $BootKeyRepeatSec = 15
+        [int] $BootKeyIntervalSec = 30
     )
 
     if (-not (Test-Path -LiteralPath $Iso)) {
@@ -393,7 +397,6 @@ function Invoke-QemuVerify {
     $shotIndex = 0
     $nextShotAt = (Get-Date).AddMinutes(10)
     $bootKeyAt = (Get-Date).AddSeconds($BootKeyDelaySec)
-    $bootKeyRepeatAt = if ($BootKeyRepeatSec -gt 0) { $bootKeyAt.AddSeconds($BootKeyRepeatSec) } else { $null }
     $bootKeysSent = 0
     $probe = @{}
 
@@ -404,21 +407,19 @@ function Invoke-QemuVerify {
                 break
             }
 
-            # Answer the "Press any key to boot from CD or DVD..." prompt:
-            # without a key the guest sits at the prompt forever (run
-            # 43912243734). Send once, then once more shortly after in case
-            # the first press landed before the prompt appeared.
-            if ($bootKeysSent -eq 0 -and (Get-Date) -ge $bootKeyAt) {
+            # Answer the "Press any key to boot from CD or DVD..." prompt,
+            # repeatedly until the probe appears: a single early press can
+            # land before the prompt is even displayed (run 43939552552).
+            if ((Get-Date) -ge $bootKeyAt -and -not (Test-Path -LiteralPath $probePath)) {
                 Send-QemuBootKey -Port $MonitorPort
-                $bootKeysSent = 1
-                # Bring the next screenshot forward so there is early
-                # evidence of whether the PE started booting.
-                $earlyShotAt = (Get-Date).AddSeconds(45)
-                if ($earlyShotAt -lt $nextShotAt) { $nextShotAt = $earlyShotAt }
-            }
-            elseif ($bootKeysSent -eq 1 -and $bootKeyRepeatAt -and (Get-Date) -ge $bootKeyRepeatAt -and -not (Test-Path -LiteralPath $probePath)) {
-                Send-QemuBootKey -Port $MonitorPort
-                $bootKeysSent = 2
+                $bootKeysSent++
+                $bootKeyAt = (Get-Date).AddSeconds($BootKeyIntervalSec)
+                if ($bootKeysSent -eq 1) {
+                    # Bring the next screenshot forward so there is early
+                    # evidence of whether the PE started booting.
+                    $earlyShotAt = (Get-Date).AddSeconds(45)
+                    if ($earlyShotAt -lt $nextShotAt) { $nextShotAt = $earlyShotAt }
+                }
             }
 
             if (Test-Path -LiteralPath $probePath) {

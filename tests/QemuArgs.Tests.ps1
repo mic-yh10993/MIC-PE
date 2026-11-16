@@ -115,9 +115,10 @@ Describe 'Invoke-QemuVerify boot key' {
         $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
     }
 
-    It 'sends the boot key shortly after QEMU starts and repeats once' {
+    It 'sends the boot key shortly after QEMU starts and repeats it until the probe appears' {
         $script:qemuVerify | Should -Match 'Send-QemuBootKey'
         $script:qemuVerify | Should -Match 'BootKeyDelaySec'
+        $script:qemuVerify | Should -Match 'BootKeyIntervalSec'
         $script:qemuVerify | Should -Match 'bootKeysSent'
     }
 
