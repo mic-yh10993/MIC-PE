@@ -34,6 +34,38 @@ Describe 'Get-OscdimgArgs' {
     }
 }
 
+Describe 'Get-OscdimgPath' {
+    It 'finds oscdimg under a given ADK root' {
+        $root = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-adk-{0}" -f [guid]::NewGuid())) -Force
+        $dir = New-Item -ItemType Directory -Path (Join-Path $root 'Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg') -Force
+        $exe = Join-Path $dir 'oscdimg.exe'
+        Set-Content -LiteralPath $exe -Value 'fake'
+        Get-OscdimgPath -AdkRoot $root.FullName | Should -Be $exe
+    }
+
+    It 'prefers oscdimg from PATH' {
+        $dir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-oscdimg-{0}" -f [guid]::NewGuid())) -Force
+        $name = if ($IsWindows) { 'oscdimg.cmd' } else { 'oscdimg' }
+        $fake = Join-Path $dir $name
+        Set-Content -LiteralPath $fake -Value '@echo off'
+        if (-not $IsWindows) { & chmod +x $fake }
+        $oldPath = $env:PATH
+        try {
+            $env:PATH = "$($dir.FullName)$([System.IO.Path]::PathSeparator)$env:PATH"
+            Get-OscdimgPath -AdkRoot (Join-Path ([System.IO.Path]::GetTempPath()) 'micpe-no-adk') |
+                Should -Be $fake
+        }
+        finally {
+            $env:PATH = $oldPath
+        }
+    }
+
+    It 'throws a clear error when oscdimg is nowhere to be found' {
+        { Get-OscdimgPath -AdkRoot (Join-Path ([System.IO.Path]::GetTempPath()) 'micpe-no-adk') } |
+            Should -Throw '*oscdimg not found*'
+    }
+}
+
 Describe 'New-MicpeIso' {
     It 'throws when the media directory is missing' {
         { New-MicpeIso -MediaDir '/nonexistent/micpe-media' -OutIso '/tmp/x.iso' } |

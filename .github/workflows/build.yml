@@ -78,10 +78,15 @@ jobs:
           }
 
           # oscdimg ships in the ADK. Installing the full ADK is slow, but the
-          # deployment tools package is the documented source for it.
-          $oscdimg = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe' -ErrorAction SilentlyContinue
-          if (-not $oscdimg) {
+          # deployment tools package is the documented source for it. The ADK
+          # installer does not put oscdimg on PATH, so the build resolves it
+          # explicitly; fail here instead of 15 minutes later at ISO time.
+          $adkOscdimg = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe'
+          if (-not (Test-Path -LiteralPath $adkOscdimg)) {
             choco install windows-adk -y --no-progress --ignore-checksums
+          }
+          if (-not (Test-Path -LiteralPath $adkOscdimg) -and -not (Get-Command oscdimg -ErrorAction SilentlyContinue)) {
+            throw 'oscdimg not found after installing windows-adk; the ISO step cannot run'
           }
 
           foreach ($tool in 'wimlib-imagex', 'oscdimg', '7z') {

@@ -229,7 +229,7 @@ function Invoke-ReseedStep {
 
 function Invoke-IsoStep {
     Write-Step 'packaging MICPE.iso'
-    New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath
+    New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
 
     $bootWim = Join-Path $paths.Media 'sources/boot.wim'
     $wimBytes = (Get-Item -LiteralPath $bootWim).Length

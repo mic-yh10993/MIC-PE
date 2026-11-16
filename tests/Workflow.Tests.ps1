@@ -63,6 +63,15 @@ Describe 'build.yml verify wiring' {
         $script:buildScript | Should -Match 'startnet.cmd'
     }
 
+    It 'fails fast when oscdimg is missing after the ADK install' {
+        $script:buildYml | Should -Match 'oscdimg not found after installing windows-adk'
+    }
+
+    It 'passes the resolved oscdimg path to the ISO step' {
+        $script:buildScript | Should -Match 'Get-OscdimgPath'
+        $script:buildScript | Should -Match '-OscdimgPath \(Get-OscdimgPath\)'
+    }
+
     It 'loads the shared logging helpers in Test-Stage.ps1 before using them' {
         $script:testStage | Should -Match 'Common.ps1'
         $script:testStage.IndexOf('Common.ps1') | Should -BeLessThan $script:testStage.IndexOf('Write-Step')

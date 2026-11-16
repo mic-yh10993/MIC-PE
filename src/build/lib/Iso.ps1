@@ -12,6 +12,28 @@
 
 $script:IsoMaxBytes = 3.5GB
 
+function Get-OscdimgPath {
+    [CmdletBinding()]
+    param(
+        [string] $AdkRoot = 'C:\Program Files (x86)\Windows Kits\10'
+    )
+
+    # oscdimg ships in the ADK, but the ADK installer does not put its
+    # Deployment Tools directory on PATH, so a bare 'oscdimg' only resolves
+    # when someone added it by hand. Check PATH first, then the well-known
+    # ADK locations (amd64, then x86).
+    $onPath = Get-Command oscdimg -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+
+    foreach ($arch in 'amd64', 'x86') {
+        $candidate = Join-Path $AdkRoot "Assessment and Deployment Kit\Deployment Tools\$arch\Oscdimg\oscdimg.exe"
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+
+    throw [System.InvalidOperationException]::new(
+        'oscdimg not found: install the Windows ADK Deployment Tools or put oscdimg on PATH')
+}
+
 function Get-OscdimgArgs {
     [CmdletBinding()]
     param(
