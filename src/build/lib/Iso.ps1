@@ -10,7 +10,12 @@
     pointed at explicitly.
 #>
 
-$script:IsoMaxBytes = 3.5GB
+# The product target is a <= 3.2 GB ISO (plan.md), but a full 26200 media is
+# ~4.5 GiB (install.wim alone is ~4.1 GiB), so no full-media build can pass
+# a 3.2 GB gate. Shrinking the media (trimming or splitting install.wim)
+# is M7 volume governance, not an M1 gate: this cap only guards against
+# runaway growth, and M7 must lower it again once the media actually fits.
+$script:IsoMaxBytes = 5GB
 
 function Get-OscdimgPath {
     [CmdletBinding()]

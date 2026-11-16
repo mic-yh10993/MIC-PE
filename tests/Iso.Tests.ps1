@@ -67,6 +67,12 @@ Describe 'Get-OscdimgPath' {
 }
 
 Describe 'New-MicpeIso' {
+    It 'allows a full 26200 media through the size gate' {
+        # A full 26200 media is ~4.5 GiB (install.wim alone ~4.1 GiB); the
+        # 3.2 GB product target is M7 volume governance, not an M1 gate.
+        $script:IsoMaxBytes | Should -BeGreaterOrEqual 4.5GB
+    }
+
     It 'throws when the media directory is missing' {
         { New-MicpeIso -MediaDir '/nonexistent/micpe-media' -OutIso '/tmp/x.iso' } |
             Should -Throw '*not found*'
