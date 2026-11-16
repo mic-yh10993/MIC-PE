@@ -98,6 +98,21 @@ Describe 'build.yml verify wiring' {
         $script:buildScript | Should -Match 'Add-Content -LiteralPath \$env:GITHUB_ENV'
     }
 
+    It 'saves and restores -Iso across the dot-source of the QEMU helper' {
+        # Dot-sourcing Invoke-QemuVerify.ps1 binds its param block in the
+        # caller scope and resets $Iso/$TimeoutMin/$QemuPath to their
+        # defaults; Test-Stage.ps1 must save them first and restore them
+        # after, or $Iso comes back empty and the verifier dies on
+        # parameter binding (runs 43884981629 and 43891758991).
+        $dotIdx = $script:testStage.IndexOf("Invoke-QemuVerify.ps1') -ParseOnly")
+        $dotIdx | Should -BeGreaterThan 0
+        $saveIdx = $script:testStage.IndexOf('$dotSourceParams = @{ Iso = $Iso;')
+        $saveIdx | Should -BeGreaterThan 0
+        $saveIdx | Should -BeLessThan $dotIdx
+        $restoreIdx = $script:testStage.IndexOf('$Iso = $dotSourceParams.Iso')
+        $restoreIdx | Should -BeGreaterThan $dotIdx
+    }
+
     It 'does not nest the GITHUB_ENV exports inside the step-summary block' {
         $tokens = $null
         $errors = $null

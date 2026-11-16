@@ -37,7 +37,18 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot '..\build\lib\Common.ps1')
 . (Join-Path $PSScriptRoot 'Assert-Probe.ps1')
+
+# Dot-sourcing a script binds its param block in this scope, and
+# Invoke-QemuVerify.ps1 declares $Iso/$TimeoutMin/$QemuPath too: the bare
+# dot-source below silently reset them to their defaults, so $Iso came back
+# empty and the Invoke-QemuVerify call died on parameter binding (runs
+# 43884981629 and 43891758991 both failed exactly this way). Save the three
+# colliding parameters first and restore them right after.
+$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath }
 . (Join-Path $PSScriptRoot 'Invoke-QemuVerify.ps1') -ParseOnly
+$Iso = $dotSourceParams.Iso
+$TimeoutMin = $dotSourceParams.TimeoutMin
+$QemuPath = $dotSourceParams.QemuPath
 
 if (-not $WorkDir) {
     $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) "micpe-verify-$Stage"

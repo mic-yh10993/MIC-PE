@@ -113,3 +113,15 @@ Describe 'Invoke-QemuVerify preconditions' {
             Should -Throw '*not found*'
     }
 }
+
+Describe 'dot-sourcing the helper' {
+    It 'binds the helper param block in the caller scope, resetting same-named variables' {
+        # This is the trap that killed runs 43884981629 and 43891758991:
+        # Test-Stage.ps1 dot-sources this file for its functions, and the
+        # param block silently reset its $Iso to ''. Callers must save and
+        # restore any same-named variable around the dot-source.
+        $Iso = 'C:\sentinel\MICPE.iso'
+        . "$PSScriptRoot/../src/ci/Invoke-QemuVerify.ps1" -ParseOnly
+        $Iso | Should -Be ''
+    }
+}
