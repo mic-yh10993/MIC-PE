@@ -73,6 +73,56 @@ SkipApps     =0
     }
 }
 
+Describe 'Invoke-UupApi retry' {
+    It 'retries a transient failure and succeeds on a later attempt' {
+        # Run 43977562519 died on a single UUP dump 504, 60 seconds into
+        # the build: one transient gateway error must not burn a build.
+        $script:calls = 0
+        $fake = {
+            param($url)
+            $script:calls++
+            if ($script:calls -lt 3) { throw 'error code: 504' }
+            return @{ response = @{ builds = @{} } }
+        }
+        $null = Invoke-UupApi -Url 'https://api.uupdump.net/listid.php?search=26200' `
+            -Invoke $fake -MaxAttempts 3 -RetryDelaySec 0
+        $script:calls | Should -Be 3
+    }
+
+    It 'throws after the last attempt when the failure persists' {
+        $script:calls = 0
+        $fake = {
+            param($url)
+            $script:calls++
+            throw 'error code: 504'
+        }
+        { Invoke-UupApi -Url 'https://api.uupdump.net/listid.php?search=26200' `
+            -Invoke $fake -MaxAttempts 3 -RetryDelaySec 0 } | Should -Throw '*504*'
+        $script:calls | Should -Be 3
+    }
+
+    It 'does not retry when the first attempt succeeds' {
+        $script:calls = 0
+        $fake = {
+            param($url)
+            $script:calls++
+            return @{ response = @{ builds = @{} } }
+        }
+        $null = Invoke-UupApi -Url 'https://api.uupdump.net/listid.php?search=26200' `
+            -Invoke $fake -MaxAttempts 3 -RetryDelaySec 0
+        $script:calls | Should -Be 1
+    }
+}
+
+Describe 'New-UupDownloadPackage retry' {
+    It 'downloads the conversion package through the network retry helper' {
+        # The package download (uupdump.net/get.php) can hit the same
+        # transient 504 as the list API, so it must retry too.
+        $baseImage = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/lib/BaseImage.ps1') -Raw
+        $baseImage | Should -Match 'Invoke-NetworkWithRetry -Action \{\s+Invoke-WebRequest -Uri \$url'
+    }
+}
+
 Describe 'Get-UupBuild' {
     It 'throws a message containing the request url when nothing matches' {
         $fake = { param($url) @{ response = @{ builds = @{} } } }

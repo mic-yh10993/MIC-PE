@@ -21,19 +21,58 @@ $script:UupApiBase = 'https://api.uupdump.net'
 # and this constant. The tests assert all three match.
 $script:Aria2ExpectedHash = 'b9cd71b275af11b63c33457b0f43f2f2675937070c563e195f223efd7fa4c74b'
 
+function Invoke-NetworkWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $Action,
+
+        [int] $MaxAttempts = 3,
+
+        [int] $RetryDelaySec = 15,
+
+        [string] $Label = 'network call'
+    )
+
+    # UUP dump occasionally answers 504 (run 43977562519 died on exactly
+    # that, 60 seconds into the build): a single transient gateway error
+    # must not burn a whole 66-minute build. Retry transient failures a
+    # few times with growing delays; a persistent failure still throws
+    # after the last attempt.
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            return & $Action
+        }
+        catch {
+            if ($attempt -ge $MaxAttempts) { throw }
+            $delay = $RetryDelaySec * $attempt
+            Write-Warn "$Label failed (attempt $attempt/$MaxAttempts): $($_.Exception.Message); retrying in ${delay}s"
+            if ($delay -gt 0) { Start-Sleep -Seconds $delay }
+        }
+    }
+}
+
 function Invoke-UupApi {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string] $Url,
 
-        [scriptblock] $Invoke
+        [scriptblock] $Invoke,
+
+        [int] $MaxAttempts = 3,
+
+        [int] $RetryDelaySec = 15
     )
 
-    if ($Invoke) {
-        return & $Invoke $Url
-    }
-    return Invoke-RestMethod -Uri $Url -TimeoutSec 120
+    return Invoke-NetworkWithRetry -Action {
+        if ($Invoke) {
+            return & $Invoke $Url
+        }
+        return Invoke-RestMethod -Uri $Url -TimeoutSec 120
+    } -MaxAttempts $MaxAttempts -RetryDelaySec $RetryDelaySec -Label "UUP API $Url"
 }
 
 function Get-UupBuild {
@@ -214,7 +253,9 @@ function New-UupDownloadPackage {
     $zip = Join-Path $OutDir 'uup-package.zip'
 
     Write-SubStep "downloading UUP conversion package for $Uuid ($Lang, $Edition)"
-    Invoke-WebRequest -Uri $url -Method Post -Body $body -OutFile $zip -TimeoutSec 600
+    Invoke-NetworkWithRetry -Action {
+        Invoke-WebRequest -Uri $url -Method Post -Body $body -OutFile $zip -TimeoutSec 600
+    } -Label "UUP package download $url"
     Assert-PathExists -Path $zip -Label 'UUP package archive'
 
     $extractDir = Join-Path $OutDir 'package'
