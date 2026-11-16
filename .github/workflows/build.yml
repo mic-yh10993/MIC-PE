@@ -188,6 +188,7 @@ jobs:
             verify-out/share/micpe-probe.txt
             verify-out/shots/*.png
             verify-out/qemu.log
+            verify-out/micpe-serial.log
           retention-days: 30
           if-no-files-found: warn
           compression-level: 0

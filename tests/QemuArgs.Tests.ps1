@@ -50,6 +50,44 @@ Describe 'Get-QemuArgs' {
         $args3 | Should -Contain '-bios'
         $args3 | Should -Contain 'C:\x\OVMF.fd'
     }
+
+    It 'puts the serial log next to the -D log so the verify upload can collect it' {
+        $serialArgs = Get-QemuArgs -Iso 'C:\x\MICPE.iso' -ShareDir 'C:\x\share' -LogPath '/tmp/verify-out/qemu.log'
+        $serial = @($serialArgs | Where-Object { $_ -like 'file:*micpe-serial.log*' })
+        $serial.Count | Should -Be 1
+        $serial[0] | Should -Match 'verify-out'
+    }
+}
+
+Describe 'ConvertTo-MonitorPath' {
+    It 'turns Windows backslashes into forward slashes for the QEMU monitor' {
+        ConvertTo-MonitorPath -Path 'D:\a\MIC-PE\verify-out\shots\shot-01.ppm' |
+            Should -Be 'D:/a/MIC-PE/verify-out/shots/shot-01.ppm'
+    }
+
+    It 'leaves a path without backslashes alone' {
+        ConvertTo-MonitorPath -Path 'D:/a/b.ppm' | Should -Be 'D:/a/b.ppm'
+    }
+}
+
+Describe 'Save-QemuScreenshot wiring' {
+    BeforeAll {
+        $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
+    }
+
+    It 'sends screendump paths through the monitor-path conversion' {
+        $script:qemuVerify | Should -Match 'ConvertTo-MonitorPath'
+        $script:qemuVerify | Should -Match 'screendump'
+    }
+
+    It 'takes periodic screenshots while waiting for the probe' {
+        $script:qemuVerify | Should -Match 'Save-QemuScreenshot'
+        $script:qemuVerify | Should -Match 'AddMinutes\(10\)'
+    }
+
+    It 'collects PNG evidence, not just the PPM ratio input' {
+        $script:qemuVerify | Should -Match 'shot-\{0:d2\}\.png'
+    }
 }
 
 Describe 'Measure-PpmNonBlackRatio' {

@@ -53,6 +53,10 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match "if: always\(\) && inputs.verify == 'full'"
     }
 
+    It 'uploads the serial log with the verify artifacts' {
+        $script:buildYml | Should -Match 'micpe-serial\.log'
+    }
+
     It 'patches the bundled aria2 verifier before the converter runs' {
         $script:buildScript | Should -Match 'Repair-UupAria2Script'
     }

@@ -74,6 +74,18 @@ function Get-QemuArgs {
     )
 
     $args = [System.Collections.Generic.List[string]]::new()
+    # Serial log goes next to the -D log when one is set, so the verify
+    # artifacts upload can collect it; otherwise it falls back to %TEMP%.
+    # (WinPE console output goes to VGA, not serial, so this mostly holds
+    # bootloader chatter -- but it is the only guest-side text channel we
+    # have, so collect it anyway.)
+    $serialLog = if ($LogPath) {
+        Join-Path (Split-Path -Parent $LogPath) 'micpe-serial.log'
+    }
+    else {
+        Join-Path ([System.IO.Path]::GetTempPath()) 'micpe-serial.log'
+    }
+
     $args.AddRange([string[]] @(
         '-m', "$MemoryMb"
         '-smp', "$CpuCount"
@@ -82,7 +94,7 @@ function Get-QemuArgs {
         '-no-shutdown'
         '-rtc', 'base=localtime'
         '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
-        '-serial', "file:$(Join-Path ([System.IO.Path]::GetTempPath()) 'micpe-serial.log')"
+        '-serial', "file:$serialLog"
     ))
 
     if ($FirmwarePath) {
@@ -135,6 +147,61 @@ function Invoke-MonitorCommand {
     }
     finally {
         $client.Dispose()
+    }
+}
+
+function ConvertTo-MonitorPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    # The QEMU monitor parses backslashes as escapes, so a Windows path like
+    # D:\a\... dies on '\a' ("unsupported escape code") and the screendump
+    # silently produces no file. QEMU on Windows accepts forward slashes.
+    return ($Path -replace '\\', '/')
+}
+
+function Save-QemuScreenshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Port,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ScreenshotDir,
+
+        [Parameter(Mandatory = $true)]
+        [int] $ShotIndex
+    )
+
+    $ppm = Join-Path $ScreenshotDir ("shot-{0:d2}.ppm" -f $ShotIndex)
+    $png = Join-Path $ScreenshotDir ("shot-{0:d2}.png" -f $ShotIndex)
+    try {
+        Invoke-MonitorCommand -Port $Port -Command "screendump `"$(ConvertTo-MonitorPath -Path $ppm)`""
+        if (Test-Path -LiteralPath $ppm) {
+            $ratio = Measure-PpmNonBlackRatio -PpmPath $ppm
+            $ratio | Set-Content -LiteralPath ($ppm -replace '\.ppm$', '.ratio.txt')
+            Write-Host ("    screenshot {0}: {1:P1} non-black" -f (Split-Path -Leaf $ppm), $ratio)
+            if ($env:MICPE_KEEP_PPM -ne '1') {
+                Remove-Item -LiteralPath $ppm -Force -ErrorAction SilentlyContinue
+            }
+        }
+        else {
+            Write-Host "!!! screendump produced no PPM file: $ppm"
+        }
+
+        # The PPM is the machine-readable ratio input; the PNG is the
+        # human-readable evidence the upload step collects. Best effort:
+        # a missing PNG must not fail the run.
+        Invoke-MonitorCommand -Port $Port -Command "screendump `"$(ConvertTo-MonitorPath -Path $png)`""
+        if (-not (Test-Path -LiteralPath $png)) {
+            Write-Host "!!! screendump produced no PNG file: $png"
+        }
+    }
+    catch {
+        Write-Host "!!! screenshot failed: $($_.Exception.Message)"
     }
 }
 
@@ -298,6 +365,7 @@ function Invoke-QemuVerify {
     $process = Start-Process -FilePath $QemuPath -ArgumentList $qemuArgs -PassThru -NoNewWindow
     $deadline = (Get-Date).AddMinutes($TimeoutMin)
     $shotIndex = 0
+    $nextShotAt = (Get-Date).AddMinutes(10)
     $probe = @{}
 
     try {
@@ -316,27 +384,22 @@ function Invoke-QemuVerify {
                 }
             }
 
+            # Periodic screenshots: run 43896578569 waited the full 45
+            # minutes with no probe and no picture of what the guest was
+            # doing. A shot every 10 minutes shows whether it is stuck at
+            # boot, at a prompt, or somewhere else entirely.
+            if ($ScreenshotDir -and (Get-Date) -ge $nextShotAt) {
+                $shotIndex++
+                Save-QemuScreenshot -Port $MonitorPort -ScreenshotDir $ScreenshotDir -ShotIndex $shotIndex
+                $nextShotAt = (Get-Date).AddMinutes(10)
+            }
+
             Start-Sleep -Seconds 10
         }
 
         if ($ScreenshotDir) {
             $shotIndex++
-            $ppm = Join-Path $ScreenshotDir "shot-$('{0:d2}' -f $shotIndex).ppm"
-            $png = Join-Path $ScreenshotDir "shot-$('{0:d2}' -f $shotIndex).png"
-            try {
-                Invoke-MonitorCommand -Port $MonitorPort -Command "screendump `"$ppm`""
-                if (Test-Path -LiteralPath $ppm) {
-                    $ratio = Measure-PpmNonBlackRatio -PpmPath $ppm
-                    $ratio | Set-Content -LiteralPath ($ppm -replace '\.ppm$', '.ratio.txt')
-                    Write-Host ("    screenshot {0}: {1:P1} non-black" -f (Split-Path -Leaf $ppm), $ratio)
-                    if ($env:MICPE_KEEP_PPM -ne '1') {
-                        Remove-Item -LiteralPath $ppm -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            }
-            catch {
-                Write-Host "!!! screenshot failed: $($_.Exception.Message)"
-            }
+            Save-QemuScreenshot -Port $MonitorPort -ScreenshotDir $ScreenshotDir -ShotIndex $shotIndex
         }
     }
     finally {
