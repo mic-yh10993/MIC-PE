@@ -280,7 +280,14 @@ if ($result) {
             "| ISO | $(Format-ByteSize -Bytes $result.IsoBytes) |"
             "| SHA256 | ``$((Get-FileHash -LiteralPath $result.IsoPath -Algorithm SHA256).Hash)`` |"
         ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+    }
 
+    # Export the artifact paths for later steps. This must not live inside
+    # the summary block above: on a runner without GITHUB_STEP_SUMMARY the
+    # four variables would silently never be written, and the verify step
+    # would then fail with an empty -Iso. Guarded on GITHUB_ENV itself so
+    # local runs (where the variable is unset) keep working.
+    if ($env:GITHUB_ENV) {
         "ISO_PATH=$($result.IsoPath)" | Add-Content -LiteralPath $env:GITHUB_ENV
         "BOOT_WIM_PATH=$($result.BootWim)" | Add-Content -LiteralPath $env:GITHUB_ENV
         "WIM_BYTES=$($result.WimBytes)" | Add-Content -LiteralPath $env:GITHUB_ENV

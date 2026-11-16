@@ -76,6 +76,43 @@ Describe 'build.yml verify wiring' {
         $script:testStage | Should -Match 'Common.ps1'
         $script:testStage.IndexOf('Common.ps1') | Should -BeLessThan $script:testStage.IndexOf('Write-Step')
     }
+
+    It 'passes the ISO path to the QEMU verifier through a step-level env mapping' {
+        # run 43884981629 showed the runner's env display listing ISO_PATH
+        # while the pwsh process saw an empty string, so the path is now
+        # resolved by the runner into IN_ISO at step setup (the same
+        # mechanism that already carries IN_STAGE and the upload steps).
+        $script:buildYml | Should -Match 'IN_ISO:'
+        $script:buildYml | Should -Match '\$\{\{ env\.ISO_PATH \}\}'
+        $script:buildYml | Should -Match '-Iso \$iso'
+        $script:buildYml | Should -Not -Match '-Iso \$env:ISO_PATH'
+    }
+
+    It 'fails fast in the verify step when the ISO path is empty or missing' {
+        $script:buildYml | Should -Match 'no ISO path was passed'
+        $script:buildYml | Should -Match "ISO file not found at"
+    }
+
+    It 'exports artifact paths whenever GITHUB_ENV is set, even without a step summary' {
+        $script:buildScript | Should -Match 'if \(\$env:GITHUB_ENV\)'
+        $script:buildScript | Should -Match 'Add-Content -LiteralPath \$env:GITHUB_ENV'
+    }
+
+    It 'does not nest the GITHUB_ENV exports inside the step-summary block' {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $repoRoot 'src/build/Build-Micpe.ps1'), [ref] $tokens, [ref] $errors)
+        $errors.Count | Should -Be 0
+        $summaryIf = $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses.Count -gt 0 -and
+                    $node.Clauses[0].Item1.Extent.Text -eq '$env:GITHUB_STEP_SUMMARY'
+            }, $true)
+        @($summaryIf).Count | Should -Be 1
+        $summaryIf[0].Extent.Text | Should -Not -Match 'GITHUB_ENV'
+    }
 }
 
 Describe 'test workflow' {

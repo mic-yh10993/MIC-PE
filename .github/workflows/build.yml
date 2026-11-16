@@ -128,9 +128,25 @@ jobs:
         shell: pwsh
         env:
           IN_STAGE: ${{ inputs.stage || 'all' }}
+          IN_ISO: ${{ env.ISO_PATH }}
         run: |
+          # The ISO path is resolved by the runner into IN_ISO (the same
+          # mechanism that already carries IN_STAGE and the upload steps'
+          # ${{ env.ISO_PATH }}), instead of reading $env:ISO_PATH directly:
+          # the previous run showed the runner's env display listing ISO_PATH
+          # while the pwsh process saw an empty string, so the value is now
+          # pinned at step setup. Diagnose first, bind second.
+          Write-Host ("ISO_PATH env: [{0}]" -f $env:ISO_PATH)
+          Write-Host ("IN_ISO env: [{0}]" -f $env:IN_ISO)
+          $iso = if ($env:IN_ISO) { $env:IN_ISO } elseif ($env:ISO_PATH) { $env:ISO_PATH } else { '' }
+          if (-not $iso) {
+            throw 'Verify in QEMU: no ISO path was passed (IN_ISO and ISO_PATH are both empty); the build step did not export ISO_PATH'
+          }
+          if (-not (Test-Path -LiteralPath $iso)) {
+            throw "Verify in QEMU: ISO file not found at '$iso'"
+          }
           $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
-          ./src/ci/Test-Stage.ps1 -Iso $env:ISO_PATH -Stage $env:IN_STAGE `
+          ./src/ci/Test-Stage.ps1 -Iso $iso -Stage $env:IN_STAGE `
             -WorkDir "$env:GITHUB_WORKSPACE\verify-out" -QemuPath $qemu -TimeoutMin 45
 
       - name: Verify (static)
