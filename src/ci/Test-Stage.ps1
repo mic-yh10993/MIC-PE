@@ -35,6 +35,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot '..\build\lib\Common.ps1')
 . (Join-Path $PSScriptRoot 'Assert-Probe.ps1')
 . (Join-Path $PSScriptRoot 'Invoke-QemuVerify.ps1') -ParseOnly
 

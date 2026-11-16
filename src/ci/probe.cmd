@@ -37,27 +37,27 @@ if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
 rem --- shell -----------------------------------------------------------------
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
-if errorlevel 1 (echo explorer=0) else (echo explorer=1) >> "%PROBE_OUT%"
+if errorlevel 1 (echo explorer=0 >> "%PROBE_OUT%") else (echo explorer=1 >> "%PROBE_OUT%")
 
 tasklist /fi "imagename eq dwm.exe" /nh 2>nul | find /i "dwm.exe" >nul
-if errorlevel 1 (echo dwm=0) else (echo dwm=1) >> "%PROBE_OUT%"
+if errorlevel 1 (echo dwm=0 >> "%PROBE_OUT%") else (echo dwm=1 >> "%PROBE_OUT%")
 
 rem The shell is considered ready only after it has survived a settle period;
 rem a crash-on-start explorer still appears in tasklist for a second or two.
 ping -n 16 127.0.0.1 >nul 2>&1
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
-if errorlevel 1 (echo shell_ready=0) else (echo shell_ready=1) >> "%PROBE_OUT%"
+if errorlevel 1 (echo shell_ready=0 >> "%PROBE_OUT%") else (echo shell_ready=1 >> "%PROBE_OUT%")
 
 rem --- network ---------------------------------------------------------------
 set "IPV4="
 for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
     if not defined IPV4 set "IPV4=%%A"
 )
-if defined IPV4 (echo network=!IPV4: =!) else (echo network=pending) >> "%PROBE_OUT%"
+if defined IPV4 (echo network=!IPV4: =! >> "%PROBE_OUT%") else (echo network=pending >> "%PROBE_OUT%")
 
 rem --- input method ----------------------------------------------------------
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload" 2>nul | find /i "0804" >nul
-if errorlevel 1 (echo ime=0) else (echo ime=1) >> "%PROBE_OUT%"
+if errorlevel 1 (echo ime=0 >> "%PROBE_OUT%") else (echo ime=1 >> "%PROBE_OUT%")
 
 rem --- uwp -------------------------------------------------------------------
 if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
@@ -69,13 +69,13 @@ if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
 rem Keys are spelled out rather than built from a suffix so the CI-side
 rem assertion table can be grepped against this file literally.
 call :probe_uwp SystemSettings "shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"
-if errorlevel 1 (echo uwp_launch_settings=0) else (echo uwp_launch_settings=1) >> "%PROBE_OUT%"
+if errorlevel 1 (echo uwp_launch_settings=0 >> "%PROBE_OUT%") else (echo uwp_launch_settings=1 >> "%PROBE_OUT%")
 
 call :probe_uwp Microsoft.Photos "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
-if errorlevel 1 (echo uwp_launch_photos=0) else (echo uwp_launch_photos=1) >> "%PROBE_OUT%"
+if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")
 
 call :probe_uwp Microsoft.ZuneMusic "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
-if errorlevel 1 (echo uwp_launch_media=0) else (echo uwp_launch_media=1) >> "%PROBE_OUT%"
+if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
 
 rem --- payload ---------------------------------------------------------------
 set "PAYLOAD=1"

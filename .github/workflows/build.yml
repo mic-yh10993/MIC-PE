@@ -106,8 +106,42 @@ jobs:
 
           ./src/build/Build-Micpe.ps1 @buildArgs
 
+      - name: Install QEMU
+        if: inputs.verify == 'full'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
+            choco install qemu -y --no-progress
+          }
+          $qemu = (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue).Source
+          if (-not $qemu) { $qemu = 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
+          if (-not (Test-Path -LiteralPath $qemu)) { throw 'qemu-system-x86_64 not found after install' }
+          "QEMU_PATH=$qemu" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Verify in QEMU
+        if: inputs.verify == 'full'
+        shell: pwsh
+        env:
+          IN_STAGE: ${{ inputs.stage || 'all' }}
+        run: |
+          $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
+          ./src/ci/Test-Stage.ps1 -Iso $env:ISO_PATH -Stage $env:IN_STAGE `
+            -WorkDir "$env:GITHUB_WORKSPACE\verify-out" -QemuPath $qemu -TimeoutMin 45
+
+      - name: Verify (static)
+        if: inputs.verify == 'static'
+        shell: pwsh
+        run: |
+          if (-not $env:ISO_PATH -or -not (Test-Path -LiteralPath $env:ISO_PATH)) {
+            throw 'ISO not found'
+          }
+          $iso = Get-Item -LiteralPath $env:ISO_PATH
+          Write-Host ("ISO: {0:N2} GB" -f ($iso.Length / 1GB))
+          & wimlib-imagex info $env:BOOT_WIM_PATH | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'wimlib-imagex info failed' }
+
       - name: Upload ISO
-        if: env.ISO_PATH != ''
+        if: always() && env.ISO_PATH != ''
         uses: actions/upload-artifact@v4
         with:
           name: micpe-iso-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
@@ -116,10 +150,23 @@ jobs:
           compression-level: 0
 
       - name: Upload boot.wim
-        if: env.BOOT_WIM_PATH != ''
+        if: always() && env.BOOT_WIM_PATH != ''
         uses: actions/upload-artifact@v4
         with:
           name: micpe-bootwim-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
           path: ${{ env.BOOT_WIM_PATH }}
           retention-days: 30
+          compression-level: 0
+
+      - name: Upload verify artifacts
+        if: always() && inputs.verify == 'full'
+        uses: actions/upload-artifact@v4
+        with:
+          name: micpe-verify-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
+          path: |
+            verify-out/share/micpe-probe.txt
+            verify-out/shots/*.png
+            verify-out/qemu.log
+          retention-days: 30
+          if-no-files-found: warn
           compression-level: 0

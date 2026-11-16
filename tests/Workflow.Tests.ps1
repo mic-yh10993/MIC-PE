@@ -35,6 +35,40 @@ Describe 'build workflow' {
     }
 }
 
+Describe 'build.yml verify wiring' {
+    BeforeAll {
+        $script:buildYml = Get-Content -LiteralPath (Join-Path $repoRoot '.github/workflows/build.yml') -Raw
+        $script:testStage = Get-Content -LiteralPath (Join-Path $repoRoot 'src/ci/Test-Stage.ps1') -Raw
+        $script:buildScript = Get-Content -LiteralPath (Join-Path $repoRoot 'src/build/Build-Micpe.ps1') -Raw
+    }
+
+    It 'runs the QEMU verifier when verify=full' {
+        $script:buildYml | Should -Match 'Test-Stage.ps1'
+        $script:buildYml | Should -Match "inputs.verify == 'full'"
+        $script:buildYml | Should -Match 'qemu'
+    }
+
+    It 'uploads probe artifacts even when verification fails' {
+        $script:buildYml | Should -Match 'micpe-probe.txt'
+        $script:buildYml | Should -Match "if: always\(\) && inputs.verify == 'full'"
+    }
+
+    It 'patches the bundled aria2 verifier before the converter runs' {
+        $script:buildScript | Should -Match 'Repair-UupAria2Script'
+    }
+
+    It 'injects startnet.cmd and probe.cmd into the media boot.wim' {
+        $script:buildScript | Should -Match 'Mount-WimImage'
+        $script:buildScript | Should -Match 'probe.cmd'
+        $script:buildScript | Should -Match 'startnet.cmd'
+    }
+
+    It 'loads the shared logging helpers in Test-Stage.ps1 before using them' {
+        $script:testStage | Should -Match 'Common.ps1'
+        $script:testStage.IndexOf('Common.ps1') | Should -BeLessThan $script:testStage.IndexOf('Write-Step')
+    }
+}
+
 Describe 'test workflow' {
     It 'runs the syntax check and Pester through the CI entry point' {
         $workflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github/workflows/test.yml') -Raw
@@ -48,5 +82,10 @@ Describe 'startnet.cmd' {
         $script = Get-Content -LiteralPath (Join-Path $repoRoot 'src/shell/startnet.cmd') -Raw
         $script | Should -Match 'wpeinit'
         $script | Should -Match 'cmd\.exe'
+    }
+
+    It 'starts the probe from startnet.cmd when present' {
+        $script = Get-Content -LiteralPath (Join-Path $repoRoot 'src/shell/startnet.cmd') -Raw
+        $script | Should -Match 'probe.cmd'
     }
 }

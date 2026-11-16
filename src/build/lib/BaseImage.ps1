@@ -16,6 +16,11 @@
 
 $script:UupApiBase = 'https://api.uupdump.net'
 
+# SHA256 of the aria2c.exe we trust, pinned in three places that must agree:
+# the pre-seed in Build-Micpe.ps1, the default of src/build/uup/get_aria2.ps1,
+# and this constant. The tests assert all three match.
+$script:Aria2ExpectedHash = 'b9cd71b275af11b63c33457b0f43f2f2675937070c563e195f223efd7fa4c74b'
+
 function Invoke-UupApi {
     [CmdletBinding()]
     param(
@@ -227,6 +232,42 @@ function New-UupDownloadPackage {
         "UUP package did not contain ConvertConfig.ini. URL: $url")
 
     return $extractDir
+}
+
+function Repair-UupAria2Script {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $PackageDir,
+
+        [string] $ReplacementScript
+    )
+
+    # The bundled files\get_aria2.ps1 calls Get-FileHash, which is not available
+    # in the PowerShell session the converter's .cmd spawns. Replace it with our
+    # .NET-only verifier (same contract: pinned hash, same download URL, same
+    # "tampered with" failure) before the downloader runs.
+    if (-not $ReplacementScript) {
+        $ReplacementScript = Join-Path $PSScriptRoot '..\uup\get_aria2.ps1'
+    }
+
+    $target = Join-Path $PackageDir 'files\get_aria2.ps1'
+    if (-not (Test-Path -LiteralPath $target)) {
+        Write-Warn 'UUP package has no files\get_aria2.ps1; nothing to patch'
+        return $false
+    }
+
+    Assert-PathExists -Path $ReplacementScript -Label 'aria2 verifier replacement'
+    Copy-Item -LiteralPath $ReplacementScript -Destination $target -Force
+
+    $content = Get-Content -LiteralPath $target -Raw
+    Assert-True -Condition (-not (Test-ScriptInvokesCommand -Path $target -CommandName 'Get-FileHash')) -Message (
+        'patched get_aria2.ps1 still calls Get-FileHash')
+    Assert-True -Condition ($content -match [regex]::Escape($script:Aria2ExpectedHash)) -Message (
+        'patched get_aria2.ps1 does not contain the pinned aria2c hash')
+
+    Write-SubStep 'patched files\get_aria2.ps1 to verify aria2c without Get-FileHash'
+    return $true
 }
 
 function Get-BaseWims {

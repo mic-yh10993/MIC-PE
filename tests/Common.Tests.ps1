@@ -66,6 +66,35 @@ Describe 'Format-ByteSize' {
     }
 }
 
+Describe 'Test-ScriptInvokesCommand' {
+    It 'returns true for a real invocation' {
+        $f = New-TemporaryFile
+        Set-Content -LiteralPath $f -Value 'Get-FileHash -Path x -Algorithm SHA256'
+        Test-ScriptInvokesCommand -Path $f -CommandName 'Get-FileHash' | Should -Be $true
+    }
+
+    It 'returns false when the name only appears in a comment' {
+        $f = New-TemporaryFile
+        Set-Content -LiteralPath $f -Value @'
+# Get-FileHash is not available in the spawning session
+Write-Host 'ok'
+'@
+        Test-ScriptInvokesCommand -Path $f -CommandName 'Get-FileHash' | Should -Be $false
+    }
+
+    It 'returns false when the name only appears in a string' {
+        $f = New-TemporaryFile
+        Set-Content -LiteralPath $f -Value "Write-Host 'Get-FileHash'"
+        Test-ScriptInvokesCommand -Path $f -CommandName 'Get-FileHash' | Should -Be $false
+    }
+
+    It 'throws on a syntax error' {
+        $f = New-TemporaryFile
+        Set-Content -LiteralPath $f -Value 'function {'
+        { Test-ScriptInvokesCommand -Path $f -CommandName 'Get-FileHash' } | Should -Throw '*parse*'
+    }
+}
+
 Describe 'Get-MicpeTempDir' {
     It 'creates the directory under the given root' {
         $root = New-Item -ItemType Directory -Path (Join-Path $script:TempRoot "micpe-root-$(Get-Random)")

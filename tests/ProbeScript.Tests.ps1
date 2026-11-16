@@ -47,6 +47,15 @@ Describe 'probe.cmd' {
         $script:probe | Should -Match 'shutdown'
     }
 
+    It 'redirects both branches of every probe if/else into the probe file' {
+        # A redirect after the closing paren only covers the else branch, so a
+        # 0 value (and the network line) would leak to the console instead of
+        # the probe file. Every branch must carry its own redirect.
+        $script:probe | Should -Not -Match 'else \(echo [^)]*\) >>'
+        $script:probe | Should -Match 'echo explorer=0 >> "%PROBE_OUT%"'
+        $script:probe | Should -Match 'echo network=pending >> "%PROBE_OUT%"'
+    }
+
     It 'writes every key the stage tables assert' {
         . (Join-Path $repoRoot 'src/ci/Assert-Probe.ps1')
         $keys = [System.Collections.Generic.HashSet[string]]::new()

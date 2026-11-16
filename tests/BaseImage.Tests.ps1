@@ -127,6 +127,99 @@ Describe 'Build-Micpe.ps1 aria2 pre-seeding' {
     }
 }
 
+Describe 'Repair-UupAria2Script' {
+    It 'replaces the bundled verifier and removes Get-FileHash' {
+        $pkg = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-uup-{0}" -f [guid]::NewGuid())
+        $files = New-Item -ItemType Directory -Path (Join-Path $pkg 'files') -Force
+        Set-Content -LiteralPath (Join-Path $files 'get_aria2.ps1') -Value @'
+# bundled verifier (simulated)
+Get-FileHash -Path files\aria2c.exe -Algorithm SHA256
+'@
+        $result = Repair-UupAria2Script -PackageDir $pkg
+        $result | Should -Be $true
+        $patched = Join-Path $files 'get_aria2.ps1'
+        Test-ScriptInvokesCommand -Path $patched -CommandName 'Get-FileHash' |
+            Should -Be $false
+        $patchedContent = Get-Content -LiteralPath $patched -Raw
+        $patchedContent | Should -Match 'Verifying aria2c.exe'
+    }
+
+    It 'refuses a replacement that actually calls Get-FileHash' {
+        $pkg = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-uup-{0}" -f [guid]::NewGuid())
+        $files = New-Item -ItemType Directory -Path (Join-Path $pkg 'files') -Force
+        Set-Content -LiteralPath (Join-Path $files 'get_aria2.ps1') -Value '# bundled'
+        $bad = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-bad-{0}.ps1" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $bad -Value @'
+# mentions Get-FileHash in a comment, but also calls it:
+Get-FileHash -Path x -Algorithm SHA256
+'@
+        { Repair-UupAria2Script -PackageDir $pkg -ReplacementScript $bad } |
+            Should -Throw '*Get-FileHash*'
+    }
+
+    It 'returns false without throwing when the bundled script is absent' {
+        $pkg = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-uup-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $pkg -Force | Out-Null
+        $result = Repair-UupAria2Script -PackageDir $pkg
+        $result | Should -Be $false
+    }
+}
+
+Describe 'aria2c verifier replacement script' {
+    BeforeAll {
+        $script:Verifier = Join-Path $PSScriptRoot '../src/build/uup/get_aria2.ps1'
+        $script:Pwsh = (Get-Command pwsh -ErrorAction Stop).Source
+    }
+
+    It 'exits 0 without downloading when the binary matches the pinned hash' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-aria2-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $scriptCopy = Join-Path $dir 'get_aria2.ps1'
+        Copy-Item -LiteralPath $script:Verifier -Destination $scriptCopy
+        $bin = Join-Path $dir 'aria2c.exe'
+        [System.IO.File]::WriteAllText($bin, 'fake aria2 binary')
+        $hash = (Get-FileHash -LiteralPath $bin -Algorithm SHA256).Hash
+
+        $out = & $script:Pwsh -NoProfile -File $scriptCopy -ExpectedHash $hash -DownloadUrl 'https://example.invalid/aria2c.exe' 2>&1
+        $code = $LASTEXITCODE
+        $code | Should -Be 0
+        ($out -join "`n") | Should -Match 'Verifying aria2c.exe'
+    }
+
+    It 'exits 1 with the tampered message when the download still mismatches' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-aria2-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $scriptCopy = Join-Path $dir 'get_aria2.ps1'
+        Copy-Item -LiteralPath $script:Verifier -Destination $scriptCopy
+        $bin = Join-Path $dir 'aria2c.exe'
+        [System.IO.File]::WriteAllText($bin, 'fake aria2 binary')
+        $wrong = Join-Path $dir 'wrong.bin'
+        [System.IO.File]::WriteAllText($wrong, 'different content')
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $expected = ([System.BitConverter]::ToString(
+            $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes('expected but absent'))) -replace '-', '').ToLower()
+        $url = ([System.Uri]::new($wrong)).AbsoluteUri
+
+        $out = & $script:Pwsh -NoProfile -File $scriptCopy -ExpectedHash $expected -DownloadUrl $url 2>&1
+        $code = $LASTEXITCODE
+        $code | Should -Be 1
+        ($out -join "`n") | Should -Match 'tampered'
+    }
+
+    It 'pins the same hash as Build-Micpe.ps1 and BaseImage.ps1' {
+        $lib = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/lib/BaseImage.ps1') -Raw
+        $match = [regex]::Match($lib, "Aria2ExpectedHash = '([0-9a-f]{64})'")
+        $match.Success | Should -Be $true
+        $hash = $match.Groups[1].Value
+        $build = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/Build-Micpe.ps1') -Raw
+        $build | Should -Match $hash
+        $scriptText = Get-Content -LiteralPath $script:Verifier -Raw
+        $scriptText | Should -Match $hash
+        Test-ScriptInvokesCommand -Path $script:Verifier -CommandName 'Get-FileHash' |
+            Should -Be $false
+    }
+}
+
 Describe 'Get-BaseWims' {
     It 'throws when the iso is missing' {
         { Get-BaseWims -IsoPath (Join-Path $script:TempRoot 'micpe-absent.iso') -OutDir $script:TempRoot } |

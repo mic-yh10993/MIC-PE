@@ -153,6 +153,13 @@ function Invoke-BaseStep {
         Write-SubStep 'aria2c.exe already verified'
     }
 
+    # The bundled files\get_aria2.ps1 calls Get-FileHash, which is not
+    # available in the PowerShell session the converter's .cmd spawns
+    # (observed: CommandNotFoundException -> "aria2c.exe appears to be
+    # tampered with" -> uup_download_windows.cmd exit 1). Replace it with
+    # our .NET-only verifier; aria2c.exe itself was already verified above.
+    $null = Repair-UupAria2Script -PackageDir $packageDir
+
     Write-Step 'converting UUP files into an ISO (this takes 40-90 minutes)'
     Push-Location $packageDir
     try {
@@ -195,6 +202,28 @@ function Invoke-ReseedStep {
     }
 
     Copy-Item -LiteralPath $baseBoot -Destination $mediaBoot -Force
+
+    # Inject the MICPE boot files so the image can self-check: the repo's
+    # startnet.cmd (which calls probe.cmd when present) and probe.cmd itself.
+    # Mounted with DISM and committed; a failure here discards the mount so
+    # a half-injected image never ships.
+    Write-Step 'injecting MICPE boot files into boot.wim'
+    $startnet = Join-Path $repoRoot 'src\shell\startnet.cmd'
+    $probe = Join-Path $repoRoot 'src\ci\probe.cmd'
+    Assert-PathExists -Path $startnet -Label 'startnet.cmd'
+    Assert-PathExists -Path $probe -Label 'probe.cmd'
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        $system32 = Join-Path $paths.Mount 'Windows\System32'
+        Copy-Item -LiteralPath $startnet -Destination (Join-Path $system32 'startnet.cmd') -Force
+        Copy-Item -LiteralPath $probe -Destination (Join-Path $system32 'probe.cmd') -Force
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
     Assert-BootWimSize -WimPath $mediaBoot
 }
 

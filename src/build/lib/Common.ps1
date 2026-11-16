@@ -70,6 +70,37 @@ function Assert-PathExists {
     }
 }
 
+function Test-ScriptInvokesCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $CommandName
+    )
+
+    # Parse the script and look for a real command invocation. A plain text
+    # search would also match comments and strings that merely mention the
+    # command name, which is documentation, not a call.
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref] $tokens, [ref] $errors)
+    if ($errors.Count -gt 0) {
+        throw [System.InvalidOperationException]::new("failed to parse ${Path}: $($errors[0].Message)")
+    }
+
+    $found = $ast.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.CommandElements.Count -gt 0 -and
+                $node.CommandElements[0].Extent.Text -eq $CommandName
+        },
+        $true)
+    return (@($found).Count -gt 0)
+}
+
 function Format-ByteSize {
     [CmdletBinding()]
     param(
