@@ -135,10 +135,18 @@ function Invoke-MonitorCommand {
         [Parameter(Mandatory = $true)]
         [string] $Command,
 
-        [int] $ReadDelayMs = 800
+        [int] $ReadDelayMs = 800,
+
+        # Read the monitor's reply back (greeting + command output + prompt)
+        # instead of fire-and-forget: a rejected command (bad key name,
+        # unknown command) is otherwise invisible, and run 43951915833
+        # showed sendkey doing nothing for 45 minutes without a trace.
+        # Off by default: screendump judges success by the file it makes.
+        [switch] $ReadResponse
     )
 
     $client = [System.Net.Sockets.TcpClient]::new()
+    $response = ''
     try {
         $client.Connect('127.0.0.1', [int] $Port)
         $stream = $client.GetStream()
@@ -146,12 +154,28 @@ function Invoke-MonitorCommand {
         $writer.AutoFlush = $true
         $writer.WriteLine($Command)
         Start-Sleep -Milliseconds $ReadDelayMs
+        if ($ReadResponse) {
+            $stream.ReadTimeout = 2000
+            $reader = [System.IO.StreamReader]::new($stream)
+            $buffer = [char[]]::new(4096)
+            try {
+                while ($true) {
+                    $read = $reader.Read($buffer, 0, $buffer.Length)
+                    if ($read -le 0) { break }
+                    $response += [string]::new($buffer, 0, $read)
+                }
+            }
+            catch [System.IO.IOException] {
+                # Read timeout: the monitor has said all it will say.
+            }
+        }
         $writer.WriteLine('')
         Start-Sleep -Milliseconds 300
     }
     finally {
         $client.Dispose()
     }
+    return $response
 }
 
 function ConvertTo-MonitorPath {
@@ -178,15 +202,70 @@ function Send-QemuBootKey {
     # DVD..." and, with no other boot device attached, just sits there: run
     # 43912243734 produced 5 identical screenshots of that prompt over 45
     # minutes, and the PE never started. Answer it with Enter so the PE
-    # actually boots. Best effort: a missed key must not fail the run, the
-    # caller repeats once.
+    # actually boots. The monitor's reply is read back and logged: run
+    # 43951915833 sent the key every 31s for the whole run and the guest
+    # still never moved, with no trace of why -- a rejected sendkey must
+    # show up in the log instead of vanishing.
     try {
-        Invoke-MonitorCommand -Port $Port -Command 'sendkey ret'
-        Write-Host '    boot key sent (sendkey ret)'
+        $response = Invoke-MonitorCommand -Port $Port -Command 'sendkey ret' -ReadResponse
+        $flat = if ($response) { ($response -replace '\s+', ' ').Trim() } else { '' }
+        if ($flat -match 'error|unknown|invalid') {
+            Write-Host "!!! boot key rejected by monitor: $flat"
+        }
+        elseif ($flat) {
+            Write-Host "    boot key sent (sendkey ret) -- monitor: $flat"
+        }
+        else {
+            Write-Host '    boot key sent (sendkey ret)'
+        }
     }
     catch {
         Write-Host "!!! boot key failed: $($_.Exception.Message)"
     }
+}
+
+function Find-OvmfCode {
+    [CmdletBinding()]
+    param(
+        [string] $QemuPath = 'qemu-system-x86_64'
+    )
+
+    # The Windows ISO's EFI bootloader starts bootmgr directly, with no
+    # "Press any key" prompt at all -- so when OVMF is available the
+    # verifier prefers UEFI boot and the whole sendkey problem disappears.
+    # The choco QEMU layout on the runner is not pinned down, so check the
+    # usual spots and fall back to a shallow search under the QEMU dir.
+    $dirs = [System.Collections.Generic.List[string]]::new()
+    $qemuExe = $null
+    if ($QemuPath -and (Test-Path -LiteralPath $QemuPath -ErrorAction SilentlyContinue)) {
+        $qemuExe = (Resolve-Path -LiteralPath $QemuPath).Path
+    }
+    else {
+        $qemuExe = (Get-Command $QemuPath -ErrorAction SilentlyContinue).Source
+    }
+    if ($qemuExe) { $dirs.Add((Split-Path -Parent $qemuExe)) }
+    # Windows-only install locations: joining a 'C:' drive path on Linux
+    # throws (there is no C: drive), so only add them on Windows. The
+    # function must return $null -- not throw -- when OVMF is absent, or
+    # the Linux Test workflow breaks.
+    if ($IsWindows) {
+        $dirs.Add('C:\Program Files\qemu')
+        $dirs.Add('C:\Program Files (x86)\qemu')
+    }
+
+    foreach ($dir in $dirs) {
+        foreach ($sub in @('', 'share', 'share\qemu')) {
+            $candidate = Join-Path (Join-Path $dir $sub) 'OVMF_CODE.fd'
+            if ($null -ne $candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+        }
+    }
+    foreach ($dir in $dirs) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $found = Get-ChildItem -LiteralPath $dir -Recurse -Depth 2 -Filter 'OVMF_CODE*.fd' `
+            -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return $null
 }
 
 function Save-QemuScreenshot {
@@ -358,6 +437,13 @@ function Invoke-QemuVerify {
 
         [string] $ProbeFileName = 'micpe-probe.txt',
 
+        # Which firmware to boot: auto prefers UEFI (OVMF) when it is
+        # installed, because the Windows ISO's EFI bootloader skips the
+        # "Press any key" prompt entirely; uefi requires OVMF and fails
+        # fast when it is missing; bios forces SeaBIOS + sendkey.
+        [ValidateSet('auto', 'uefi', 'bios')]
+        [string] $Firmware = 'auto',
+
         # Seconds after QEMU starts before answering the "Press any key to
         # boot from CD or DVD..." prompt, and the interval for repeating it.
         # SeaBIOS under TCG is slow: run 43939552552 sent the key at +21s
@@ -383,6 +469,30 @@ function Invoke-QemuVerify {
     $probePath = Join-Path $ShareDir $ProbeFileName
     if (Test-Path -LiteralPath $probePath) {
         Remove-Item -LiteralPath $probePath -Force
+    }
+
+    if (-not $FirmwarePath) {
+        switch ($Firmware) {
+            'bios' {
+                Write-Host '    firmware: SeaBIOS (forced)'
+            }
+            'uefi' {
+                $FirmwarePath = Find-OvmfCode -QemuPath $QemuPath
+                if (-not $FirmwarePath) {
+                    throw [System.InvalidOperationException]::new('Firmware=uefi but no OVMF_CODE.fd was found near the QEMU install')
+                }
+                Write-Host "    firmware: OVMF (UEFI) $FirmwarePath"
+            }
+            default {
+                $FirmwarePath = Find-OvmfCode -QemuPath $QemuPath
+                if ($FirmwarePath) {
+                    Write-Host "    firmware: OVMF (UEFI) $FirmwarePath"
+                }
+                else {
+                    Write-Host '    firmware: SeaBIOS (no OVMF found, falling back to sendkey)'
+                }
+            }
+        }
     }
 
     $qemuArgs = Get-QemuArgs -Iso $Iso -ShareDir $ShareDir -MonitorPort $MonitorPort `

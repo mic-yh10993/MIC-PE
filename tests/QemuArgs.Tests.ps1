@@ -104,9 +104,63 @@ Describe 'Send-QemuBootKey' {
         }
     }
 
+    It 'reads the monitor reply back instead of fire-and-forget' {
+        Mock Invoke-MonitorCommand { return '(qemu) ' }
+        Send-QemuBootKey -Port '4444'
+        Should -Invoke Invoke-MonitorCommand -Times 1 -Exactly -ParameterFilter {
+            $ReadResponse -eq $true
+        }
+    }
+
     It 'never fails the run when the monitor is unreachable' {
         Mock Invoke-MonitorCommand { throw 'no monitor' }
         { Send-QemuBootKey -Port '4444' } | Should -Not -Throw
+    }
+
+    It 'never fails the run when the monitor rejects the key' {
+        Mock Invoke-MonitorCommand { return 'Error: invalid key' }
+        { Send-QemuBootKey -Port '4444' } | Should -Not -Throw
+    }
+}
+
+Describe 'Find-OvmfCode' {
+    BeforeAll {
+        $script:fakeQemuDir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-fake-$(Get-Random)"
+        New-Item -ItemType Directory -Path $script:fakeQemuDir -Force | Out-Null
+        $script:fakeQemu = Join-Path $script:fakeQemuDir 'qemu-system-x86_64.exe'
+        New-Item -ItemType File -Path $script:fakeQemu -Force | Out-Null
+    }
+
+    It 'returns null when no OVMF file is anywhere near the QEMU install' {
+        Find-OvmfCode -QemuPath $script:fakeQemu | Should -BeNullOrEmpty
+    }
+
+    It 'finds OVMF_CODE.fd under the share directory' {
+        $shareDir = Join-Path $script:fakeQemuDir 'share'
+        New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+        $ovmf = Join-Path $shareDir 'OVMF_CODE.fd'
+        New-Item -ItemType File -Path $ovmf -Force | Out-Null
+        Find-OvmfCode -QemuPath $script:fakeQemu | Should -Be $ovmf
+    }
+}
+
+Describe 'Invoke-QemuVerify firmware selection' {
+    BeforeAll {
+        $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
+    }
+
+    It 'prefers UEFI boot when OVMF is installed' {
+        $script:qemuVerify | Should -Match 'Find-OvmfCode'
+        $script:qemuVerify | Should -Match "Firmware = 'auto'"
+    }
+
+    It 'fails fast when UEFI is forced but OVMF is missing' {
+        $script:qemuVerify | Should -Match 'Firmware=uefi but no OVMF_CODE.fd was found'
+    }
+
+    It 'can still force SeaBIOS with the sendkey fallback' {
+        $script:qemuVerify | Should -Match "'bios'"
+        $script:qemuVerify | Should -Match 'SeaBIOS \(forced\)'
     }
 }
 

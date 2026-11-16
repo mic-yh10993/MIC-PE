@@ -28,6 +28,9 @@ param(
 
     [string] $QemuPath = 'qemu-system-x86_64',
 
+    [ValidateSet('auto', 'uefi', 'bios')]
+    [string] $Firmware = 'auto',
+
     [switch] $KeepRawScreenshots
 )
 
@@ -44,11 +47,12 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # empty and the Invoke-QemuVerify call died on parameter binding (runs
 # 43884981629 and 43891758991 both failed exactly this way). Save the three
 # colliding parameters first and restore them right after.
-$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath }
+$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware }
 . (Join-Path $PSScriptRoot 'Invoke-QemuVerify.ps1') -ParseOnly
 $Iso = $dotSourceParams.Iso
 $TimeoutMin = $dotSourceParams.TimeoutMin
 $QemuPath = $dotSourceParams.QemuPath
+$Firmware = $dotSourceParams.Firmware
 
 if (-not $WorkDir) {
     $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) "micpe-verify-$Stage"
@@ -69,7 +73,7 @@ Write-SubStep "iso: $Iso"
 Write-SubStep "share: $shareDir"
 
 $result = Invoke-QemuVerify -Iso $Iso -ShareDir $shareDir -TimeoutMin $TimeoutMin `
-    -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath
+    -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -Firmware $Firmware
 
 if (-not $result.ProbeSeen) {
     Write-Host ''

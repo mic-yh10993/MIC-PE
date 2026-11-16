@@ -115,6 +115,10 @@ Describe 'build.yml verify wiring' {
         $saveIdx | Should -BeLessThan $dotIdx
         $restoreIdx = $script:testStage.IndexOf('$Iso = $dotSourceParams.Iso')
         $restoreIdx | Should -BeGreaterThan $dotIdx
+        # $Firmware is declared by the helper too, so it needs the same
+        # save/restore treatment, or it silently resets to 'auto'.
+        $script:testStage | Should -Match 'Firmware = \$Firmware'
+        $script:testStage | Should -Match '\$Firmware = \$dotSourceParams\.Firmware'
     }
 
     It 'does not nest the GITHUB_ENV exports inside the step-summary block' {
