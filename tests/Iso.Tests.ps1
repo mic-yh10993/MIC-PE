@@ -66,6 +66,41 @@ Describe 'Get-OscdimgPath' {
     }
 }
 
+Describe 'New-MicpeIso boot image selection' {
+    BeforeAll {
+        $script:isoSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/lib/Iso.ps1') -Raw
+    }
+
+    It 'packs the no-prompt EFI image, not the prompting one' {
+        # Run 44046530462: the prompting efisys.bin's cdboot.efi times out
+        # after ~3 s and no harness key can land in that window, so the
+        # firmware reported "BdsDxe: failed to start Boot0001: Time out".
+        $script:isoSource | Should -Match 'efisys_noprompt\.bin'
+    }
+
+    It 'rejects a media tree that only has the prompting EFI image' {
+        $dir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "media-prompt-$(Get-Random)") -Force
+        $bootDir = New-Item -ItemType Directory -Path (Join-Path $dir.FullName 'boot') -Force
+        $efiDir = New-Item -ItemType Directory -Path (Join-Path $dir.FullName 'efi' 'microsoft' 'boot') -Force
+        Set-Content -LiteralPath (Join-Path $bootDir 'etfsboot.com') -Value 'fake'
+        Set-Content -LiteralPath (Join-Path $efiDir 'efisys.bin') -Value 'fake'
+        { New-MicpeIso -MediaDir $dir.FullName -OutIso (Join-Path $dir.FullName 'x.iso') } |
+            Should -Throw '*boot*'
+    }
+
+    It 'accepts a media tree with the no-prompt EFI image and reaches the oscdimg lookup' {
+        $dir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "media-noprompt-$(Get-Random)") -Force
+        $bootDir = New-Item -ItemType Directory -Path (Join-Path $dir.FullName 'boot') -Force
+        $efiDir = New-Item -ItemType Directory -Path (Join-Path $dir.FullName 'efi' 'microsoft' 'boot') -Force
+        Set-Content -LiteralPath (Join-Path $bootDir 'etfsboot.com') -Value 'fake'
+        Set-Content -LiteralPath (Join-Path $efiDir 'efisys_noprompt.bin') -Value 'fake'
+        # The test runner has no ADK, so the next failure is the oscdimg
+        # lookup -- which proves the boot-file assertions passed.
+        { New-MicpeIso -MediaDir $dir.FullName -OutIso (Join-Path $dir.FullName 'x.iso') } |
+            Should -Throw '*oscdimg*'
+    }
+}
+
 Describe 'New-MicpeIso' {
     It 'allows a full 26200 media through the size gate' {
         # A full 26200 media is ~4.5 GiB (install.wim alone ~4.1 GiB); the

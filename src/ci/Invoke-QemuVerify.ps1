@@ -17,11 +17,14 @@
       any time. Screenshots are evidence for humans, not the pass/fail signal.
 
     Boot entry: the ISO is attached as a CD-ROM and the firmware boots it directly,
-    which is how a real machine would boot a DVD. The Windows boot sector
-    asks "Press any key to boot from CD or DVD..."; on the BIOS path the
-    verifier answers it with Enter every 3 seconds, at most 4 times
-    (see Send-QemuBootKey), because the prompt times out after about
-    10 seconds. UEFI boot has no prompt at all.
+    which is how a real machine would boot a DVD. The BIOS path's boot sector
+    asks "Press any key to boot from CD or DVD..."; the verifier answers it
+    with Enter every 3 seconds, at most 4 times (see Send-QemuBootKey),
+    because the prompt times out after about 10 seconds. The UEFI path
+    has no prompt at all, because the build packs efisys_noprompt.bin as
+    the EFI El Torito image -- the prompting efisys.bin's cdboot.efi times
+    out after about 3 seconds, which no harness key can reach in time
+    (run 44046530462: "BdsDxe: failed to start Boot0001 ... : Time out").
 #>
 
 [CmdletBinding()]
@@ -379,7 +382,15 @@ function Save-QemuScreenshot {
         # machine-readable ratio input and the human-readable evidence the
         # upload step collects. (The previous .png copy was PPM bytes under
         # a PNG name, which strict viewers refuse to open.)
-        Invoke-MonitorCommand -Port $Port -Command "screendump `"$(ConvertTo-MonitorPath -Path $ppm)`""
+        # Discard the monitor reply: Invoke-MonitorCommand returns its
+        # response string, and a bare call here leaks it into this
+        # function's output stream. That leaked string ended up inside
+        # Invoke-QemuVerify's return value alongside the result object,
+        # and Test-Stage.ps1 then read .ProbeSeen off an Object[] and
+        # threw "The property 'ProbeSeen' cannot be found on this object"
+        # (run 44046530462). Send-QemuBootKey is safe: it assigns the
+        # return value to $response.
+        $null = Invoke-MonitorCommand -Port $Port -Command "screendump `"$(ConvertTo-MonitorPath -Path $ppm)`""
         if (Test-Path -LiteralPath $ppm) {
             $ratio = Measure-PpmNonBlackRatio -PpmPath $ppm
             $ratio | Set-Content -LiteralPath ($ppm -replace '\.ppm$', '.ratio.txt')
@@ -544,9 +555,10 @@ function Invoke-QemuVerify {
         [string] $ProbeFileName = 'micpe-probe.txt',
 
         # Which firmware to boot: auto prefers UEFI (OVMF) when it is
-        # installed, because the Windows ISO's EFI bootloader skips the
-        # "Press any key" prompt entirely; uefi requires OVMF and fails
-        # fast when it is missing; bios forces SeaBIOS + sendkey.
+        # installed, because the build packs efisys_noprompt.bin as the EFI
+        # El Torito image, so the UEFI path has no "Press any key" prompt
+        # at all; uefi requires OVMF and fails fast when it is missing;
+        # bios forces SeaBIOS + sendkey.
         [ValidateSet('auto', 'uefi', 'bios')]
         [string] $Firmware = 'auto',
 
@@ -558,7 +570,8 @@ function Invoke-QemuVerify {
         # rhythm (runs 43951915833/43965120455 sent dozens of keys over
         # 45 minutes and the guest still never moved). An Enter landing
         # in the PE's cmd prompt is just an empty line. This only matters
-        # for the BIOS fallback; UEFI boot has no prompt at all.
+        # for the BIOS fallback; the UEFI path has no prompt (the build
+        # packs efisys_noprompt.bin), so no key is needed there.
         [int] $BootKeyDelaySec = 15,
 
         [int] $BootKeyIntervalSec = 3,
@@ -699,7 +712,10 @@ function Invoke-QemuVerify {
     finally {
         if (-not $process.HasExited) {
             try {
-                Invoke-MonitorCommand -Port $MonitorPort -Command 'quit' -ReadDelayMs 200
+                # Discard the reply: a bare call leaks the response string
+                # into Invoke-QemuVerify's return value (same trap as
+                # Save-QemuScreenshot above; run 44046530462).
+                $null = Invoke-MonitorCommand -Port $MonitorPort -Command 'quit' -ReadDelayMs 200
                 Start-Sleep -Seconds 3
             }
             catch { }
@@ -732,7 +748,11 @@ if (-not $ParseOnly) {
         -MemoryMb $MemoryMb -CpuCount $CpuCount -QemuPath $QemuPath `
         -FirmwarePath $FirmwarePath -DataDisks $DataDisks
 
-    if ($result.ProbeSeen) {
+    # A leaked monitor reply (or any other stray pipeline output) can turn
+    # $result into an Object[] instead of the single result object; read
+    # .ProbeSeen only when the result is actually the object we expect,
+    # otherwise report a clean probe timeout (run 44046530462).
+    if ($null -ne $result -and $result -is [pscustomobject] -and $result.ProbeSeen) {
         Write-Host '==> probe received:'
         Write-Host $result.ProbeText
     }

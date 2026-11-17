@@ -5,9 +5,19 @@
 
 .DESCRIPTION
     oscdimg is the only ADK component this project needs. The boot files come from
-    the Windows media directory itself (etfsboot.com for BIOS, efisys.bin for
-    UEFI), so no ADK installation is required beyond having oscdimg on PATH or
-    pointed at explicitly.
+    the Windows media directory itself (etfsboot.com for BIOS, the no-prompt
+    El Torito image efisys_noprompt.bin for UEFI), so no ADK installation is
+    required beyond having oscdimg on PATH or pointed at explicitly.
+
+    UEFI uses efisys_noprompt.bin, NOT the prompting efisys.bin. The prompting
+    image's cdboot.efi shows "Press any key to boot from CD or DVD" and times
+    out after about 3 seconds; the harness's boot keys arrive at +15 s at the
+    earliest, so the prompt always expired first and the firmware reported
+    "BdsDxe: failed to start Boot0001 ... : Time out" (run 44046530462).
+    The no-prompt image boots straight into bootmgfw.efi with no key race.
+    Local TCG repro 2026-11-17: no keys -> same BdsDxe timeout at +8 s;
+    keys at +6/+7/+8 s (inside the prompt window) -> boot proceeded past
+    cdboot with no BDS error. See eval card section 11.
 #>
 
 # The product target is a <= 3.2 GB ISO (plan.md), but a full 26200 media is
@@ -86,7 +96,9 @@ function New-MicpeIso {
     Assert-PathExists -Path $MediaDir -Label 'Media directory'
 
     $bios = Join-Path $MediaDir 'boot/etfsboot.com'
-    $efi = Join-Path $MediaDir 'efi/microsoft/boot/efisys.bin'
+    # No-prompt El Torito image: the prompting efisys.bin times out after
+    # ~3 s and no harness key can land in that window (run 44046530462).
+    $efi = Join-Path $MediaDir 'efi/microsoft/boot/efisys_noprompt.bin'
     Assert-PathExists -Path $bios -Label 'BIOS boot sector'
     Assert-PathExists -Path $efi -Label 'UEFI boot image'
 

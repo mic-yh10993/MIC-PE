@@ -168,6 +168,18 @@ Describe 'build.yml verify wiring' {
         $script:testStage | Should -Match '\$FirmwarePath = \$dotSourceParams\.FirmwarePath'
     }
 
+    It 'guards the verify result before reading .ProbeSeen' {
+        # Run 44046530462: a leaked monitor reply turned Invoke-QemuVerify's
+        # return value into an Object[], and Test-Stage.ps1 read .ProbeSeen
+        # off the array under Set-StrictMode, throwing "The property
+        # 'ProbeSeen' cannot be found on this object" instead of a clean
+        # probe-timeout failure. Anything that is not the result object
+        # must take the probe-timeout branch.
+        $script:testStage | Should -Match '\$null -eq \$result'
+        $script:testStage | Should -Match '\$result -isnot \[pscustomobject\]'
+        $script:testStage | Should -Not -Match '(?m)^if \(-not \$result\.ProbeSeen\)'
+    }
+
     It 'does not nest the GITHUB_ENV exports inside the step-summary block' {
         $tokens = $null
         $errors = $null

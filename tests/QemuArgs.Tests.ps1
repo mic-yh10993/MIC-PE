@@ -117,6 +117,26 @@ Describe 'Save-QemuScreenshot wiring' {
         $script:qemuVerify | Should -Match 'AddMinutes\(10\)'
     }
 
+    It 'does not leak monitor replies into the pipeline from Save-QemuScreenshot' {
+        # Run 44046530462: the bare Invoke-MonitorCommand call returned the
+        # '(qemu) ' reply string into the pipeline, Invoke-QemuVerify's
+        # return value became an Object[], and Test-Stage.ps1 threw
+        # "The property 'ProbeSeen' cannot be found on this object".
+        # The reply must be discarded with $null =.
+        Mock Invoke-MonitorCommand { return '(qemu) ' }
+        $dir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "micpe-shots-$(Get-Random)") -Force
+        $(Save-QemuScreenshot -Port '4444' -ScreenshotDir $dir.FullName -ShotIndex 1) |
+            Should -BeNullOrEmpty
+    }
+
+    It 'has no bare Invoke-MonitorCommand statement that could leak a reply' {
+        # Every Invoke-MonitorCommand call must assign its return value or
+        # discard it with $null =; a bare call leaks the reply string into
+        # the caller's output stream (run 44046530462).
+        $bare = $script:qemuVerify -split "`n" | Where-Object { $_ -match '^\s*Invoke-MonitorCommand\b' }
+        $bare | Should -BeNullOrEmpty
+    }
+
     It 'collects PPM evidence: screendump writes P6 PPM whatever the suffix is' {
         $script:qemuVerify | Should -Match 'shot-\{0:d2\}\.ppm'
         $script:qemuVerify | Should -Not -Match 'shot-\{0:d2\}\.png'

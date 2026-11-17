@@ -90,10 +90,19 @@ $result = Invoke-QemuVerify -Iso $Iso -ShareDir $shareDir -TimeoutMin $TimeoutMi
     -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -Firmware $Firmware `
     -FirmwarePath $FirmwarePath -DataDisks $DataDisks
 
-if (-not $result.ProbeSeen) {
+# A leaked monitor reply can turn $result into an Object[] instead of the
+# single result object (run 44046530462 threw "The property 'ProbeSeen'
+# cannot be found on this object" here under Set-StrictMode). Guard first:
+# anything that is not the result object is a clean probe timeout, not a
+# crash -- exit 2 with the same "never wrote a probe file" message.
+if ($null -eq $result -or $result -isnot [pscustomobject] -or -not $result.ProbeSeen) {
     Write-Host ''
     Write-Warn 'the PE never wrote a probe file'
-    Write-Host "  expected: $($result.ProbePath)"
+    # .ProbePath is only safe on the result object itself: on an Object[]
+    # (leaked monitor replies) even this read throws under StrictMode.
+    if ($result -is [pscustomobject]) {
+        Write-Host "  expected: $($result.ProbePath)"
+    }
     if (Test-Path -LiteralPath $qemuLog) {
         Write-Host '  last qemu log lines:'
         Get-Content -LiteralPath $qemuLog -Tail 20 | ForEach-Object { Write-Host "    $_" }
