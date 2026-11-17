@@ -86,6 +86,14 @@ rem 2026-11-16, too heavy). Calculator takes its place as the third app.
 rem NOTE (unverified against a real system): the Calculator process image
 rem is CalculatorApp.exe; if the L3 run shows uwp_launch_calculator=0
 rem while the app itself launches, correct the process name here.
+rem Launching a UWP app needs a running Explorer shell. At m4 there is
+rem no shell, so the launch is skipped and 0 is recorded, meaning not
+rem launchable here; m7 verifies the launch with the full image.
+rem Delayed expansion strips the bang from the AppUserModelId, Test run
+rem 44178703900 U3: the Calculator target arrived with the bang dropped,
+rem so the launch could never resolve. It is switched off around the
+rem three calls below; nothing in this section needs delayed expansion.
+setlocal DisableDelayedExpansion
 call :probe_uwp CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
 
@@ -94,6 +102,7 @@ if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launc
 
 call :probe_uwp Microsoft.ZuneMusic "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
 if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
+endlocal
 
 rem --- payload ---------------------------------------------------------------
 set "PAYLOAD=1"
@@ -167,6 +176,14 @@ exit /b 0
 :probe_uwp
 rem %1 = process image name, %2 = shell target
 rem Returns errorlevel 0 when the process is running after the launch attempt.
+rem A launch needs a running Explorer shell. With no shell, m4 has no
+rem PECMD, the probe was attempting this launch when it froze after
+rem uwp_appx=1 in run 44161901638, so do not attempt it: report not
+rem launchable and return. The caller records 0; m7 verifies the launch
+rem with the full image.
+tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 exit /b 1
+
 set "UWP_PROC=%~1"
 set "UWP_TARGET=%~2"
 

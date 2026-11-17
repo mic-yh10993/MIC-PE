@@ -12,43 +12,56 @@
     screenshots froze on the cmd prompt with no Explorer window. The probe
     died or stalled inside the first `call :probe_uwp CalculatorApp ...`.
 
-    The :probe_uwp subroutine does, in order: a tasklist|find check
-    (proven safe by the run 44135105700 round), `start "" explorer.exe
-    "<shell: target>"`, a 7-second ping settle, a second tasklist|find,
-    and `exit /b %errorlevel%`. Only the `start explorer.exe` line can
-    block: in the m4 image there is no PECMD.EXE, no Explorer shell is
-    running, and the Assert-Probe.ps1 m4 comment already states that UWP
-    apps cannot be launched at m4 (launching needs the shell).
+    Test run 44178703900 (branch probe-uwp-15, head 78fbfa9) ran this
+    experiment on a windows-2025 runner under a real cmd.exe:
 
-    These tests run the genuine uwp section (cut from probe.cmd by
-    content, never by line number) under a real cmd.exe on a
-    windows-2025 runner, with a hard timeout so a stall is observed,
-    not fatal:
+    - U1 passed (21.43s): the genuine uwp section completes with
+      Explorer running; all three launches 0 (Server has no Calculator),
+      probe_uwp_done=1. The batch logic itself does not stall.
+    - U1b passed (36.59s) but did NOT reproduce the no-shell condition:
+      explorer.exe was still running after Stop-Process plus a 15-second
+      wait, Windows restarts the shell automatically, so it re-ran U1
+      with a fresh Explorer. Whether `start explorer.exe` blocks with
+      no shell present is therefore still unproven directly; the guard
+      rests on elimination (the `start` line is the only shell-dependent
+      line in the subroutine) plus the design statement in
+      Assert-Probe.ps1 that m4 cannot launch UWP apps. Run 29 reaching
+      probe_done is the end-to-end proof.
+    - U2 passed (21.29s): with the `start` line stubbed out the section
+      completes, as expected.
+    - U3 FAILED, and that failure is the second bug: the Calculator
+      target arrived at the subroutine as
+      `...8wekyb3d8bbweApp`, the bang dropped by delayed expansion, so
+      the launch could never resolve. The fix switches delayed expansion
+      off around the three calls (U3b proves the pattern) and adds an
+      Explorer guard at the top of :probe_uwp (U4 proves it skips the
+      launch and the probe still completes).
 
-    - U1 runs it with Explorer as the runner left it (control: the
-      shell-exists path) and records whether explorer.exe was running.
-    - U1b kills explorer.exe first (the PE condition: no shell) and
-      runs the same genuine code.
-    - U2 stubs out the `start explorer.exe` line: if U1/U1b stall and
-      U2 completes, the launch attempt itself is the culprit and the
-      surrounding batch logic (tasklist pipes, the `!` in the target,
-      exit /b) is exonerated.
-    - U3 proves the `shell:AppsFolder\...!App` target survives the
-      `call` with delayed expansion intact.
+    The fix in src/ci/probe.cmd:
+    - :probe_uwp first checks for a running explorer.exe and returns 1
+      ("not launchable here") without attempting the launch when there
+      is no shell. At m4 the caller then records 0 and the probe runs on
+      to probe_done; at m7, with the PECMD shell up, the launch is
+      attempted as before.
+    - The three `call :probe_uwp` lines sit inside `setlocal
+      DisableDelayedExpansion` / `endlocal`, so the bang in the
+      AppUserModelId survives into the launch target.
 
-    All four tests need a real cmd.exe, so they skip on Linux. U1b
-    stops explorer.exe on the ephemeral runner VM only; the runner
-    agent is a service and does not depend on it, and the test
-    restarts Explorer afterwards when it was running before.
+    All cmd.exe tests skip on Linux. The two static tests run anywhere:
+    they pin the guard and the DisableDelayedExpansion wrapper in the
+    committed probe.cmd so a future edit cannot silently drop them.
 #>
 
 BeforeAll {
     $script:RepoRoot = (Resolve-Path "$PSScriptRoot/..").Path
     $script:ProbePath = Join-Path $script:RepoRoot 'src/ci/probe.cmd'
-    $script:CmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
-    $script:FindExe = Join-Path $env:SystemRoot 'System32\find.exe'
-    $script:TasklistExe = Join-Path $env:SystemRoot 'System32\tasklist.exe'
-    $script:PingExe = Join-Path $env:SystemRoot 'System32\ping.exe'
+    # SystemRoot is empty on Linux; the Windows-only paths below are
+    # never used there (those tests skip), but BeforeAll still runs for
+    # the static tests, so do not let Join-Path see a null parent.
+    $script:CmdExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\cmd.exe' } else { 'cmd.exe' }
+    $script:FindExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\find.exe' } else { 'find.exe' }
+    $script:TasklistExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\tasklist.exe' } else { 'tasklist.exe' }
+    $script:PingExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\ping.exe' } else { 'ping.exe' }
 
     # A CRLF batch file: cmd.exe treats a lone LF as part of the line.
     $script:WriteBatchCrlf = {
@@ -216,10 +229,12 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
         }
     }
 
-    It 'U3: the shell target with ! survives the call intact' -Skip:(-not $IsWindows) {
-        # The Calculator target contains `!App`; with delayed expansion
-        # on, a mangled argument would break the launch before `start`
-        # is even reached. Prove the subroutine receives it verbatim.
+    It 'U3a: documents that delayed expansion strips the bang from the target' -Skip:(-not $IsWindows) {
+        # Test run 44178703900: with delayed expansion on, the Calculator
+        # target arrived at the subroutine with the bang dropped
+        # (`...8wekyb3d8bbweApp`), so the launch could never resolve.
+        # This pins why probe.cmd switches delayed expansion off around
+        # the three launch calls; it asserts cmd behaviour, not our code.
         $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $workDir -Force | Out-Null
         $target = Join-Path $workDir 'target.txt'
@@ -239,10 +254,106 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
             Write-Host "cmd output: [$($result.Output)]"
             $result.TimedOut | Should -Be $false
             $text = Get-Content -LiteralPath $target -Raw
+            Write-Host "target received: [$text]"
+            $text | Should -Match 'Microsoft.WindowsCalculator_8wekyb3d8bbweApp'
+            $text | Should -Not -Match '!'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'U3b: the fixed call pattern preserves the bang in the target' -Skip:(-not $IsWindows) {
+        # The same call as U3a, but with delayed expansion switched off
+        # around it, exactly as probe.cmd now does. The subroutine must
+        # receive the AppUserModelId verbatim.
+        $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        $target = Join-Path $workDir 'target.txt'
+        $bat = Join-Path $workDir 'bang.bat'
+        try {
+            $lines = @(
+                '@echo off',
+                'setlocal EnableDelayedExpansion',
+                'setlocal DisableDelayedExpansion',
+                'call :show "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"',
+                'endlocal',
+                'exit /b 0',
+                ':show',
+                ('echo %~1 > "{0}"' -f $target),
+                'exit /b 0'
+            )
+            & $script:WriteBatchCrlf $bat $lines
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
+            Write-Host "cmd output: [$($result.Output)]"
+            $result.TimedOut | Should -Be $false
+            $text = Get-Content -LiteralPath $target -Raw
+            Write-Host "target received: [$text]"
             $text | Should -Match 'Microsoft.WindowsCalculator_8wekyb3d8bbwe!App'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It 'U4: the Explorer guard skips the launch and the probe still completes' -Skip:(-not $IsWindows) {
+        # The discriminating test for the guard: tasklist is stubbed to
+        # report no processes, so the guard must see "no Explorer" and
+        # return 1 at once. Without the guard the three calls would each
+        # wait out the 7-second ping, 21 seconds minimum (U1/U2 took
+        # 21.29-21.43s), so the 15-second bound separates the two.
+        $workDir = & $script:NewWorkDir
+        Remove-Item -LiteralPath (Join-Path $workDir 'tasklist.exe') -Force
+        & $script:WriteBatchCrlf (Join-Path $workDir 'tasklist.bat') @('@echo off', 'exit /b 0')
+        $probeOut = Join-Path $workDir 'micpe-probe.txt'
+        $bat = Join-Path $workDir 'probe-uwp.bat'
+        try {
+            & $script:BuildUwpBatch $bat $probeOut
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
+            $sw.Stop()
+            $seconds = $sw.Elapsed.TotalSeconds
+            Write-Host "cmd output: [$($result.Output)]"
+            Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode); elapsed seconds: $seconds"
+            $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
+            Write-Host "probe file: [$text]"
+            $result.TimedOut | Should -Be $false
+            $seconds | Should -BeLessThan 15 -Because 'with the guard all three calls return at once; without it each waits out the 7-second ping'
+            $text | Should -Match 'uwp_launch_calculator=0' -Because 'no shell means not launchable here, not a launch failure to retry'
+            $text | Should -Match 'uwp_launch_photos=0'
+            $text | Should -Match 'uwp_launch_media=0'
+            $text | Should -Match 'probe_uwp_done=1'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'probe.cmd uwp guard and bang fix (static)' {
+    It 'refuses to launch when Explorer is not running' {
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $sub = -1; $start = -1
+        for ($i = 0; $i -lt $probe.Count; $i++) {
+            if ($probe[$i] -match '^:probe_uwp') { $sub = $i }
+            if ($sub -ge 0 -and $probe[$i] -match '^\s*start "" explorer\.exe') { $start = $i; break }
+        }
+        $sub | Should -BeGreaterThan -1 -Because 'probe.cmd must still carry the :probe_uwp subroutine'
+        $start | Should -BeGreaterThan $sub -Because 'the subroutine must still launch through explorer.exe'
+        $head = $probe[$sub..($start - 1)] -join "`n"
+        $head | Should -Match 'tasklist' -Because 'the guard checks the process list for a running Explorer'
+        $head | Should -Match 'explorer\.exe' -Because 'the guard looks for Explorer specifically'
+        $head | Should -Match 'exit /b 1' -Because 'the guard returns "not launchable" without attempting the launch'
+    }
+
+    It 'switches delayed expansion off around the uwp launch calls' {
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $calls = @([regex]::Matches($text, 'call :probe_uwp'))
+        $calls.Count | Should -Be 3 -Because 'the probe launches exactly three UWP apps'
+        $off = $text.IndexOf('setlocal DisableDelayedExpansion')
+        $off | Should -BeGreaterThan -1 -Because 'the calls must run with delayed expansion off, or the bang is stripped (U3a)'
+        $off | Should -BeLessThan $calls[0].Index -Because 'the switch-off must come before the first call'
+        $on = $text.IndexOf('endlocal', $calls[0].Index)
+        $on | Should -BeGreaterThan $calls[2].Index -Because 'delayed expansion must stay off until after the last call'
     }
 }
