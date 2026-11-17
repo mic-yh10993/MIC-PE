@@ -110,14 +110,26 @@ Describe 'UWP registry patch' {
         $script:reg40 = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/registry/40-uwp.reg') -Raw
     }
 
-    It 'allows all trusted apps and developer sideloading' {
-        $script:reg40.Contains('"AllowAllTrustedApps"=dword:00000001') | Should -BeTrue
-        $script:reg40.Contains('"AllowDevelopmentWithoutDevLicense"=dword:00000001') | Should -BeTrue
+    It 'does not write the Appx sideload policy (Administrators have only KEY_READ on that key)' {
+        # CI run 44040699722: reg import of these two values fails with
+        # ERROR: Error accessing the registry. The policy must be set
+        # inside the running PE as SYSTEM, never at build time.
+        $script:reg40.Contains('"AllowAllTrustedApps"=dword:') | Should -BeFalse
+        $script:reg40.Contains('"AllowDevelopmentWithoutDevLicense"=dword:') | Should -BeFalse
+        $script:reg40 | Should -Not -Match 'CurrentVersion\\Appx\]'
     }
 
-    It 'pins the StateRepository service to manual start' {
-        $script:reg40 | Should -Match 'Services\\StateRepository'
-        $script:reg40.Contains('"Start"=dword:00000003') | Should -BeTrue
+    It 'registers the StateRepository service verbatim from the 25H2 install.wim (automatic start)' {
+        # Generated from the real install.wim SYSTEM hive; Start=2, with
+        # ImagePath / parameters / Security. The M4 Start=3 shell is gone.
+        $script:reg40 | Should -Match 'Services\\StateRepository\]'
+        $script:reg40.Contains('"Start"=dword:00000002') | Should -BeTrue
+        $script:reg40.Contains('"Start"=dword:00000003') | Should -BeFalse
+        $script:reg40 | Should -Match 'Services\\StateRepository\\parameters\]'
+        $script:reg40 | Should -Match 'Services\\StateRepository\\Security\]'
+        $script:reg40 | Should -Match '"ImagePath"=hex\(2\)'
+        $script:reg40 | Should -Match '"ServiceDll"=hex\(2\)'
+        $script:reg40 | Should -Match '"FailureActions"=hex:'
     }
 }
 

@@ -11,7 +11,10 @@
        (VCLibs 140, .NET Native, WinUI XAML, Windows App Runtime).
     2. The app packages themselves (Photos, Media Player, Calculator).
     3. The System32 deployment client/server DLLs (50-uwp.txt) plus the
-       registry policy in 40-uwp.reg.
+       StateRepository service key in 40-uwp.reg (verbatim copy from the
+       25H2 install.wim SYSTEM hive; the Appx sideload policy is NOT in
+       the .reg -- build-time Administrators have only KEY_READ on the
+       Appx key, CI run 44040699722).
 
     Registration writes only the AppxAllUserStore allow-run keys
     (Applications\<package-full-name> with a Path value). The
