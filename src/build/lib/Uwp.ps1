@@ -170,6 +170,38 @@ function Install-UwpApps {
     Write-SubStep 'provisioned UWP app packages verified'
 }
 
+function New-UwpProvisionRegContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable] $Resolved,
+
+        [Parameter(Mandatory = $true)]
+        [string] $HiveKey
+    )
+
+    # Pure function so the generated file is unit-testable without reg.exe.
+    # Lines are joined with CRLF explicitly: reg.exe rejects LF-only .reg
+    # files, and a Linux PowerShell would otherwise write bare LF (CI run
+    # 44007177632 proved the import fails with exit code 1 on exactly that).
+    # Backslashes in the Path values are doubled, which is the .reg escape
+    # for a literal backslash; reg import stores a single one.
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('Windows Registry Editor Version 5.00')
+    $lines.Add('')
+    foreach ($name in @($Resolved.Keys | Sort-Object)) {
+        $full = $Resolved[$name]
+        $path = "X:\\Program Files\\WindowsApps\\$full"
+        $lines.Add("[HKEY_LOCAL_MACHINE\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications\$full]")
+        $lines.Add("`"Path`"=`"$path`"")
+        $lines.Add('')
+        $lines.Add("[HKEY_LOCAL_MACHINE\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications\$name]")
+        $lines.Add("`"Path`"=`"$path`"")
+        $lines.Add('')
+    }
+    return ($lines -join "`r`n") + "`r`n"
+}
+
 function Register-ProvisionedAppx {
     [CmdletBinding()]
     param(
@@ -214,23 +246,12 @@ function Register-ProvisionedAppx {
     # never through the PowerShell registry provider: the provider keeps
     # an open handle on the key, and a later `reg unload` then fails with
     # exit code 1 (CI run 44001157082 proved it). Paths are X: because
-    # that is the PE system drive at runtime.
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add('Windows Registry Editor Version 5.00')
-    $lines.Add('')
-    foreach ($name in $PackageNames) {
-        $full = $resolved[$name]
-        $path = "X:\\Program Files\\WindowsApps\\$full"
-        $lines.Add("[HKEY_LOCAL_MACHINE\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications\$full]")
-        $lines.Add("`"Path`"=`"$path`"")
-        $lines.Add('')
-        $lines.Add("[HKEY_LOCAL_MACHINE\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications\$name]")
-        $lines.Add("`"Path`"=`"$path`"")
-        $lines.Add('')
-    }
-
+    # that is the PE system drive at runtime. The file is written with
+    # WriteAllText + Encoding.Unicode (UTF-16LE with BOM) so the bytes are
+    # identical on Linux and Windows hosts.
+    $content = New-UwpProvisionRegContent -Resolved $resolved -HiveKey $HiveKey
     $regPath = Join-Path ([System.IO.Path]::GetTempPath()) "micpe-uwp-$(Get-Random).reg"
-    Set-Content -LiteralPath $regPath -Value $lines -Encoding unicode
+    [System.IO.File]::WriteAllText($regPath, $content, [System.Text.Encoding]::Unicode)
     try {
         Mount-RegistryHive -HiveFile $hiveFile -KeyName $HiveKey
         try {

@@ -93,10 +93,15 @@ function Import-RegFile {
     Assert-PathExists -Path $RegFile -Label 'Registry patch'
 
     Write-SubStep "importing $(Split-Path -Leaf $RegFile)"
-    $null = & reg.exe import $RegFile 2>&1
+    # Capture reg.exe's own output: swallowing it leaves a failed import
+    # undiagnosable (CI run 44007177632 failed with exit code 1 and no
+    # message at all). The Out-String keeps stderr ErrorRecords from
+    # breaking the string binding.
+    $output = & reg.exe import $RegFile 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
+        $detail = if ($output) { $output.Trim() } else { '(reg.exe printed nothing)' }
         throw [System.InvalidOperationException]::new(
-            "reg import failed with exit code $LASTEXITCODE for $RegFile")
+            "reg import failed with exit code $LASTEXITCODE for $RegFile : $detail")
     }
 }
 
