@@ -47,7 +47,11 @@ END
 
 SUB ScanOneDrive
 ; %1 = drive letter. Marker wins over fallback on the same volume.
-IFEX "%1:\install.mic",TEAM READ %1:\install.mic,1,MicName|CALL AddSource %1: %1:\sources\install.wim 1 %MicName%|EXIT
+; A marker volume whose image is missing is reported broken (Review Focus
+; #1): it is recorded in BrokenSources and shown in the window, and the
+; scan never silently falls through to a fallback image on that volume.
+IFEX "%1:\install.mic",TEAM IFEX "%1:\sources\install.wim",TEAM READ %1:\install.mic,1,MicName|CALL AddSource %1: %1:\sources\install.wim 1 %MicName%|EXIT
+IFEX "%1:\install.mic",TEAM ENVI BrokenSources=%BrokenSources% %1:\|EXIT
 IFEX "%1:\sources\install.wim",TEAM CALL AddSource %1: %1:\sources\install.wim 0 install.wim|EXIT
 IFEX "%1:\install.wim",TEAM CALL AddSource %1: %1:\install.wim 0 install.wim|EXIT
 IFEX "%1:\sources\install.esd",TEAM CALL AddSource %1: %1:\sources\install.esd 0 install.esd|EXIT
@@ -56,8 +60,9 @@ END
 SUB AddSource
 ; %1 = root, %2 = image path, %3 = 1 when an install.mic marker exists,
 ; %4 = display name (install.mic first line for marker volumes, file name
-; otherwise). A marker volume whose image is missing is reported broken
-; (Review Focus #1) and never skipped silently.
+; otherwise). ScanOneDrive only calls this after verifying the image file
+; exists; a marker volume whose image is missing is recorded in
+; BrokenSources there instead (Review Focus #1).
 ENVI SourceCount=%SourceCount%+1
 ENVI Source%SourceCount%_Root=%1
 ENVI Source%SourceCount%_Path=%2
@@ -103,6 +108,9 @@ ITEM EditXml,L588T336W120H26,编辑 / 选择 xml,CALL PickUnattend
 ENVI UnattendPath=
 ; 3. Go
 ITEM StartInstall,L280T380W200H44,开始安装,CALL StartInstall
+; Broken markers (Review Focus #1): shown when a volume carries install.mic
+; but its image is missing. Empty when nothing is broken.
+TEXT BrokenWarn,L16T440W728H20,标记存在但映像缺失的卷：%BrokenSources%
 END
 
 SUB ChangeImage

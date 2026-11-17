@@ -55,6 +55,12 @@ Describe 'installer assets' {
         $w | Should -Match '开始安装'
     }
 
+    It 'wcs reports a marker volume with a missing image instead of falling through' {
+        $w = Get-Content "$root/src/installer/MICPE-Setup.wcs" -Raw
+        $w | Should -Match 'BrokenSources'
+        $w | Should -Match '标记存在但映像缺失'
+    }
+
     It 'lang file carries the same user-visible strings as the wcs' {
         $lang = Get-Content "$root/src/installer/lang/zh-CN.txt" -Raw
         $w = Get-Content "$root/src/installer/MICPE-Setup.wcs" -Raw
