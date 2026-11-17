@@ -18,10 +18,10 @@
 
     Boot entry: the ISO is attached as a CD-ROM and the firmware boots it directly,
     which is how a real machine would boot a DVD. The Windows boot sector
-    asks "Press any key to boot from CD or DVD..."; the verifier answers it
-    with Enter repeatedly until the probe appears (see Send-QemuBootKey),
-    because a single early press can land before the prompt is displayed
-    and the guest then sits at that prompt forever.
+    asks "Press any key to boot from CD or DVD..."; on the BIOS path the
+    verifier answers it with Enter every 3 seconds, at most 4 times
+    (see Send-QemuBootKey), because the prompt times out after about
+    10 seconds. UEFI boot has no prompt at all.
 #>
 
 [CmdletBinding()]
@@ -482,15 +482,19 @@ function Invoke-QemuVerify {
         [string] $Firmware = 'auto',
 
         # Seconds after QEMU starts before answering the "Press any key to
-        # boot from CD or DVD..." prompt, and the interval for repeating it.
-        # SeaBIOS under TCG is slow: run 43939552552 sent the key at +21s
-        # and +32s, but the prompt only appeared later, so both presses
-        # were lost and the guest sat at the prompt for 45 minutes. The
-        # key is therefore sent repeatedly until the probe appears; an
-        # Enter landing in the PE's cmd prompt is just an empty line.
+        # boot from CD or DVD..." prompt, the interval between presses,
+        # and how many times to press in total. User decision 2026-11-17:
+        # the prompt times out after about 10 seconds, so press every 3
+        # seconds, 4 times -- instead of the old every-30-seconds-forever
+        # rhythm (runs 43951915833/43965120455 sent dozens of keys over
+        # 45 minutes and the guest still never moved). An Enter landing
+        # in the PE's cmd prompt is just an empty line. This only matters
+        # for the BIOS fallback; UEFI boot has no prompt at all.
         [int] $BootKeyDelaySec = 15,
 
-        [int] $BootKeyIntervalSec = 30
+        [int] $BootKeyIntervalSec = 3,
+
+        [int] $BootKeyMaxSends = 4
     )
 
     if (-not (Test-Path -LiteralPath $Iso)) {
@@ -554,10 +558,14 @@ function Invoke-QemuVerify {
                 break
             }
 
-            # Answer the "Press any key to boot from CD or DVD..." prompt,
-            # repeatedly until the probe appears: a single early press can
-            # land before the prompt is even displayed (run 43939552552).
-            if ((Get-Date) -ge $bootKeyAt -and -not (Test-Path -LiteralPath $probePath)) {
+            # Answer the "Press any key to boot from CD or DVD..." prompt:
+            # every 3 seconds, at most 4 times (user decision 2026-11-17:
+            # the prompt times out after about 10 seconds). A single early
+            # press can land before the prompt is even displayed
+            # (run 43939552552), so the burst is short and early rather
+            # than one press.
+            if ((Get-Date) -ge $bootKeyAt -and $bootKeysSent -lt $BootKeyMaxSends `
+                    -and -not (Test-Path -LiteralPath $probePath)) {
                 Send-QemuBootKey -Port $MonitorPort
                 $bootKeysSent++
                 $bootKeyAt = (Get-Date).AddSeconds($BootKeyIntervalSec)

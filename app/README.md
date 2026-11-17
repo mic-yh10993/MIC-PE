@@ -15,6 +15,16 @@
   `%System32%\MICPE`。M4 只做 UWP 核心文件（照片、新版媒体播放器），
   不做设置应用；是否自实现设置工具留到 M4 再定。
 
+用户 2026-11-17 07:48 补充决定（install.bat 的语义，已获授权）：
+- `install.bat` **在 CI 里运行**：构建（M5 payload 阶段）时由 CI 调
+  用，对着已挂载的 boot.wim 做集成——无非就是复制文件、写注册表，
+  CI 里都可以实现。
+- `install.bat` **绝不在 PE 启动后运行**：不要进入 PE 再安装软件，
+  太浪费性能。PE 里只有集成好的文件，没有安装过程。
+- office 的安装脚本改成 CI 能运行的版本；chrome 安装 bat 自写。
+  但这两个组件本体是 M5 的活：本轮只改说明，不补组件；下面的清单
+  里 office、chrome 均标为“待补（M5）”，免得下一轮的人按旧语义走。
+
 ## 布局
 
 ```
@@ -23,10 +33,10 @@ app/
   _template/           # 新组件的模板（复制改名后填内容）
     README.md
     install.bat
-  chrome/              # （M5）Chrome 安装包
-  office/              # （M5）Office 2016 安装包
+  chrome/              # （M5，待补）Chrome 安装包
+  office/              # （M5，待补）Office 2016 安装包
   <组件名>/            # 以后每加一个组件，就在这里建一个文件夹
-    install.bat        # 必备：自动集成脚本
+    install.bat        # 必备：CI 里运行的自动集成脚本
     <程序文件...>      # 组件自己的文件
     README.md          # 可选：来源、版本、许可说明
 ```
@@ -46,6 +56,10 @@ install.bat 按这个分工写目标路径：程序文件去 `\Program Files\MIC
 
 ## install.bat 约定（M5 的集成脚本会按这个约定调用）
 
+- **运行时刻：CI 里，不在 PE 里。** 构建（M5 payload 阶段）时由 CI
+  调用，对着已挂载的 boot.wim 做集成——复制文件、写注册表，CI 里都
+  可以实现。`install.bat` 绝不在 PE 启动后运行；不要进入 PE 再安装
+  软件，太浪费性能。PE 里只有集成好的文件，没有安装过程。
 - 调用方式：`install.bat <挂载的 boot.wim 目录> <仓库根目录>`
   - `%1`：已挂载的 boot.wim 根目录，例如 `D:\micpe\mount`（注入目标是
     上面两个位置之一，见 plan.md 品牌约定：自有程序只放
@@ -61,8 +75,8 @@ install.bat 按这个分工写目标路径：程序文件去 `\Program Files\MIC
 
 | 组件 | 来源 | 集成目标 | 状态 |
 | --- | --- | --- | --- |
-| Chrome | 自带安装包（用户 2026-11-16 澄清：Edge 不自带；Chrome 太重可换 Firefox 并精简） | `\Program Files\MICPE` | M5 集成 |
-| Office 2016 | 自带安装包 | `\Program Files\MICPE` | M5 集成 |
+| Chrome | 自带安装包（用户 2026-11-16 澄清：Edge 不自带；Chrome 太重可换 Firefox 并精简；安装 bat 自写，CI 里运行） | `\Program Files\MICPE` | 待补（M5） |
+| Office 2016 | 自带安装包（安装脚本改成 CI 能运行的版本） | `\Program Files\MICPE` | 待补（M5） |
 | PE 工具 | 参考文件里的工具（见 `~/workspace/MIC-PE-recovery/`） | 按性质分两处 | M5 集成 |
 | PENetwork | 参考文件里的网络工具 | `\Program Files\MICPE` | M5 集成 |
 | MICPE 装机软件 | 用户自写 | `\Program Files\MICPE` | M5 集成 |

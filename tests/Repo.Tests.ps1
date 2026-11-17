@@ -28,3 +28,25 @@ Describe 'repository skeleton' {
         Test-Path -LiteralPath (Join-Path $repoRoot 'docs/plan.md') | Should -BeTrue
     }
 }
+
+Describe 'app/ component layout' {
+    BeforeAll {
+        $script:appReadme = Get-Content -LiteralPath (Join-Path $repoRoot 'app/README.md') -Raw
+        $script:templateBat = Get-Content -LiteralPath (Join-Path $repoRoot 'app/_template/install.bat') -Raw
+    }
+
+    It 'install.bat runs in CI against a mounted boot.wim, never inside the PE' {
+        # User decision 2026-11-17: install.bat integrates the component
+        # during the build (copy files, write registry); installing
+        # software from inside the PE wastes performance. Pin the wording
+        # so the semantics cannot silently drift back.
+        $script:appReadme | Should -Match 'CI 里'
+        $script:appReadme | Should -Match '绝不在 PE 启动后运行'
+        $script:templateBat | Should -Match 'NEVER runs inside the PE'
+    }
+
+    It 'marks chrome and office as pending until M5' {
+        $script:appReadme | Should -Match 'Chrome.*待补（M5）'
+        $script:appReadme | Should -Match 'Office 2016.*待补（M5）'
+    }
+}

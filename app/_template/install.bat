@@ -1,6 +1,11 @@
 @echo off
 rem Template for app/<component>/install.bat
 rem
+rem Runs in CI during the build (M5 payload step), against a mounted
+rem boot.wim. It NEVER runs inside the PE: do not install software from
+rem inside PE, that wastes performance. The PE only contains the files
+rem this script already integrated: copy files, write registry, done.
+rem
 rem Called by the M5 payload step as:
 rem   install.bat <mounted boot.wim dir> <repo root>
 rem

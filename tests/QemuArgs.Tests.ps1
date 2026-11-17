@@ -255,10 +255,15 @@ Describe 'Invoke-QemuVerify boot key' {
         $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
     }
 
-    It 'sends the boot key shortly after QEMU starts and repeats it until the probe appears' {
+    It 'sends the boot key every 3 seconds, at most 4 times' {
+        # User decision 2026-11-17: the "Press any key" prompt times out
+        # after about 10 seconds, so the old every-30-seconds-forever
+        # rhythm is replaced by a short burst: 3s apart, 4 presses.
         $script:qemuVerify | Should -Match 'Send-QemuBootKey'
         $script:qemuVerify | Should -Match 'BootKeyDelaySec'
-        $script:qemuVerify | Should -Match 'BootKeyIntervalSec'
+        $script:qemuVerify | Should -Match 'BootKeyIntervalSec = 3'
+        $script:qemuVerify | Should -Match 'BootKeyMaxSends = 4'
+        $script:qemuVerify | Should -Match 'bootKeysSent -lt \$BootKeyMaxSends'
         $script:qemuVerify | Should -Match 'bootKeysSent'
     }
 
