@@ -66,14 +66,20 @@ BeforeAll {
         [System.IO.File]::WriteAllText($Path, $text, [System.Text.Encoding]::ASCII)
     }
 
-    # The genuine probe.cmd scan + shell sections (lines 1-61), truncated
-    # before the network section, with a marker appended so completion is
-    # observable. No shutdown line, no UWP section (must not launch apps
-    # on the runner).
+    # The genuine probe.cmd scan + shell sections, truncated after the
+    # shell_ready if/else (found by content, not line number, so comment
+    # edits above it cannot shift the cut), with a marker appended so
+    # completion is observable. No shutdown line, no UWP section (must
+    # not launch apps on the runner).
     $script:BuildProbeHeadBatch = {
         param([string] $Path)
-        $probeLines = (Get-Content -LiteralPath $script:ProbePath -Encoding utf8)[0..60]
-        $lines = @($probeLines) + @('echo probe_head_done=1 >> "%PROBE_OUT%"')
+        $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $end = -1
+        for ($i = 0; $i -lt $probeLines.Count; $i++) {
+            if ($probeLines[$i] -match 'shell_ready=') { $end = $i; break }
+        }
+        if ($end -lt 0) { throw 'probe.cmd has no shell_ready line; the head cut is stale' }
+        $lines = @($probeLines[0..$end]) + @('echo probe_head_done=1 >> "%PROBE_OUT%"')
         & $script:WriteBatchCrlf $Path $lines
     }
 }
@@ -116,10 +122,14 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
         # tasklist.exe is available (as it will be after 10-cmdpe.txt
         # carries it). Values are 0-or-1: the runner may itself run
         # explorer.exe, so only the keys' presence is asserted.
+        # ping.exe is on PATH too: the PE image has PING.EXE, and the
+        # head's settle line needs it (a missing ping fails silently
+        # but is not the PE behaviour).
         $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $workDir -Force | Out-Null
         Copy-Item -LiteralPath $script:FindExe -Destination (Join-Path $workDir 'find.exe')
         Copy-Item -LiteralPath $script:TasklistExe -Destination (Join-Path $workDir 'tasklist.exe')
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination (Join-Path $workDir 'ping.exe')
         $bat = Join-Path $workDir 'probe-head.bat'
         try {
             & $script:BuildProbeHeadBatch $bat
@@ -145,7 +155,9 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
         # Corrects the run 26 claim: 2>nul first does NOT silence a failed
         # open. Both orders print it, so the run 27 screen line is
         # cosmetic noise from the scan write test on the read-only D:.
-        $dir = Join-Path $env:SystemRoot ''
+        # The target is the SystemRoot directory itself (no trailing
+        # backslash, so the quoting cannot be misread as an escaped quote).
+        $dir = $env:SystemRoot
         $new = & $script:CmdExe /c "echo test 2>nul > `"$dir`"" 2>&1 | Out-String
         $old = & $script:CmdExe /c "echo test > `"$dir`" 2>nul" 2>&1 | Out-String
         Write-Host "new-order (2>nul first) output: [$new]"
