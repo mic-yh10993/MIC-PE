@@ -48,11 +48,8 @@ Windows\System32\SearchFolder.dll
 Windows\System32\srchadmin.dll
 Windows\System32\StructuredQuery.dll
 Windows\System32\tquery.dll
-Windows\System32\Windows.Shell.Search.UriHandler.dll
 Windows\System32\Windows.Storage.Search.dll
 Windows\System32\wsepno.dll
-Windows\System32\prm*.dll
-Windows\System32\MLS*.dll
 Windows\System32\mmc.exe
 Windows\System32\mmcbase.dll
 Windows\System32\mmcndmgr.dll
@@ -144,7 +141,6 @@ Windows\System32\diskperf.exe
 Windows\SystemTemp
 Program Files\Windows Photo Viewer
 Windows\System32\spool\drivers\color
-Windows\System32\coloradapterclient.dll
 Windows\System32\DWrite.dll
 Windows\System32\d3d8thk.dll
 Windows\System32\d3d9.dll

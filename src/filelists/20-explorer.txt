@@ -46,8 +46,6 @@ Windows\System32\ProximityService.dll
 Windows\System32\ProximityServicePal.dll
 Windows\System32\rmclient.dll
 Windows\System32\sendmail.dll
-Windows\System32\SettingSyncCore.dll
-Windows\System32\SharedStartModel.dll
 Windows\System32\ShellCommonCommonProxyStub.dll
 Windows\System32\shfolder.dll
 Windows\System32\shutdown.exe
@@ -77,9 +75,7 @@ Windows\System32\credssp.dll
 Windows\System32\TextShaping.dll
 Windows\System32\Windows.Globalization.dll
 Windows\System32\cdp.dll
-Windows\System32\coloradapterclient.dll
 Windows\System32\dsreg.dll
-Windows\System32\VEEventDispatcher.dll
 Windows\System32\InputHost.dll
 Windows\System32\WindowManagement.dll
 Windows\System32\WindowManagementAPI.dll
@@ -89,7 +85,6 @@ Windows\System32\shsvcs.dll
 Windows\System32\dmenrollengine.dll
 Windows\System32\windowsudk.shellcommon.dll
 Windows\System32\Windows.UI.Core.TextInput.dll
-Windows\System32\Windows.UI.FileExplorer.WASDK.dll
 Windows\System32\StateRepository.core.dll
 Windows\System32\Windows.StateRepository.dll
 Windows\System32\Windows.StateRepositoryBroker.dll
@@ -125,7 +120,6 @@ Windows\System32\netplwiz.exe
 Windows\System32\dtsh.dll
 Windows\System32\shpafact.dll
 Windows\System32\networkexplorer.dll
-Windows\System32\provsvc.dll
 Windows\System32\kdcpw.dll
 Windows\System32\cacls.exe
 Windows\System32\Comp.exe

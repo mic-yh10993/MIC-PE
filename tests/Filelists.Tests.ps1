@@ -34,6 +34,61 @@ Describe 'whitelists' {
         $found | Should -BeNullOrEmpty
     }
 
+    It 'does not contain patterns known absent from the 25H2 install.wim' {
+        # Build runs 44027407243 (hive flatten) and 44032090523
+        # (SettingSyncCore.dll, exit 49) died on whitelist entries that do
+        # not exist in the 25H2 26200 install.wim index 1. The full list was
+        # audited against the real image (see micpe-m7fix-eval-card.md);
+        # these 32 must not come back: 31 removed outright, plus the
+        # comctl32 zh-CN entry, which exists only as a .mui (fixed, not
+        # removed, and pinned by the next test).
+        $stale = @(
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Package_*',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-BusinessScanning-Feature-Package-admin~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-Common-Modem-Drivers-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-PeerToPeer-Full-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-OneCoreUAP-WCN-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-OneCoreUAP-WCN-WOW64-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-WCN-net-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-WCN-WOW64-net-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-SecureStartup-Subsystem-base-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-Desktop-Shared-Drivers-merged-Package*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-Media-Format-multimedia-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-Multimedia-RestrictedCodecs-multimedia-Package~*.cat',
+            'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-Multimedia-RestrictedCodecs-WOW64-multimedia-Package~*.cat',
+            'Windows\System32\SettingSyncCore.dll',
+            'Windows\System32\SharedStartModel.dll',
+            'Windows\System32\coloradapterclient.dll',
+            'Windows\System32\VEEventDispatcher.dll',
+            'Windows\System32\Windows.UI.FileExplorer.WASDK.dll',
+            'Windows\System32\provsvc.dll',
+            'Windows\SysWOW64\zh-CN\comctl32.dll',
+            'Windows\SysWOW64\zh-CN\comdlg32.dll',
+            'Windows\SysWOW64\zh-CN\mlang.dll',
+            'Windows\SysWOW64\clb.dll',
+            'Windows\SysWOW64\run64.exe',
+            'Windows\System32\msvcrt20.dll',
+            'Windows\System32\msvcrt40.dll',
+            'Windows\System32\msvcp110.dll',
+            'Windows\System32\msvcr110.dll',
+            'Windows\System32\Windows.Shell.Search.UriHandler.dll',
+            'Windows\System32\prm*.dll',
+            'Windows\System32\MLS*.dll'
+        )
+        $found = [System.Collections.Generic.List[string]]::new()
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp') {
+            Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt") |
+                Where-Object { $stale -contains $_ } |
+                ForEach-Object { $found.Add("$name $_") }
+        }
+        $found | Should -BeNullOrEmpty
+    }
+
+    It 'the runtimes list carries the comctl32 zh-CN MUI by its real name' {
+        $entries = Read-Whitelist -Path (Join-Path $script:ListDir '30-runtimes.txt')
+        $entries | Should -Contain 'Windows\SysWOW64\zh-CN\comctl32.dll.mui'
+    }
+
     It 'the explorer list contains explorer.exe and the StateRepository family' {
         $entries = Read-Whitelist -Path (Join-Path $script:ListDir '20-explorer.txt')
         ($entries -contains 'Windows\explorer.exe') | Should -BeTrue

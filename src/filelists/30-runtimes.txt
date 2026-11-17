@@ -20,9 +20,7 @@ Windows\system32\wow64win.dll
 Windows\system32\wow64base.dll
 Windows\system32\wow64con.dll
 Windows\system32\wowreg32.exe
-Windows\SysWOW64\zh-CN\comctl32.dll
-Windows\SysWOW64\zh-CN\comdlg32.dll
-Windows\SysWOW64\zh-CN\mlang.dll
+Windows\SysWOW64\zh-CN\comctl32.dll.mui
 Windows\SysWOW64\KBDUS.dll
 Windows\SysWOW64\DXCore.dll
 Windows\SysWOW64\umpdc.dll
@@ -50,7 +48,6 @@ Windows\SysWOW64\Bcp47Langs.dll
 Windows\SysWOW64\bcp47mrm.dll
 Windows\SysWOW64\cabinet.dll
 Windows\SysWOW64\cfgmgr32.dll
-Windows\SysWOW64\clb.dll
 Windows\SysWOW64\clbcatq.dll
 Windows\SysWOW64\clip.exe
 Windows\SysWOW64\cmd.exe
@@ -185,7 +182,6 @@ Windows\SysWOW64\rmclient.dll
 Windows\SysWOW64\rpcrt4.dll
 Windows\SysWOW64\rsaenh.dll
 Windows\SysWOW64\rtutils.dll
-Windows\SysWOW64\run64.exe
 Windows\SysWOW64\rundll32.exe
 Windows\SysWOW64\samcli.dll
 Windows\SysWOW64\samlib.dll
@@ -259,13 +255,9 @@ Windows\SysWOW64\quartz.dll
 Windows\SysWOW64\winhttp.dll
 Windows\SysWOW64\msvcirt.dll
 Windows\System32\msvcp120_clr0400.dll
-Windows\System32\msvcrt20.dll
-Windows\System32\msvcrt40.dll
 Windows\System32\msvcr100_clr0400.dll
 Windows\System32\msvcr120_clr0400.dll
-Windows\System32\msvcp110.dll
 Windows\System32\msvcp140_clr0400.dll
-Windows\System32\msvcr110.dll
 Windows\System32\ucrtbase_clr0400.dll
 Windows\System32\ucrtbase_enclave.dll
 Windows\System32\vcruntime140_1_clr0400.dll
