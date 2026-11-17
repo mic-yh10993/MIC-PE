@@ -49,6 +49,14 @@ if not defined PROBE_DIR (
 if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
 rem --- shell -----------------------------------------------------------------
+rem Progress marker: the section start time, so a partial probe still shows
+rem where it stopped and how long each section took (run 44181949882: run 29
+rem stopped after dwm=1 and the evidence could not tell "died" from "slow").
+rem mark_<section> keys are parsed by Read-ProbeFile and shown in the CI log
+rem printout, but no stage table asserts them, so they cannot mask a failure.
+rem %TIME: =0% zero-pads the hour; the line is top-level, not inside a (...)
+rem block, so %TIME% is read when the line runs instead of at block parse.
+echo mark_shell_ready=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer=0 >> "%PROBE_OUT%") else (echo explorer=1 >> "%PROBE_OUT%")
 
@@ -62,6 +70,7 @@ tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo shell_ready=0 >> "%PROBE_OUT%") else (echo shell_ready=1 >> "%PROBE_OUT%")
 
 rem --- network ---------------------------------------------------------------
+echo mark_network=%TIME: =0% >> "%PROBE_OUT%"
 set "IPV4="
 for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
     if not defined IPV4 set "IPV4=%%A"
@@ -69,10 +78,12 @@ for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
 if defined IPV4 (echo network=!IPV4: =! >> "%PROBE_OUT%") else (echo network=pending >> "%PROBE_OUT%")
 
 rem --- input method ----------------------------------------------------------
+echo mark_ime=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload" 2>nul | find /i "0804" >nul
 if errorlevel 1 (echo ime=0 >> "%PROBE_OUT%") else (echo ime=1 >> "%PROBE_OUT%")
 
 rem --- uwp -------------------------------------------------------------------
+echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"
 if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
     echo uwp_appx=1 >> "%PROBE_OUT%"
 ) else (
@@ -94,17 +105,21 @@ rem 44178703900 U3: the Calculator target arrived with the bang dropped,
 rem so the launch could never resolve. It is switched off around the
 rem three calls below; nothing in this section needs delayed expansion.
 setlocal DisableDelayedExpansion
+echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
 
+echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Photos "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")
 
+echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.ZuneMusic "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
 if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
 endlocal
 
 rem --- payload ---------------------------------------------------------------
+echo mark_payload=%TIME: =0% >> "%PROBE_OUT%"
 set "PAYLOAD=1"
 for %%F in (
     "X:\Program Files\MICPE\PENetwork\PENetwork.exe"
@@ -117,6 +132,7 @@ for %%F in (
 echo payload=%PAYLOAD% >> "%PROBE_OUT%"
 
 rem --- brand ----------------------------------------------------------------
+echo mark_brand=%TIME: =0% >> "%PROBE_OUT%"
 set "BRAND=1"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation" /v Manufacturer 2>nul | find /i "MICPE" >nul
 if errorlevel 1 set "BRAND=0"
@@ -126,6 +142,7 @@ if not exist "%SystemRoot%\System32\oemlogo.bmp" set "BRAND=0"
 echo brand=%BRAND% >> "%PROBE_OUT%"
 
 rem --- installer -------------------------------------------------------------
+echo mark_installer=%TIME: =0% >> "%PROBE_OUT%"
 rem M6: run the installer in -cli -discoveronly mode so it writes
 rem installer_scan / installer_source / installer_name / installer_path
 rem into the same probe file (design §6). M7: when a source was found and
@@ -142,6 +159,7 @@ if exist "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" (
 )
 
 rem --- installer deploy (M7 harness, plan Task 17 Step 6) --------------------
+echo mark_installer_deploy=%TIME: =0% >> "%PROBE_OUT%"
 rem When the scan found a source, deploy it to the largest free volume that
 rem is neither the source volume, the PE volume nor the probe share (in the
 rem CI harness that is the blank 64 GB disk). Without data disks there is
