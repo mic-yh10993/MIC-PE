@@ -45,7 +45,7 @@ MICPE-Setup.wcs -cli -deploy <源> <目标盘>
 
 1. 二次确认（显示磁盘号、分区号、将清空的分区、镜像路径）。
 2. 卸载目标卷 → 格式化 NTFS（卷标与用户选的一致）。
-3. `wimlib-imagex apply <wim> <index> <target>`（esd 也走 wimlib；gho 不做）。
+3. `dism.exe /English /Apply-Image /ImageFile:<wim> /Index:<index> /ApplyDir:<target>`（esd 也走 DISM；gho 不做）。
 4. 无人值守（可选，默认不写）：未勾选则目标系统正常进 OOBE；勾选则把
    选定的 `autounattend.xml` 写到目标分区根目录。
 5. `bcdboot <target>\Windows /s <boot> /f ALL`（UEFI+BIOS 双写）。
@@ -89,7 +89,7 @@ MICPE-Setup.wcs -cli -deploy <源> <目标盘>
 - 空盘不报死错，而是给明确的下一步按钮（打开 DiskGenius）；分好区后点
   “重新扫描”即可，无需重启或重开工具。
 - 危险操作二次确认，确认框里用**具体数字**而不是术语。
-- 失败时把 wimlib/bcdboot 的输出落到 `X:\MICPE\logs\setup-<时间>.log`，
+- 失败时把 dism/bcdboot 的输出落到 `X:\MICPE\logs\setup-<时间>.log`，
   界面上给“复制日志路径”按钮。
 - 不提供“删除所有分区/清空磁盘”这类一键毁灭按钮（分区交给 DiskGenius，
   它是用户主动发起、可见的独立操作）。
@@ -108,11 +108,16 @@ MICPE-Setup.wcs -cli -deploy <源> <目标盘>
 
 ## 已知缺口（M7 前必须处理）
 
-- **wimlib-imagex.exe 不在 PE 里**：`wimlib-imagex` 目前只是构建主机上的
-  工具（CI 里 choco 安装），没有任何 filelist 或 payload 清单把它放进
-  映像。`Invoke-Deploy` 与 `.wcs` 的 `apply` 步骤在 PE 内会找不到文件。
-  M7 终验前必须二选一：把它放进 payload（注意 payload 归档哈希 pin 会变），
-  或改走 WinPE 自带的 DISM `/Apply-Image`。
+- **应用工具已定为 DISM（M7 决定，缺口关闭）**：`Invoke-Deploy` 与 `.wcs`
+  的 `apply` 步骤原先调 `wimlib-imagex`，但它只是构建主机上的工具，从不
+  进 PE。M7 改走 WinPE 自带的 `dism.exe /Apply-Image`（已在出货 boot.wim
+  里两个索引都核实存在；`/Get-WimInfo` 负责版本查询，`/English` 钉死
+  英文输出以便解析）。不走“把 wimlib 放进 payload”的路线：那要多带
+  `wimlib-imagex.exe` + `libwim-15.dll`，还会让已备好的 payload-v1 归档
+  哈希 pin 作废。未验证：`.esd` 的 apply 是同一条 DISM 命令，Win10+
+  实践中可用，但本次 L3 未覆盖；分卷 `.swm` 源发现器不返回、向导也不
+  接受，故无 `/SWMFile` 分支；`/ScratchDir` 未加，若 L3 报 scratch 空间
+  错误再指到目标盘。
 - **QEMU 验收 harness 未接线**：plan Task 17 Step 6 要求
   `Invoke-QemuVerify.ps1` 在 M6 阶段额外挂三块 qcow2 数据盘
   （空白盘 / 标记盘 / 无标记盘）+ 一块空白 64 GB 盘跑完整部署。这只能由

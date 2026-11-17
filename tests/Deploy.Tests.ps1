@@ -74,25 +74,33 @@ Describe 'Test-TargetSafety' {
 }
 
 Describe 'ConvertFrom-WimInfoOutput' {
-    It 'parses wimlib-imagex info output into indexes' {
+    It 'parses dism.exe /Get-WimInfo output into indexes' {
+        # Sample format verified against Microsoft Learn: DISM prints
+        # 'Index : N' (space before the colon) and the size as
+        # 'Size : 14,747,431,455 bytes' with thousands separators.
         $lines = @(
-            'Image "install.wim" (WIM version 0.0.0)',
-            'Index:                  1',
-            'Name:                   Windows 11 家庭版',
-            'Description:            Windows 11 家庭版',
-            'Total Bytes:            12345678901',
-            'Index:                  2',
-            'Name:                   MICPE 定制系统 v1',
-            'Description:            Custom image',
-            'Total Bytes:            9876543210'
+            'Deployment Image Servicing and Management tool',
+            'Version: 10.0.14393.0',
+            'Details for image : F:\sources\install.esd',
+            'Index : 1',
+            'Name : Windows 10 Pro',
+            'Description : Windows 10 Pro',
+            'Size : 14,747,431,455 bytes',
+            'WIM Bootable : No',
+            'Architecture : x64',
+            'Index : 2',
+            'Name : MICPE 定制系统 v1',
+            'Description : Custom image',
+            'Size : 9,876,543,210 bytes'
         )
         $ix = ConvertFrom-WimInfoOutput -Lines $lines
         $ix.Count | Should -Be 2
         $ix[0].Index | Should -Be 1
-        $ix[0].Name | Should -Be 'Windows 11 家庭版'
-        $ix[0].SizeBytes | Should -Be 12345678901
+        $ix[0].Name | Should -Be 'Windows 10 Pro'
+        $ix[0].SizeBytes | Should -Be 14747431455
         $ix[1].Index | Should -Be 2
         $ix[1].Description | Should -Be 'Custom image'
+        $ix[1].SizeBytes | Should -Be 9876543210
     }
 
     It 'returns an empty array for output without indexes' {
@@ -105,10 +113,16 @@ Describe 'Get-WimIndexes' {
         { Get-WimIndexes -WimPath '/no/such/install.wim' } | Should -Throw
     }
 
-    It 'throws when wimlib exits non-zero' {
+    It 'throws when dism exits non-zero' {
         $wim = Join-Path ([System.IO.Path]::GetTempPath()) "fake-$(Get-Random).wim"
         Set-Content -LiteralPath $wim -Value 'fake'
         # 'false' is a real command on Linux that always exits 1.
+        { Get-WimIndexes -WimPath $wim -DismPath 'false' } | Should -Throw
+    }
+
+    It 'still accepts the old -WimlibPath spelling as an alias' {
+        $wim = Join-Path ([System.IO.Path]::GetTempPath()) "fake-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'fake'
         { Get-WimIndexes -WimPath $wim -WimlibPath 'false' } | Should -Throw
     }
 }
@@ -128,8 +142,9 @@ Describe 'Invoke-Deploy command sequence' {
         $script:calls.Count | Should -Be 3
         $script:calls[0] | Should -Match 'mountvol'
         $script:calls[1] | Should -Match 'format\.com C: /FS:NTFS /Q /Y'
-        $script:calls[2] | Should -Match 'apply'
-        $script:calls[2] | Should -Match ' 2 C:\\'
+        $script:calls[2] | Should -Match 'dism\.exe /English /Apply-Image'
+        $script:calls[2] | Should -Match '/Index:2'
+        $script:calls[2] | Should -Match '/ApplyDir:C:\\'
     }
 
     It 'throws when format fails instead of applying anyway' {
@@ -143,7 +158,7 @@ Describe 'Invoke-Deploy command sequence' {
             return 0
         }
         { Invoke-Deploy -WimPath $wim -Index 1 -TargetRoot 'C:\' -CommandRunner $runner } | Should -Throw
-        $script:calls -notcontains 'wimlib-imagex' | Should -BeTrue
+        $script:calls -notcontains 'dism.exe' | Should -BeTrue
     }
 }
 

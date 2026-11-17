@@ -1309,6 +1309,15 @@ git commit -m "feat(installer): install.mic discovery protocol"
   - `Invoke-Deploy([string] $WimPath, [int] $Index, [string] $TargetRoot)` — 依次：`format.com <drive> /FS:NTFS /Q /Y`（先 `mountvol` 卸载）→ `wimlib-imagex apply <wim> <index> <target>` → 返回退出码
   - `Repair-Boot([string] $TargetRoot, [string] $BootRoot)` — `bcdboot <target>\Windows /s <boot> /f ALL`
 
+> **M7 决定（2026-11-17）：应用与查询工具从 wimlib-imagex 改成 DISM。**
+> `wimlib-imagex.exe` 只在构建主机上存在，从不进 PE；`dism.exe` 已在出货
+> boot.wim 里（两个索引都核实有）。`Get-WimIndexes` 改调
+> `dism.exe /English /Get-WimInfo`，解析 `Index : N` / `Name :` /
+> `Description :` / `Size : <千分位> bytes`；`Invoke-Deploy` 改调
+> `dism.exe /English /Apply-Image /ImageFile:<wim> /Index:<n> /ApplyDir:<target>`。
+> 参数名 `$WimlibPath` 改为 `$DismPath`（保留别名）。构建侧提取仍用 wimlib
+>（`Wim.ps1`），只改 PE 内运行时。详见 `docs/installer.md`。
+
 - [ ] **Step 1: 写失败测试**
 
 ```powershell

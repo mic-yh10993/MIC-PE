@@ -25,7 +25,6 @@ ENVI SetupDir=%SystemDrive%\Program Files\MICPE\MICPE-Setup
 ENVI LogDir=%SystemDrive%\Program Files\MICPE\logs
 ENVI DiskGenius=%SystemDrive%\Program Files\DiskGenius.exe
 ENVI UnattendDir=%SystemDrive%\Program Files\WinNTSetup\unattend
-ENVI Wimlib=%SystemDrive%\Program Files\MICPE\wimlib-imagex.exe
 ENVI SourceCount=0
 ENVI AutoImage=
 ENVI ProbeFile=%MICPE_PROBE_FILE%
@@ -86,7 +85,7 @@ TEXT ImageInfo,L24T72W500H20,%Source1_Path% · %Source1_Name%
 ITEM ChangeImage,L420T68W90H26,更换镜像,CALL ChangeImage
 ITEM Rescan,L516T68W90H26,重新扫描,CALL RescanSources
 ITEM Partition,L612T68W90H26,分区,EXEC "%DiskGenius%"
-; Version dropdown (filled by RefreshVersions from wimlib info)
+; Version dropdown (filled by RefreshVersions from dism /Get-WimInfo)
 TEXT VerLabel,L16T108W60H20,版本：
 LIST VerList,L80T104W300H24,,CALL RefreshVersions
 ; 2. Target table
@@ -128,9 +127,10 @@ CALL RefreshVersions
 END
 
 SUB RefreshVersions
-; Fill VerList from wimlib-imagex info. Runs only when the binary exists;
-; without it the list keeps the display name from install.mic.
-IFEX "%Wimlib%",EXEC -wait -hide "%Wimlib%" info "%Source1_Path%"
+; Fill VerList from dism.exe /Get-WimInfo. dism.exe ships in System32 in
+; every WinPE, so this always runs (M7: the old wimlib-imagex.exe never
+; existed inside the PE, which is why the version list used to stay empty).
+EXEC -wait -hide dism.exe /English /Get-WimInfo /WimFile:"%Source1_Path%"
 END
 
 SUB RefreshDisks
@@ -164,12 +164,12 @@ IFEX "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe",EXEC -wait -h
 END
 
 SUB DoDeploy
-; format (after mountvol unmount) -> wimlib apply -> optional unattend ->
+; format (after mountvol unmount) -> dism apply -> optional unattend ->
 ; bcdboot. Each step logs to X:\Program Files\MICPE\logs\setup-<time>.log.
 ENVI SetupLog=%LogDir%\setup-%date%-%time%.log
 EXEC -wait -hide mountvol.exe %TargetDrive%: /D
 EXEC -wait -hide format.com %TargetDrive%: /FS:NTFS /Q /Y
-EXEC -wait "%Wimlib%" apply "%Source1_Path%" %VerIndex% "%TargetDrive%:\"
+EXEC -wait dism.exe /English /Apply-Image /ImageFile:"%Source1_Path%" /Index:%VerIndex% /ApplyDir:"%TargetDrive%:\"
 IFEX $%ERRORLEVEL%<>0,TEAM MESS 安装失败，退出码 %ERRORLEVEL%。日志：%SetupLog%@ 安装失败|EXIT
 IFEX %使用无人值守.Check%=1,EXEC -wait -hide cmd.exe /c copy /y "%UnattendPath%" "%TargetDrive%:\autounattend.xml"
 EXEC -wait -hide bcdboot.exe "%TargetDrive%:\Windows" /s %BootDrive% /f ALL

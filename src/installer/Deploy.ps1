@@ -4,12 +4,21 @@
     Installer deploy step for the MICPE installer (M6, Task 16).
 
 .DESCRIPTION
-    Index selection, target space/safety checks, wimlib apply and boot
+    Index selection, target space/safety checks, DISM apply and boot
     repair. The pure functions (Select-DefaultIndex, Test-TargetSpace on
     byte counts, Test-TargetSafety, ConvertFrom-WimInfoOutput) run anywhere;
     the functions that touch disks (Invoke-Deploy, Repair-Boot) require
     Windows and take a -CommandRunner seam so tests can capture the command
     sequence without formatting a real disk.
+
+    M7 decision: the apply/info tool is DISM, not wimlib-imagex.
+    dism.exe ships inside every WinPE (verified in the shipped boot.wim,
+    both indexes), while wimlib-imagex.exe only exists on the build host.
+    Shipping wimlib into the PE would have meant a new payload binary plus
+    its libwim-15.dll and re-pinning the prepared payload-v1 archive; DISM
+    costs nothing and is Microsoft's documented tool for applying images in
+    WinPE. The build host still uses wimlib-imagex for extraction
+    (src/build/lib/Wim.ps1) -- only the in-PE runtime path changed.
 
     # reuse-check: the 1.15 headroom rule, the two parameter sets of
     Test-TargetSpace and the Review Focus mapping come from docs/plan.md
@@ -25,11 +34,22 @@ function ConvertFrom-WimInfoOutput {
         [string[]] $Lines = @()
     )
 
+    # Parses `dism.exe /English /Get-WimInfo` output (M7: the in-PE tool
+    # is DISM, not wimlib-imagex). Verified format (Microsoft Learn):
+    #   Deployment Image Servicing and Management tool
+    #   Version: 10.0.14393.0
+    #   Details for image : F:\sources\install.esd
+    #   Index : 1
+    #   Name : Windows 10 Pro
+    #   Description : Windows 10 Pro
+    #   Size : 14,747,431,455 bytes
+    # /English pins the field names; without it a localized DISM prints
+    # the same lines in the system language and this parser finds nothing.
     $indexes = [System.Collections.Generic.List[pscustomobject]]::new()
     $current = $null
 
     foreach ($line in $Lines) {
-        if ($line -match '^\s*Index:\s*(\d+)\s*$') {
+        if ($line -match '^\s*Index\s*:\s*(\d+)\s*$') {
             $current = [pscustomobject]@{
                 Index       = [int] $Matches[1]
                 Name        = ''
@@ -38,14 +58,14 @@ function ConvertFrom-WimInfoOutput {
             }
             $indexes.Add($current)
         }
-        elseif ($null -ne $current -and $line -match '^\s*Name:\s*(.*?)\s*$') {
+        elseif ($null -ne $current -and $line -match '^\s*Name\s*:\s*(.*?)\s*$') {
             $current.Name = $Matches[1]
         }
-        elseif ($null -ne $current -and $line -match '^\s*Description:\s*(.*?)\s*$') {
+        elseif ($null -ne $current -and $line -match '^\s*Description\s*:\s*(.*?)\s*$') {
             $current.Description = $Matches[1]
         }
-        elseif ($null -ne $current -and $line -match '^\s*Total Bytes:\s*(\d+)\s*$') {
-            $current.SizeBytes = [long] $Matches[1]
+        elseif ($null -ne $current -and $line -match '^\s*Size\s*:\s*([\d,]+)\s+bytes\s*$') {
+            $current.SizeBytes = [long] ($Matches[1] -replace ',', '')
         }
     }
 
@@ -58,15 +78,19 @@ function Get-WimIndexes {
         [Parameter(Mandatory = $true)]
         [string] $WimPath,
 
-        [string] $WimlibPath = 'wimlib-imagex'
+        # dism.exe is in System32 in every WinPE, so the default resolves
+        # without shipping anything. The WimlibPath alias keeps older
+        # callers (and the M6 tests) working unchanged.
+        [Alias('WimlibPath')]
+        [string] $DismPath = 'dism.exe'
     )
 
     Assert-PathExists -Path $WimPath -Label 'WIM'
 
-    $output = & $WimlibPath info $WimPath 2>&1 | Out-String
+    $output = & $DismPath /English /Get-WimInfo /WimFile:$WimPath 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
         throw [System.InvalidOperationException]::new(
-            "wimlib-imagex info failed with exit code $LASTEXITCODE for $WimPath")
+            "dism.exe /Get-WimInfo failed with exit code $LASTEXITCODE for $WimPath")
     }
 
     $indexes = ConvertFrom-WimInfoOutput -Lines ($output -split "`r?`n")
@@ -125,11 +149,12 @@ function Test-TargetSpace {
         [string] $TargetRoot,
 
         [Parameter(ParameterSetName = 'Wim')]
-        [string] $WimlibPath = 'wimlib-imagex'
+        [Alias('WimlibPath')]
+        [string] $DismPath = 'dism.exe'
     )
 
     if ($PSCmdlet.ParameterSetName -eq 'Wim') {
-        $indexes = Get-WimIndexes -WimPath $WimPath -WimlibPath $WimlibPath
+        $indexes = Get-WimIndexes -WimPath $WimPath -DismPath $DismPath
         $entry = @($indexes | Where-Object { $_.Index -eq $Index })
         if ($entry.Count -eq 0) {
             throw [System.InvalidOperationException]::new(
@@ -146,7 +171,7 @@ function Test-TargetSpace {
         $AvailableBytes = $drive.Free
     }
 
-    # wimlib reports the uncompressed size; 1.15 leaves headroom. Ceiling
+    # DISM reports the uncompressed size; 1.15 leaves headroom. Ceiling
     # (not truncation): 1000 * 1.15 must come out as 1150, not 1149.
     $required = [long] [Math]::Ceiling([double] $RequiredBytes * 1.15)
     return [pscustomobject]@{
@@ -222,14 +247,15 @@ function Invoke-Deploy {
         [Parameter(Mandatory = $true)]
         [string] $TargetRoot,
 
-        [string] $WimlibPath = 'wimlib-imagex',
+        [Alias('WimlibPath')]
+        [string] $DismPath = 'dism.exe',
 
         [scriptblock] $CommandRunner = $null
     )
 
     if ($null -eq $CommandRunner -and -not $IsWindows) {
         throw [System.InvalidOperationException]::new(
-            'Invoke-Deploy requires Windows (format.com / wimlib-imagex)')
+            'Invoke-Deploy requires Windows (format.com / dism.exe)')
     }
     Assert-PathExists -Path $WimPath -Label 'WIM'
 
@@ -247,8 +273,14 @@ function Invoke-Deploy {
             "format.com failed with exit code $formatCode for ${letter}:")
     }
 
-    $applyCode = Invoke-DeployCommand -Exe $WimlibPath `
-        -Arguments @('apply', $WimPath, "$Index", $TargetRoot) -CommandRunner $CommandRunner
+    # DISM /Apply-Image (M7: replaces `wimlib-imagex apply`). No
+    # /ScratchDir: Microsoft's own WinPE examples run the plain form, and
+    # the apply streams files rather than staging them; if an L3 run ever
+    # reports a scratch-space error, point /ScratchDir at the target drive.
+    # No /SWMFile branch: the discoverer only ever returns .wim/.esd, and
+    # the wizard's file picker only accepts *.wim|*.esd.
+    $applyCode = Invoke-DeployCommand -Exe $DismPath `
+        -Arguments @('/English', '/Apply-Image', "/ImageFile:$WimPath", "/Index:$Index", "/ApplyDir:$TargetRoot") -CommandRunner $CommandRunner
     return $applyCode
 }
 

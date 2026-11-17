@@ -230,7 +230,7 @@ startnet.cmd
 
 1. 二次确认（显示磁盘号、分区号、将清空的分区、镜像路径）
 2. 卸载目标卷 → 格式化 NTFS（卷标与用户选的一致）
-3. `wimlib-imagex apply <wim> <index> <target>`（esd 也走 wimlib；gho 不做）
+3. `dism.exe /English /Apply-Image /ImageFile:<wim> /Index:<index> /ApplyDir:<target>`（esd 也走 DISM；gho 不做）
 4. **无人值守（可选，默认不写）**：未勾选则目标系统正常进 OOBE，用户自己建账户；勾选则把选定的 `autounattend.xml` 写到目标分区根目录
 5. `bcdboot <target>\Windows /s <boot> /f ALL`（UEFI+BIOS 双写）
 6. 完成页：重启/关机/查看日志
@@ -250,7 +250,7 @@ startnet.cmd
 - 默认值就是"最可能正确"的那个：自动挑最大的 NTFS 数据分区当系统盘、自动挑 EFI 分区当引导
 - 空盘不报死错，而是给一个明确的下一步按钮（打开 DiskGenius）
 - 危险操作二次确认，确认框里用**具体数字**而不是术语
-- 失败时把 wimlib/bcdboot 的输出落到 `X:\MICPE\logs\setup-<时间>.log`，界面上给"复制日志路径"按钮
+- 失败时把 dism/bcdboot 的输出落到 `X:\MICPE\logs\setup-<时间>.log`，界面上给"复制日志路径"按钮
 - 不提供"删除所有分区/清空磁盘"这类一键毁灭按钮（分区交给 DiskGenius，它是用户主动发起、可见的独立操作）
 
 ### 5.4.1 装机源发现协议（`install.mic`）
