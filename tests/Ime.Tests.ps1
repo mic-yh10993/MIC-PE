@@ -106,6 +106,10 @@ Describe 'Assert-ImeRegistered against a real hive' {
             try {
                 $null = & reg.exe add 'HKLM\MICPE-IME-TEST\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload' /v 1 /t REG_SZ /d 00000804 /f 2>&1
                 if ($LASTEXITCODE -ne 0) { throw 'reg add preload failed' }
+                # Verify the write while the hive is still mounted: if this
+                # fails, the write (not the later read) is broken.
+                $verify = & reg.exe query 'HKLM\MICPE-IME-TEST\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload' 2>&1
+                ($verify -join "`n") | Should -Match '0804'
             }
             finally {
                 Dismount-RegistryHive -KeyName 'MICPE-IME-TEST'

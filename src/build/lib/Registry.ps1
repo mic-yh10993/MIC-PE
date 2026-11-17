@@ -144,11 +144,18 @@ function Get-RegistryKeyValues {
     $path = "HKLM\$KeyName"
     if ($SubKey) { $path = "$path\$SubKey" }
 
-    $output = & reg.exe query $path 2>&1
+    # stderr is dropped: a missing key is signalled by the exit code, and
+    # mixing ErrorRecords into $output would break the string[] binding.
+    $output = & reg.exe query $path 2>$null
     if ($LASTEXITCODE -ne 0) {
         return $null
     }
-    return (ConvertFrom-RegQueryOutput -Lines $output)
+    # A query that prints nothing (or only blank lines) means "key exists,
+    # no values": normalise to an empty array instead of letting a bare ""
+    # hit the mandatory [string[]] binding of the parser (CI run 44001811418
+    # proved reg.exe can return exactly one blank line here).
+    $lines = @(@($output) | ForEach-Object { [string] $_ } | Where-Object { $_ -ne '' })
+    return (ConvertFrom-RegQueryOutput -Lines $lines)
 }
 
 function Get-RegistryValue {
