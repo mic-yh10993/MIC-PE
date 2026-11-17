@@ -732,9 +732,9 @@ Expected: FAIL — `Read-ProbeFile` 与 `Get-QemuArgs` 未定义
 
 PE 内运行的自检脚本。逐项检测并 `WRIT` 到 `E:\micpe-probe.txt`（`E:` 由 vvfat 提供；先 `FORX` 找带可写测试的盘符，找不到就写 `X:\micpe-probe.txt` 并记 `share=missing`）。
 
-检查顺序与输出键：`boot`、`shell_ready`、`explorer`、`dwm`、`network`、`ime`、`uwp_appx`、`uwp_launch_settings`、`uwp_launch_photos`、`uwp_launch_media`、`payload`、`brand`、`size_wim`、`size_iso`。每项值为 `1`/`0` 或数字/文本。
+检查顺序与输出键：`boot`、`shell_ready`、`explorer`、`dwm`、`network`、`ime`、`uwp_appx`、`uwp_launch_photos`、`uwp_launch_media`、`uwp_launch_calculator`、`payload`、`brand`、`size_wim`、`size_iso`。每项值为 `1`/`0` 或数字/文本。（用户决定 2026-11-16：UWP 仅保留核心文件，设置应用不带，`uwp_launch_settings` 改为 `uwp_launch_calculator`。）
 
-`uwp_launch_*` 用 `EXEC -su explorer.exe shell:AppsFolder\<AUMID>` 后 `WAIT 3000` 再 `FIND` 对应进程名（`SystemSettings`、`Microsoft.Photos`、`Microsoft.ZuneMusic`）。
+`uwp_launch_*` 用 `EXEC -su explorer.exe shell:AppsFolder\<AUMID>` 后 `WAIT 3000` 再 `FIND` 对应进程名（`CalculatorApp`、`Microsoft.Photos`、`Microsoft.ZuneMusic`）。
 
 - [ ] **Step 4: 实现 `Assert-Probe.ps1` 与 `Invoke-QemuVerify.ps1` 并跑测试**
 
@@ -777,7 +777,7 @@ $script:StageProbeExpect = @{
     m1 = @{ boot='1'; share='1' }
     m2 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1' }
     m3 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; network='*'; ime='1' }
-    m4 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; ime='1'; uwp_appx='1'; uwp_launch_settings='1'; uwp_launch_photos='1'; uwp_launch_media='1' }
+    m4 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; ime='1'; uwp_appx='1'; uwp_launch_photos='1'; uwp_launch_media='1'; uwp_launch_calculator='1' }
     m5 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; ime='1'; payload='1'; brand='1' }
     m6 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; installer_scan='1'; installer_deploy='1' }
     m7 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; ime='1'; uwp_appx='1'; payload='1'; brand='1'; installer_scan='1'; installer_deploy='1'; size_wim='*'; size_iso='*' }
@@ -950,7 +950,7 @@ Expected: `ime=1`（`Preload` 含 `0804`）；`network` 为 `*`（非空即可�
 - Produces:
   - `Install-AppxFramework([string] $MountDir, [string] $InstallWim)` — 从 install.wim 提取 `Program Files\WindowsApps\Microsoft.VCLibs.140.00*`、`Microsoft.NET.Native.*`、`Microsoft.UI.Xaml.*`、`Microsoft.WindowsAppRuntime*`，断言至少 5 个框架包目录
   - `Register-ProvisionedAppx([string] $MountDir, [string[]] $PackageNames)` — 向 `$MountDir\Windows\System32\config\SOFTWARE` 的 `Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications` 与 `\InboxApplications` 写键；对每个名称断言键存在
-  - `Get-UwpDefaults()` — 返回 `@('Microsoft.WindowsCalculator','Microsoft.Windows.Photos','Microsoft.ZuneMusic','Microsoft.WindowsStore','Microsoft.Windows.Settings')`
+  - `Get-UwpDefaults()` — 返回 `@('Microsoft.WindowsCalculator','Microsoft.Windows.Photos','Microsoft.ZuneMusic')`（用户决定 2026-11-16：仅保留核心文件，设置与 Store 不带）
   - `Assert-UwpReady([string] $MountDir)` — 断言 `Windows\System32\AppXDeploymentClient.dll`、`Windows.StateRepository*.dll` ≥4、`Windows\System32\Windows.UI.Xaml.dll`、`AppRepository` 目录、且默认应用名对应的 `WindowsApps\<name>_*` 目录各 ≥1
 
 - [ ] **Step 1: 写失败测试**
@@ -1008,7 +1008,7 @@ git push && gh workflow run build.yml -f stage=m4 -f build=26200
 gh workflow run build.yml -f stage=m4 -f build=26200 -f verify=full
 ```
 
-Expected: `uwp_appx=1`、`uwp_launch_settings=1`、`uwp_launch_photos=1`、`uwp_launch_media=1`。probe 用 `explorer shell:AppsFolder\<AUMID>` 拉起后检查进程存活，失败即该项为 `0`。失败时看 artifact 里的 `probe.txt` 与截图；若 `uwp_appx=0` 先查 AppX 栈文件，若 `uwp_appx=1` 但 `uwp_launch_*=0` 先查 `StateRepository` 与 `AppRepository` 目录。
+Expected: `uwp_appx=1`、`uwp_launch_photos=1`、`uwp_launch_media=1`、`uwp_launch_calculator=1`。（用户决定 2026-11-16：设置应用不带，`uwp_launch_settings` 改为 `uwp_launch_calculator`。）probe 用 `explorer shell:AppsFolder\<AUMID>` 拉起后检查进程存活，失败即该项为 `0`。失败时看 artifact 里的 `probe.txt` 与截图；若 `uwp_appx=0` 先查 AppX 栈文件，若 `uwp_appx=1` 但 `uwp_launch_*=0` 先查 `StateRepository` 与 `AppRepository` 目录。
 
 ---
 

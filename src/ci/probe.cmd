@@ -68,8 +68,13 @@ if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
 
 rem Keys are spelled out rather than built from a suffix so the CI-side
 rem assertion table can be grepped against this file literally.
-call :probe_uwp SystemSettings "shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"
-if errorlevel 1 (echo uwp_launch_settings=0 >> "%PROBE_OUT%") else (echo uwp_launch_settings=1 >> "%PROBE_OUT%")
+rem No Settings probe: the Settings app is not provisioned (user decision
+rem 2026-11-16, too heavy). Calculator takes its place as the third app.
+rem NOTE (unverified against a real system): the Calculator process image
+rem is CalculatorApp.exe; if the L3 run shows uwp_launch_calculator=0
+rem while the app itself launches, correct the process name here.
+call :probe_uwp CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
 
 call :probe_uwp Microsoft.Photos "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")

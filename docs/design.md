@@ -20,7 +20,7 @@ MICPE 是一张**装机维修盘**：从 U 盘/光盘启动，进一个能联网
 |---|---|---|
 | G1 | ISO 双启（BIOS + UEFI），`boot.wim` 直接可启动 | QEMU/VMware 冷启动进桌面 |
 | G2 | 原生 Explorer 桌面、任务栏、开始菜单可用 | 进桌面后能用「此电脑」浏览磁盘 |
-| G3 | UWP 原生可运行（设置、照片、新版媒体播放器） | 三个应用都能启动、能打开文件 |
+| G3 | UWP 原生可运行（照片、新版媒体播放器、计算器） | 三个应用都能启动、能打开文件 |
 | G4 | 有网络（有线 DHCP + PENetwork 兜底）、能上网 | 打开浏览器加载网页 |
 | G5 | 微软拼音输入法可用 | 能切换并输入中文 |
 | G6 | 装机工具按 `install.mic` 标记（降级：`sources\install.wim`）自动发现装机源并开机自弹 | 带标记的卷上启动即弹窗且已选中该源 |
@@ -335,7 +335,7 @@ Chrome（MSI，安装到 `X:\Program Files\Google\Chrome`）与 Office 2016 绿�
 | **M1** | 管线骨架：UUP → ISO → 拆 wim → 空 boot.wim 重封 → ISO | 产物能进 cmd 提示符 |
 | **M2** | Explorer 桌面（白名单 20 + SOFTWARE hive + 注册表 20） | 进桌面，能开此电脑 |
 | **M3** | 网络 + 输入法 + 运行库（WOW64） | ping 通、能输入中文、32 位 exe 能跑 |
-| **M4** | UWP 栈 + 设置 + 照片 + 媒体播放器 | 三个 UWP 都能启动 |
+| **M4** | UWP 栈 + 照片 + 媒体播放器 + 计算器 | 三个 UWP 都能启动 |
 | **M5** | 预装软件 + 桌面快捷方式 + 品牌 | Program Files\MICPE 完整 |
 | **M6** | 装机工具 + 自动探测自弹 + 一键装 | 空盘装完能进 OOBE |
 | **M7** | 体积治理 + ISO 双启 + 分卷 Release + 清单 | 全部 G 目标达成 |
@@ -393,7 +393,7 @@ QEMU 以 `-monitor tcp:127.0.0.1:4444,server,nowait` 启动，CI 连上后发 `s
 | `network` | `ipconfig` 出现有效 IPv4（可 DHCP 超时则记 `pending`，不算失败） |
 | `ime` | 注册表 `Keyboard Layout\Preload` 含 `0804` |
 | `uwp_appx` | `dism /online /Get-ProvisionedAppxPackages` 或注册表 `AppxAllUserStore` 计数 > 0 |
-| `uwp_launch` | 依次 `explorer shell:AppsFolder\<AppUserModelId>` 启动，3 秒后 `FIND` 进程在（设置/照片/媒体播放器各自一行） |
+| `uwp_launch` | 依次 `explorer shell:AppsFolder\<AppUserModelId>` 启动，3 秒后 `FIND` 进程在（照片/媒体播放器/计算器各自一行） |
 | `payload` | 关键路径存在性（`Program Files\MICPE\PENetwork\PENetwork.exe` 等） |
 | `brand` | 注册表 OEM 六个值 + `oemlogo.bmp` 存在 |
 | `installer_scan` | 跑 `MICPE-Setup.wcs -cli -discoveronly`，输出发现的源列表 |

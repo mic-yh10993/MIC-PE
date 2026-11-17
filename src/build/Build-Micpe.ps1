@@ -43,7 +43,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libDir = Join-Path $PSScriptRoot 'lib'
 
-foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'BaseImage', 'Iso') {
+foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'Uwp', 'BaseImage', 'Iso') {
     . (Join-Path $libDir "$lib.ps1")
 }
 
@@ -109,7 +109,7 @@ function Invoke-BaseStep {
     $packageDir = New-UupDownloadPackage -Uuid $uup.Uuid -OutDir $baseDir -Lang 'zh-cn' -Edition 'professional'
 
     $iniPath = Join-Path $packageDir 'ConvertConfig.ini'
-    # SkipApps MUST stay 0: the UWP apps we copy into the PE (Settings, Photos,
+    # SkipApps MUST stay 0: the UWP apps we copy into the PE (Photos,
     # Media Player, Calculator) live inside install.wim, and skipping them
     # would leave nothing to extract.
     # ResetBase stays 0 because component-baseline resets have broken UWP
@@ -306,6 +306,33 @@ function Invoke-ComponentsStep {
     Assert-BootWimSize -WimPath $mediaBoot
 }
 
+function Invoke-UwpStep {
+    Write-Step 'installing the UWP stack and provisioned apps'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    $installWim = Join-Path $paths.Base 'install.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+    Assert-PathExists -Path $installWim -Label 'install.wim'
+
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Install-AppxFramework -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
+        Install-UwpApps -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot `
+            -PackageNames (Get-UwpDefaults)
+        $regFiles = @('40-uwp.reg') |
+            ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles
+        Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
+        Assert-UwpReady -MountDir $paths.Mount
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
 function Invoke-IsoStep {
     Write-Step 'packaging MICPE.iso'
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
@@ -338,6 +365,7 @@ foreach ($step in $steps) {
         'explorer'  { Invoke-ExplorerStep }
         'runtimes'  { Invoke-RuntimesStep }
         'components' { Invoke-ComponentsStep }
+        'uwp'       { Invoke-UwpStep }
         'iso'       { $result = Invoke-IsoStep }
         default {
             Write-Warn "step '$step' is not implemented yet (planned for a later stage)"

@@ -1,0 +1,16 @@
+# Phase 4 - UWP stack: AppX deployment client/server and XAML runtime.
+# These are System32 residents of install.wim. The framework packages
+# (VCLibs / .NET Native / XAML / AppRuntime) and the app packages
+# themselves are extracted by wildcard in Install-AppxFramework and
+# Install-UwpApps, not from this list.
+# // reuse-check: AppXDeploymentClient.dll and Windows.UI.Xaml.dll are the
+# two files Assert-UwpReady checks. The other four are the same deployment
+# stack (server, all-user store, package SIP, ApplicationModel runtime);
+# if the L2 structural check shows any of them missing from the 25H2
+# install.wim, drop that line instead of weakening the assertion.
+Windows\System32\AppXDeploymentClient.dll
+Windows\System32\AppXDeploymentServer.dll
+Windows\System32\AppXAllUserStore.dll
+Windows\System32\Windows.UI.Xaml.dll
+Windows\System32\AppxSip.dll
+Windows\System32\Windows.ApplicationModel.dll

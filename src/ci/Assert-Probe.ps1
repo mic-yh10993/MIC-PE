@@ -14,10 +14,10 @@ $script:StageProbeExpect = [ordered]@{
     m1 = @{ boot = '1'; share = '1' }
     m2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1' }
     m3 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1' }
-    m4 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; uwp_appx = '1'; uwp_launch_settings = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1' }
+    m4 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; uwp_appx = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; uwp_launch_calculator = '1' }
     m5 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; payload = '1'; brand = '1' }
     m6 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; installer_scan = '1'; installer_deploy = '1' }
-    m7 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1'; uwp_appx = '1'; uwp_launch_settings = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; payload = '1'; brand = '1'; installer_scan = '1'; installer_deploy = '1'; size_wim = '*'; size_iso = '*' }
+    m7 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1'; uwp_appx = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; uwp_launch_calculator = '1'; payload = '1'; brand = '1'; installer_scan = '1'; installer_deploy = '1'; size_wim = '*'; size_iso = '*' }
 }
 
 function Get-StageProbeExpect {
