@@ -126,6 +126,24 @@ function Get-QemuArgs {
     return $args.ToArray()
 }
 
+function ConvertTo-NativeArgumentString {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments
+    )
+
+    # Start-Process -ArgumentList joins an array with bare spaces, so a value
+    # with a space is split into two arguments by the native parser: run
+    # 43989280052 passed '-bios C:\Program Files\qemu\share\...' and QEMU
+    # read it as '-bios C:\Program' + 'Files\qemu\...', then died with
+    # "Could not open 'Files\qemu\share\edk2-x86_64-code.fd'". Quote any
+    # argument that contains whitespace so it survives as one token.
+    ($Arguments | ForEach-Object {
+        if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ }
+    }) -join ' '
+}
+
 function Invoke-MonitorCommand {
     [CmdletBinding()]
     param(
@@ -541,9 +559,10 @@ function Invoke-QemuVerify {
         -FirmwarePath $FirmwarePath -DataDisks $DataDisks
 
     Write-Host "==> starting qemu (timeout ${TimeoutMin}m)"
-    Write-Host "    $QemuPath $($qemuArgs -join ' ')"
+    $qemuArgString = ConvertTo-NativeArgumentString -Arguments $qemuArgs
+    Write-Host "    $QemuPath $qemuArgString"
 
-    $process = Start-Process -FilePath $QemuPath -ArgumentList $qemuArgs -PassThru -NoNewWindow
+    $process = Start-Process -FilePath $QemuPath -ArgumentList $qemuArgString -PassThru -NoNewWindow
     $deadline = (Get-Date).AddMinutes($TimeoutMin)
     $shotIndex = 0
     $nextShotAt = (Get-Date).AddMinutes(10)

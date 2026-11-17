@@ -59,6 +59,26 @@ Describe 'Get-QemuArgs' {
     }
 }
 
+Describe 'ConvertTo-NativeArgumentString' {
+    It 'quotes arguments containing spaces and leaves the rest bare' {
+        $line = ConvertTo-NativeArgumentString -Arguments @(
+            '-m', '4096', '-bios', 'C:\Program Files\qemu\share\edk2-x86_64-code.fd', '-boot', 'd'
+        )
+        $line | Should -Be '-m 4096 -bios "C:\Program Files\qemu\share\edk2-x86_64-code.fd" -boot d'
+    }
+
+    It 'keeps the -bios firmware path as one quoted token (run 43989280052)' {
+        # The runner's QEMU lives under C:\Program Files, so the -bios value
+        # contains a space; Start-Process split it into two arguments and
+        # QEMU died with "Could not open 'Files\qemu\share\...fd'".
+        $args = Get-QemuArgs -Iso 'C:\x\a.iso' -ShareDir 'C:\x\s' `
+            -FirmwarePath 'C:\Program Files\qemu\share\edk2-x86_64-code.fd'
+        $line = ConvertTo-NativeArgumentString -Arguments $args
+        $line | Should -Match '-bios "C:\\Program Files\\qemu\\share\\edk2-x86_64-code\.fd"'
+        $line | Should -Not -Match '-bios C:\\Program Files'
+    }
+}
+
 Describe 'ConvertTo-MonitorPath' {
     It 'turns Windows backslashes into forward slashes for the QEMU monitor' {
         ConvertTo-MonitorPath -Path 'D:\a\MIC-PE\verify-out\shots\shot-01.ppm' |
