@@ -317,27 +317,29 @@ function Assert-ImeRegistered {
 
     Mount-RegistryHive -HiveFile $hiveFile -KeyName $HiveKey
     try {
-        $subKey = 'Microsoft/Windows NT/CurrentVersion/Keyboard Layout/Preload'
-        $path = "HKLM:\$HiveKey\$($subKey -replace '/', '\')"
-        if (-not (Test-Path -LiteralPath $path)) {
+        $subKey = 'Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload'
+        $values = Get-RegistryKeyValues -KeyName $HiveKey -SubKey $subKey
+        if ($null -eq $values) {
             throw [System.InvalidOperationException]::new(
-                "0804 keyboard preload entry is missing: $path does not exist")
+                "0804 keyboard preload entry is missing: HKLM\$($HiveKey)\$($subKey) does not exist")
         }
 
-        $item = Get-ItemProperty -LiteralPath $path
-        $values = @($item.PSObject.Properties |
-            Where-Object { $_.Name -notlike 'PS*' } |
-            ForEach-Object { [string] $_.Value })
-
-        $hasPinyin = @($values | Where-Object { $_ -match '0804' }).Count -gt 0
+        $hasPinyin = @($values.Values | Where-Object { $_ -match '0804' }).Count -gt 0
         if (-not $hasPinyin) {
             throw [System.InvalidOperationException]::new(
-                "0804 keyboard preload entry is missing. Current values: $($values -join ', ')")
+                "0804 keyboard preload entry is missing. Current values: $($values.Values -join ', ')")
         }
 
         Write-SubStep '0804 (Microsoft Pinyin) preload entry present'
     }
     finally {
-        Dismount-RegistryHive -KeyName $HiveKey
+        # A failing unload must not mask the real assertion above: warn and
+        # continue, matching Invoke-RegistryScript's finally convention.
+        try {
+            Dismount-RegistryHive -KeyName $HiveKey
+        }
+        catch {
+            Write-Warn "could not unload HKLM\$HiveKey : $($_.Exception.Message)"
+        }
     }
 }

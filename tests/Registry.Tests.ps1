@@ -20,6 +20,37 @@ Describe 'Import-RegFile' {
     }
 }
 
+Describe 'ConvertFrom-RegQueryOutput' {
+    It 'parses name, type and data rows' {
+        $lines = @(
+            'HKEY_LOCAL_MACHINE\PE-IME\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload',
+            '    1    REG_SZ    00000804',
+            '    2    REG_SZ    00000409'
+        )
+        $values = ConvertFrom-RegQueryOutput -Lines $lines
+        $values['1'] | Should -Be '00000804'
+        $values['2'] | Should -Be '00000409'
+    }
+
+    It 'keeps data containing spaces' {
+        $lines = @(
+            'HKEY_LOCAL_MACHINE\PE-IME\Microsoft\Windows NT\CurrentVersion\Keyboard Layouts\00000804',
+            '    Layout Text    REG_SZ    Chinese (Simplified) - US Keyboard',
+            '    IME File    REG_SZ    ChsIME.exe'
+        )
+        $values = ConvertFrom-RegQueryOutput -Lines $lines
+        $values['Layout Text'] | Should -Be 'Chinese (Simplified) - US Keyboard'
+        $values['IME File'] | Should -Be 'ChsIME.exe'
+    }
+
+    It 'returns empty for a header-only listing' {
+        $values = ConvertFrom-RegQueryOutput -Lines @(
+            'HKEY_LOCAL_MACHINE\PE-IME\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload'
+        )
+        $values.Count | Should -Be 0
+    }
+}
+
 Describe 'Get-RegistryValue' {
     It 'returns null for a key that does not exist' {
         Get-RegistryValue -KeyName 'MICPE-NOT-MOUNTED' -SubKey '' -Name '' | Should -BeNullOrEmpty

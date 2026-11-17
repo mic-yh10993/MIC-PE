@@ -100,6 +100,57 @@ function Import-RegFile {
     }
 }
 
+function ConvertFrom-RegQueryOutput {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $Lines
+    )
+
+    # Pure parser for `reg query` output, kept separate so it is unit-testable
+    # without a Windows host. Rows look like:
+    #     1    REG_SZ    00000804
+    # and the header line (the key path itself) is ignored.
+    $values = @{}
+    foreach ($line in $Lines) {
+        # The name column is space-padded and may itself contain spaces
+        # ("Layout Text"), so match up to the two-or-more spaces before REG_*.
+        if ($line -match '^\s+(.+?)\s{2,}REG_[A-Z_]+\s+(.*\S)\s*$') {
+            $values[$Matches[1]] = $Matches[2].Trim()
+        }
+        elseif ($line -match '^\s+(.+?)\s{2,}REG_[A-Z_]+\s*$') {
+            $values[$Matches[1]] = ''
+        }
+    }
+    return $values
+}
+
+function Get-RegistryKeyValues {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $KeyName,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $SubKey
+    )
+
+    # Reads a (possibly mounted) hive through reg.exe, never through the
+    # PowerShell registry provider: the provider keeps an open handle on the
+    # key, and a later `reg unload` then fails with exit code 1 (CI run
+    # 44001157082 proved it). Returns $null when the key does not exist.
+    $path = "HKLM\$KeyName"
+    if ($SubKey) { $path = "$path\$SubKey" }
+
+    $output = & reg.exe query $path 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+    return (ConvertFrom-RegQueryOutput -Lines $output)
+}
+
 function Get-RegistryValue {
     [CmdletBinding()]
     param(
