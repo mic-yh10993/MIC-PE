@@ -197,7 +197,7 @@ Describe 'M2/M3 step wiring' {
     It 'loads Shell.ps1' {
         # The dot-source loop appends '.ps1' to each name, so assert on the
         # library list entry rather than a literal 'Shell.ps1'.
-        $script:buildScript | Should -Match "'Registry', 'Shell', 'Uwp', 'BaseImage'"
+        $script:buildScript | Should -Match "'Registry', 'Shell', 'Uwp', 'Payload', 'Brand', 'BaseImage'"
     }
 
     It 'dispatches the explorer, runtimes and components steps' {
@@ -233,7 +233,7 @@ Describe 'M4 step wiring' {
     }
 
     It 'loads Uwp.ps1' {
-        $script:buildScript | Should -Match "'Shell', 'Uwp', 'BaseImage'"
+        $script:buildScript | Should -Match "'Shell', 'Uwp', 'Payload', 'Brand', 'BaseImage'"
     }
 
     It 'dispatches the uwp step' {
@@ -253,5 +253,38 @@ Describe 'M4 step wiring' {
 
     It 'mounts and commits boot.wim around the uwp step' {
         $script:buildScript | Should -Match 'Invoke-UwpStep'
+    }
+}
+
+Describe 'M5 step wiring' {
+    BeforeAll {
+        $script:buildScript = Get-Content -LiteralPath (Join-Path $repoRoot 'src/build/Build-Micpe.ps1') -Raw
+    }
+
+    It 'loads Payload.ps1 and Brand.ps1' {
+        $script:buildScript | Should -Match "'Uwp', 'Payload', 'Brand', 'BaseImage'"
+    }
+
+    It 'dispatches the payload and brand steps' {
+        foreach ($step in 'payload', 'brand') {
+            $script:buildScript | Should -Match "'$step'\s*\{" -Because "step $step must be dispatched"
+        }
+    }
+
+    It 'downloads, expands, installs and asserts the payload in the step' {
+        $script:buildScript | Should -Match 'Get-PayloadReleaseAsset'
+        $script:buildScript | Should -Match 'Expand-Payload'
+        $script:buildScript | Should -Match 'Install-Payload'
+        $script:buildScript | Should -Match 'Assert-PayloadInstalled'
+    }
+
+    It 'brands and asserts the image in the step' {
+        $script:buildScript | Should -Match 'Set-Brand'
+        $script:buildScript | Should -Match 'Assert-BrandApplied'
+    }
+
+    It 'mounts and commits boot.wim around the payload and brand steps' {
+        $script:buildScript | Should -Match 'Invoke-PayloadStep'
+        $script:buildScript | Should -Match 'Invoke-BrandStep'
     }
 }

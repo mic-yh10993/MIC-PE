@@ -43,7 +43,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libDir = Join-Path $PSScriptRoot 'lib'
 
-foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'Uwp', 'BaseImage', 'Iso') {
+foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'Uwp', 'Payload', 'Brand', 'BaseImage', 'Iso') {
     . (Join-Path $libDir "$lib.ps1")
 }
 
@@ -333,6 +333,56 @@ function Invoke-UwpStep {
     Assert-BootWimSize -WimPath $mediaBoot
 }
 
+function Invoke-PayloadStep {
+    Write-Step 'installing the payload packages'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+
+    $staging = Join-Path $paths.Logs 'payload'
+    $payloadFile = Get-PayloadReleaseAsset -Name 'payload' -StagingDir $staging
+    $payloadDir = Join-Path $staging 'payload'
+    Expand-Payload -Archive $payloadFile -Destination $payloadDir
+    if ($Chrome) {
+        $null = Get-PayloadReleaseAsset -Name 'chrome' -StagingDir $payloadDir
+    }
+    if ($Office) {
+        $null = Get-PayloadReleaseAsset -Name 'office' -StagingDir $payloadDir
+    }
+
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Install-Payload -MountDir $paths.Mount -PayloadDir $payloadDir `
+            -Chrome:$Chrome -Office:$Office -RepoRoot $repoRoot
+        Assert-PayloadInstalled -MountDir $paths.Mount -Chrome:$Chrome -Office:$Office
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
+function Invoke-BrandStep {
+    Write-Step 'applying OEM branding'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Set-Brand -MountDir $paths.Mount -RepoRoot $repoRoot
+        Assert-BrandApplied -MountDir $paths.Mount
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
 function Invoke-IsoStep {
     Write-Step 'packaging MICPE.iso'
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
@@ -366,6 +416,8 @@ foreach ($step in $steps) {
         'runtimes'  { Invoke-RuntimesStep }
         'components' { Invoke-ComponentsStep }
         'uwp'       { Invoke-UwpStep }
+        'payload'   { Invoke-PayloadStep }
+        'brand'     { Invoke-BrandStep }
         'iso'       { $result = Invoke-IsoStep }
         default {
             Write-Warn "step '$step' is not implemented yet (planned for a later stage)"
