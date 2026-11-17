@@ -82,6 +82,48 @@ Describe 'Set-BootShell' {
         Test-Path -LiteralPath "$mount/Windows/System32/winpeshl.ini" | Should -BeFalse
         Test-Path -LiteralPath "$mount/Program Files/MICPE" | Should -BeTrue
     }
+
+    It 'copies PECMD.INI and Pin-Shortcuts.wcs when present in src/shell' {
+        $mount = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32" | Out-Null
+        $repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
+
+        Set-BootShell -MountDir $mount -RepoRoot $repoRoot
+
+        Test-Path -LiteralPath "$mount/Program Files/MICPE/PECMD.INI" | Should -BeTrue
+        Test-Path -LiteralPath "$mount/Windows/System32/Pin-Shortcuts.wcs" | Should -BeTrue
+    }
+}
+
+Describe 'Explorer registry patches' {
+    BeforeAll {
+        $script:reg10 = Get-Content -LiteralPath "$PSScriptRoot/../src/registry/10-pe-base.reg" -Raw
+        $script:reg20 = Get-Content -LiteralPath "$PSScriptRoot/../src/registry/20-explorer.reg" -Raw
+    }
+
+    It '10-pe-base.reg points the Winlogon shell at PECMD' {
+        $script:reg10.Contains('"Shell"="PECMD.EXE"') | Should -BeTrue
+    }
+
+    It '20-explorer.reg overrides the shell with explorer.exe' {
+        $script:reg20.Contains('"Shell"="explorer.exe"') | Should -BeTrue
+        $script:reg20.Contains('"Userinit"=""') | Should -BeTrue
+    }
+
+    It '20-explorer.reg points the desktop at the PE default profile' {
+        $script:reg20.Contains('X:\\Users\\Default\\Desktop') | Should -BeTrue
+    }
+
+    It '20-explorer.reg disables the first-logon animation' {
+        $script:reg20.Contains('"EnableFirstLogonAnimation"=dword:00000000') | Should -BeTrue
+    }
+
+    It '20-explorer.reg is imported after 10-pe-base.reg by the build' {
+        $build = Get-Content -LiteralPath "$PSScriptRoot/../src/build/Build-Micpe.ps1" -Raw
+        # Assert on the array literal itself, not raw IndexOf: the step's
+        # comment mentions 20-explorer.reg before the array does.
+        $build | Should -Match "@\('10-pe-base\.reg', '20-explorer\.reg'\)"
+    }
 }
 
 Describe 'Assert-ImeRegistered preconditions' {

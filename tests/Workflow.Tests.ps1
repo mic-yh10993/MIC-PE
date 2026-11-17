@@ -180,4 +180,49 @@ Describe 'startnet.cmd' {
         $script = Get-Content -LiteralPath (Join-Path $repoRoot 'src/shell/startnet.cmd') -Raw
         $script | Should -Match 'probe.cmd'
     }
+
+    It 'tries the PECMD desktop shell before falling back to cmd' {
+        $script = Get-Content -LiteralPath (Join-Path $repoRoot 'src/shell/startnet.cmd') -Raw
+        $script | Should -Match 'PECMD\.EXE'
+        $script | Should -Match 'PECMD\.INI'
+        $script.IndexOf('PECMD.EXE') | Should -BeLessThan $script.IndexOf('probe.cmd')
+    }
+}
+
+Describe 'M2/M3 step wiring' {
+    BeforeAll {
+        $script:buildScript = Get-Content -LiteralPath (Join-Path $repoRoot 'src/build/Build-Micpe.ps1') -Raw
+    }
+
+    It 'loads Shell.ps1' {
+        # The dot-source loop appends '.ps1' to each name, so assert on the
+        # library list entry rather than a literal 'Shell.ps1'.
+        $script:buildScript | Should -Match "'Registry', 'Shell', 'BaseImage'"
+    }
+
+    It 'dispatches the explorer, runtimes and components steps' {
+        foreach ($step in 'explorer', 'runtimes', 'components') {
+            $script:buildScript | Should -Match "'$step'\s*\{" -Because "step $step must be dispatched"
+        }
+    }
+
+    It 'imports the M2 registry patches in order' {
+        $script:buildScript | Should -Match '10-pe-base\.reg'
+        $script:buildScript | Should -Match '20-explorer\.reg'
+        # Assert on the array literal itself, not raw IndexOf: the step's
+        # comment mentions 20-explorer.reg before the array does.
+        $script:buildScript | Should -Match "@\('10-pe-base\.reg', '20-explorer\.reg'\)"
+    }
+
+    It 'asserts the Explorer shell and the IME registration in their steps' {
+        $script:buildScript | Should -Match 'Assert-ExplorerPresent'
+        $script:buildScript | Should -Match 'Assert-ImeRegistered'
+        $script:buildScript | Should -Match '30-components\.reg'
+    }
+
+    It 'mounts and commits boot.wim around each M2/M3 step' {
+        $script:buildScript | Should -Match 'Invoke-ExplorerStep'
+        $script:buildScript | Should -Match 'Invoke-RuntimesStep'
+        $script:buildScript | Should -Match 'Invoke-ComponentsStep'
+    }
 }
