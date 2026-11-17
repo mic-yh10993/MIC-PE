@@ -170,38 +170,6 @@ function Install-UwpApps {
     Write-SubStep 'provisioned UWP app packages verified'
 }
 
-function New-UwpProvisionRegContent {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [hashtable] $Resolved,
-
-        [Parameter(Mandatory = $true)]
-        [string] $HiveKey
-    )
-
-    # Pure function so the generated file is unit-testable without reg.exe.
-    # Lines are joined with CRLF explicitly: reg.exe rejects LF-only .reg
-    # files, and a Linux PowerShell would otherwise write bare LF (CI run
-    # 44007177632 proved the import fails with exit code 1 on exactly that).
-    # Backslashes in the Path values are doubled, which is the .reg escape
-    # for a literal backslash; reg import stores a single one.
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add('Windows Registry Editor Version 5.00')
-    $lines.Add('')
-    foreach ($name in @($Resolved.Keys | Sort-Object)) {
-        $full = $Resolved[$name]
-        $path = "X:\\Program Files\\WindowsApps\\$full"
-        $lines.Add("[HKEY_LOCAL_MACHINE\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications\$full]")
-        $lines.Add("`"Path`"=`"$path`"")
-        $lines.Add('')
-        $lines.Add("[HKEY_LOCAL_MACHINE\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications\$name]")
-        $lines.Add("`"Path`"=`"$path`"")
-        $lines.Add('')
-    }
-    return ($lines -join "`r`n") + "`r`n"
-}
-
 function Register-ProvisionedAppx {
     [CmdletBinding()]
     param(
@@ -242,44 +210,50 @@ function Register-ProvisionedAppx {
         $resolved[$name] = ($dirs | Sort-Object Name | Select-Object -First 1).Name
     }
 
-    # The hive is written through a generated .reg imported with reg.exe,
-    # never through the PowerShell registry provider: the provider keeps
-    # an open handle on the key, and a later `reg unload` then fails with
-    # exit code 1 (CI run 44001157082 proved it). Paths are X: because
-    # that is the PE system drive at runtime. The file is written with
-    # WriteAllText + Encoding.Unicode (UTF-16LE with BOM) so the bytes are
-    # identical on Linux and Windows hosts.
-    $content = New-UwpProvisionRegContent -Resolved $resolved -HiveKey $HiveKey
-    $regPath = Join-Path ([System.IO.Path]::GetTempPath()) "micpe-uwp-$(Get-Random).reg"
-    [System.IO.File]::WriteAllText($regPath, $content, [System.Text.Encoding]::Unicode)
+    # The hive is written with reg.exe add, never through the PowerShell
+    # registry provider: the provider keeps an open handle on the key, and
+    # a later `reg unload` then fails with exit code 1 (CI run 44001157082
+    # proved it). reg add is also the path the Ime tests already proved
+    # against a mounted hive on Windows CI; the generated-.reg + reg
+    # import route failed there with "Error accessing the registry"
+    # (CI run 44008035446), so it is not used. Paths are X: because that
+    # is the PE system drive at runtime.
+    Mount-RegistryHive -HiveFile $hiveFile -KeyName $HiveKey
     try {
-        Mount-RegistryHive -HiveFile $hiveFile -KeyName $HiveKey
-        try {
-            Import-RegFile -RegFile $regPath
-            foreach ($name in $PackageNames) {
-                $values = Get-RegistryKeyValues -KeyName $HiveKey `
-                    -SubKey "Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications\$name"
-                if ($null -eq $values) {
+        $appxRoot = "HKLM\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore"
+        foreach ($name in $PackageNames) {
+            $full = $resolved[$name]
+            $path = "X:\Program Files\WindowsApps\$full"
+            foreach ($sub in @("Applications\$full", "InboxApplications\$name")) {
+                $key = "$appxRoot\$sub"
+                $output = & reg.exe add $key /v Path /t REG_SZ /d $path /f 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    $detail = if ($output) { $output.Trim() } else { '(reg.exe printed nothing)' }
                     throw [System.InvalidOperationException]::new(
-                        "provisioned AppX registration is missing: InboxApplications\$name")
+                        "reg add failed with exit code $LASTEXITCODE for $key : $detail")
                 }
             }
-            Write-SubStep 'provisioned UWP apps registered'
         }
-        finally {
-            # A failing unload must not mask the real assertion above: warn
-            # and continue, matching Invoke-RegistryScript's finally
-            # convention.
-            try {
-                Dismount-RegistryHive -KeyName $HiveKey
-            }
-            catch {
-                Write-Warn "could not unload HKLM\$HiveKey : $($_.Exception.Message)"
+        foreach ($name in $PackageNames) {
+            $values = Get-RegistryKeyValues -KeyName $HiveKey `
+                -SubKey "Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications\$name"
+            if ($null -eq $values) {
+                throw [System.InvalidOperationException]::new(
+                    "provisioned AppX registration is missing: InboxApplications\$name")
             }
         }
+        Write-SubStep 'provisioned UWP apps registered'
     }
     finally {
-        Remove-Item -LiteralPath $regPath -Force -ErrorAction SilentlyContinue
+        # A failing unload must not mask the real assertion above: warn
+        # and continue, matching Invoke-RegistryScript's finally
+        # convention.
+        try {
+            Dismount-RegistryHive -KeyName $HiveKey
+        }
+        catch {
+            Write-Warn "could not unload HKLM\$HiveKey : $($_.Exception.Message)"
+        }
     }
 }
 

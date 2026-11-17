@@ -121,27 +121,6 @@ Describe 'UWP registry patch' {
     }
 }
 
-Describe 'New-UwpProvisionRegContent' {
-    It 'writes CRLF line endings (reg.exe rejects LF-only .reg files)' {
-        $content = New-UwpProvisionRegContent -Resolved @{
-            'Microsoft.Windows.Photos' = 'Microsoft.Windows.Photos_1.0.0.0_x64__8wekyb3d8bbwe'
-        } -HiveKey 'PE-UWP'
-        $content | Should -Match "`r`n"
-        $content | Should -Not -Match "(?<!`r)`n"
-    }
-
-    It 'writes the registry header and both keys per app' {
-        $content = New-UwpProvisionRegContent -Resolved @{
-            'Microsoft.Windows.Photos' = 'Microsoft.Windows.Photos_1.0.0.0_x64__8wekyb3d8bbwe'
-        } -HiveKey 'PE-UWP'
-        $content | Should -Match 'Windows Registry Editor Version 5.00'
-        $content | Should -Match 'AppxAllUserStore\\Applications\\Microsoft\.Windows\.Photos_1\.0\.0\.0_x64__8wekyb3d8bbwe'
-        $content | Should -Match 'AppxAllUserStore\\InboxApplications\\Microsoft\.Windows\.Photos'
-        $content.Contains('"Path"="X:\\Program Files\\WindowsApps\\Microsoft.Windows.Photos_1.0.0.0_x64__8wekyb3d8bbwe"') |
-            Should -BeTrue
-    }
-}
-
 Describe 'Register-ProvisionedAppx against a real hive' {
     It 'writes the InboxApplications Path for each default app' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
