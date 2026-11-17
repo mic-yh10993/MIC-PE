@@ -113,8 +113,11 @@ function Invoke-BaseStep {
     # Media Player, Calculator) live inside install.wim, and skipping them
     # would leave nothing to extract.
     # ResetBase stays 0 because component-baseline resets have broken UWP
-    # provisioning in the field. install.wim is never packaged into our ISO, so
-    # there is no size benefit to either anyway.
+    # provisioning in the field. The media tree ships the full source
+    # install.wim (~4.1 GiB) as the install source, so neither flag saves
+    # ISO size anyway -- the ISO size is governed by the media, not the
+    # base images (M7: the old comment here claimed install.wim was never
+    # packaged into our ISO, which the 4.48 GB M1 ISO disproves).
     $config = Set-ConvertConfig -IniPath $iniPath -Overrides @{
         AddUpdates = '0'
         Cleanup    = '1'
@@ -401,11 +404,41 @@ function Invoke-InstallerStep {
 }
 
 function Invoke-IsoStep {
+    $bootWim = Join-Path $paths.Media 'sources/boot.wim'
+    Assert-PathExists -Path $bootWim -Label 'boot.wim'
+    $wimBytes = (Get-Item -LiteralPath $bootWim).Length
+
+    # M7 volume governance (plan Task 18 Step 3): decide the degrade before
+    # packaging. The per-step Assert-BootWimSize is the first line of
+    # defence; this names the next component to drop if the image ever
+    # grows past the 3 GB cap, and fails the build with the instruction
+    # instead of shipping an oversized image. No automatic re-run: the
+    # operator turns the switch off and runs again.
+    $enabled = [System.Collections.Generic.List[string]]::new()
+    if ($Office) { $enabled.Add('office') }
+    if ($Chrome) { $enabled.Add('chrome') }
+    if ($steps -contains 'uwp') { $enabled.Add('photos'); $enabled.Add('mediaplayer') }
+    $decision = Invoke-Degrade -CurrentWimBytes $wimBytes -Enabled $enabled.ToArray()
+    if ($decision.TooBig) {
+        $drop = $decision.NextToDrop
+        $size = Format-ByteSize -Bytes $wimBytes
+        if ($drop -in 'office', 'chrome') {
+            throw [System.InvalidOperationException]::new(
+                "boot.wim 已超 3 GB 上限（当前 $size）：请关掉 -$drop 后重新构建（按已批降级顺序，下一个应砍：$drop）。")
+        }
+        if ($drop) {
+            throw [System.InvalidOperationException]::new(
+                "boot.wim 已超 3 GB 上限（当前 $size），且 Office/Chrome 均已关闭：下一个应砍的是 $drop，它没有构建开关，需从代码里去掉后重新构建。")
+        }
+        throw [System.InvalidOperationException]::new(
+            "boot.wim 已超 3 GB 上限（当前 $size），且已批降级顺序里已无可砍项：映像需要人工瘦身，不是开关能解决的。")
+    }
+    $next = if ($enabled.Count -gt 0) { $enabled[0] } else { '无' }
+    Write-SubStep ("boot.wim {0}，未超 3 GB 上限（若以后超限，按顺序先砍：{1}）" -f (Format-ByteSize -Bytes $wimBytes), $next)
+
     Write-Step 'packaging MICPE.iso'
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
 
-    $bootWim = Join-Path $paths.Media 'sources/boot.wim'
-    $wimBytes = (Get-Item -LiteralPath $bootWim).Length
     $isoBytes = (Get-Item -LiteralPath $isoPath).Length
 
     Write-Step 'size report'
