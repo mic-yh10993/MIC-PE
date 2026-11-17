@@ -46,7 +46,12 @@ function Install-ExplorerShell {
     }
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
-    & $WimlibPath extract $InstallWim $InstallIndex 'Windows/System32/config/SOFTWARE' "--dest-dir=$staging" |
+    # wimlib flattens PATH arguments into the destination by default; only
+    # --preserve-dir-structure keeps the archive path, and the assertion
+    # below looks for the hive at its nested path. Without the flag Build
+    # run 44027407243 died here with "extracted SOFTWARE hive not found"
+    # even though the extract itself reported 100% done.
+    & $WimlibPath extract $InstallWim $InstallIndex 'Windows/System32/config/SOFTWARE' "--dest-dir=$staging" '--preserve-dir-structure' |
         Out-Host
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "failed to extract SOFTWARE from $InstallWim"
 

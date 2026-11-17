@@ -62,6 +62,49 @@ Describe 'Install-ExplorerShell preconditions' {
     }
 }
 
+Describe 'Install-ExplorerShell hive extraction' {
+    BeforeAll {
+        $script:fakeWimlib = Join-Path $PSScriptRoot 'Fake-Wimlib.ps1'
+    }
+
+    It 'extracts the SOFTWARE hive to its nested path (wimlib preserve-dir-structure)' {
+        # Build run 44027407243 died here: the extract reported 100% done
+        # but the hive had been flattened to $staging\SOFTWARE while the
+        # code looked for $staging\Windows\System32\config\SOFTWARE.
+        $mount = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32/config" | Out-Null
+        $wim = Join-Path $script:TempRoot "micpe-hive-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        $repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
+        try {
+            Install-ExplorerShell -MountDir $mount -InstallWim $wim -RepoRoot $repoRoot -WimlibPath $script:fakeWimlib
+            Test-Path -LiteralPath "$mount/Windows/System32/config/SOFTWARE" | Should -BeTrue
+            Get-Content -LiteralPath "$mount/Windows/System32/config/SOFTWARE" -Raw | Should -Be 'FAKE-HIVE'
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_WIMLIB_FLATTEN_ALWAYS -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'still fails loudly when the extraction comes back flattened' {
+        # Negative control: a broken extractor that ignores the flag must
+        # still trip the assertion, not silently install a wrong hive.
+        $mount = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32/config" | Out-Null
+        $wim = Join-Path $script:TempRoot "micpe-hive-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        $repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
+        $env:MICPE_FAKE_WIMLIB_FLATTEN_ALWAYS = '1'
+        try {
+            { Install-ExplorerShell -MountDir $mount -InstallWim $wim -RepoRoot $repoRoot -WimlibPath $script:fakeWimlib } |
+                Should -Throw '*extracted SOFTWARE hive not found*'
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_WIMLIB_FLATTEN_ALWAYS -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'Install-Runtimes preconditions' {
     It 'throws when the install.wim is missing' {
         { Install-Runtimes -MountDir $script:TempRoot -InstallWim (Join-Path $script:TempRoot 'absent.wim') `

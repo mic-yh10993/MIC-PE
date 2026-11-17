@@ -2,6 +2,7 @@ BeforeAll {
     . "$PSScriptRoot/../src/build/lib/Common.ps1"
     . "$PSScriptRoot/../src/build/lib/Wim.ps1"
     $script:TempRoot = [System.IO.Path]::GetTempPath()
+    $script:fakeWimlib = Join-Path $PSScriptRoot 'Fake-Wimlib.ps1'
 }
 
 Describe 'ConvertTo-WimPathPattern' {
@@ -78,5 +79,25 @@ Describe 'Export-WimFiles' {
     It 'throws when the wim is missing' {
         { Export-WimFiles -WimPath (Join-Path $script:TempRoot 'absent.wim') -Destination $script:TempRoot -Patterns @('Windows\a') } |
             Should -Throw '*not found*'
+    }
+
+    It 'passes --preserve-dir-structure so files land at their nested paths' {
+        # wimlib flattens PATH arguments into the destination by default
+        # (Build run 44027407243 died on the SOFTWARE hive for exactly
+        # this); the flag is what keeps the archive paths.
+        $wim = Join-Path $script:TempRoot "micpe-flag-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        $log = Join-Path $script:TempRoot "micpe-wimlib-log-$(Get-Random).txt"
+        $env:MICPE_FAKE_WIMLIB_LOG = $log
+        try {
+            Export-WimFiles -WimPath $wim -Destination $script:TempRoot -Patterns @('Windows\explorer.exe') -WimlibPath $script:fakeWimlib
+            $logged = Get-Content -LiteralPath $log -Raw
+            $logged | Should -Match ([regex]::Escape('--preserve-dir-structure'))
+            $logged | Should -Match ([regex]::Escape('--dest-dir='))
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_WIMLIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
     }
 }

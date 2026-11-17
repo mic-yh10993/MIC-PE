@@ -136,7 +136,12 @@ function Export-WimFiles {
         $batch = $Patterns[$offset..$end]
 
         Write-SubStep ("extracting batch {0} ({1} pattern(s))" -f $batchIndex, $batch.Count)
-        & $WimlibPath extract $WimPath $Index @batch "--dest-dir=$Destination" | Out-Host
+        # The batch is whitelist patterns passed as PATH arguments, and
+        # wimlib flattens PATH arguments into the destination by default;
+        # --preserve-dir-structure keeps the archive paths the callers
+        # assert on (Windows\explorer.exe and friends must land nested,
+        # not at the destination root).
+        & $WimlibPath extract $WimPath $Index @batch "--dest-dir=$Destination" '--preserve-dir-structure' | Out-Host
 
         if ($LASTEXITCODE -ne 0) {
             $preview = ($batch | Select-Object -First 3) -join ', '
