@@ -197,7 +197,7 @@ Describe 'M2/M3 step wiring' {
     It 'loads Shell.ps1' {
         # The dot-source loop appends '.ps1' to each name, so assert on the
         # library list entry rather than a literal 'Shell.ps1'.
-        $script:buildScript | Should -Match "'Registry', 'Shell', 'BaseImage'"
+        $script:buildScript | Should -Match "'Registry', 'Shell', 'Uwp', 'BaseImage'"
     }
 
     It 'dispatches the explorer, runtimes and components steps' {
@@ -224,5 +224,34 @@ Describe 'M2/M3 step wiring' {
         $script:buildScript | Should -Match 'Invoke-ExplorerStep'
         $script:buildScript | Should -Match 'Invoke-RuntimesStep'
         $script:buildScript | Should -Match 'Invoke-ComponentsStep'
+    }
+}
+
+Describe 'M4 step wiring' {
+    BeforeAll {
+        $script:buildScript = Get-Content -LiteralPath (Join-Path $repoRoot 'src/build/Build-Micpe.ps1') -Raw
+    }
+
+    It 'loads Uwp.ps1' {
+        $script:buildScript | Should -Match "'Shell', 'Uwp', 'BaseImage'"
+    }
+
+    It 'dispatches the uwp step' {
+        $script:buildScript | Should -Match "'uwp'\s*\{"
+    }
+
+    It 'imports the M4 registry patch' {
+        $script:buildScript | Should -Match '40-uwp\.reg'
+    }
+
+    It 'installs the framework and apps, registers and asserts them in the step' {
+        $script:buildScript | Should -Match 'Install-AppxFramework'
+        $script:buildScript | Should -Match 'Install-UwpApps'
+        $script:buildScript | Should -Match 'Register-ProvisionedAppx'
+        $script:buildScript | Should -Match 'Assert-UwpReady'
+    }
+
+    It 'mounts and commits boot.wim around the uwp step' {
+        $script:buildScript | Should -Match 'Invoke-UwpStep'
     }
 }

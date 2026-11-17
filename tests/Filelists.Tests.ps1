@@ -13,7 +13,7 @@ Describe 'whitelists' {
 
     It 'every entry is a relative Windows path without a drive letter' {
         $bad = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp') {
             $entries = Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt")
             foreach ($entry in $entries) {
                 if ($entry -match '^[A-Za-z]:') { $bad.Add("$name drive: $entry") }
@@ -26,7 +26,7 @@ Describe 'whitelists' {
 
     It 'does not carry the winre.wim base image' {
         $found = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp') {
             Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt") |
                 Where-Object { $_ -like '*Recovery\Winre.wim' } |
                 ForEach-Object { $found.Add("$name $_") }
@@ -55,5 +55,17 @@ Describe 'whitelists' {
         $entries = Read-Whitelist -Path (Join-Path $script:ListDir '40-components.txt')
         @($entries | Where-Object { $_ -match '\\dwm\.exe$' }).Count | Should -BeGreaterThan 0
         @($entries | Where-Object { $_ -match 'InputMethod' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'the uwp list contains the AppX deployment stack' {
+        # 50-uwp.txt is a small hand-written stack list, not one of the big
+        # tutorial-derived whitelists, so it is exempt from the >10-entry
+        # threshold above and checked on its own here.
+        $path = Join-Path $script:ListDir '50-uwp.txt'
+        Test-Path -LiteralPath $path | Should -BeTrue
+        $entries = Read-Whitelist -Path $path
+        $entries.Count | Should -BeGreaterThan 0
+        $entries | Should -Contain 'Windows\System32\AppXDeploymentClient.dll'
+        $entries | Should -Contain 'Windows\System32\Windows.UI.Xaml.dll'
     }
 }

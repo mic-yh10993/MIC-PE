@@ -25,12 +25,18 @@ Describe 'probe.cmd' {
     }
 
     It 'probes each UWP app under its expected process name' {
-        $script:probe | Should -Match 'SystemSettings'
+        $script:probe | Should -Match 'CalculatorApp'
         $script:probe | Should -Match 'Microsoft\.Photos'
         $script:probe | Should -Match 'Microsoft\.ZuneMusic'
-        $script:probe | Should -Match 'uwp_launch_settings'
+        $script:probe | Should -Match 'uwp_launch_calculator'
         $script:probe | Should -Match 'uwp_launch_photos'
         $script:probe | Should -Match 'uwp_launch_media'
+    }
+
+    It 'does not probe the Settings app (not provisioned, user decision 2026-11-16)' {
+        $script:probe | Should -Not -Match 'SystemSettings'
+        $script:probe | Should -Not -Match 'uwp_launch_settings'
+        $script:probe | Should -Not -Match 'immersivecontrolpanel'
     }
 
     It 'verifies the payload paths with the 7-zip lowercase directory' {
