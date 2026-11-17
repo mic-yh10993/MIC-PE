@@ -364,7 +364,7 @@ Chrome（MSI，安装到 `X:\Program Files\Google\Chrome`）与 Office 2016 绿�
 
 所有者明确要求"尽可能在 CI 里验证，不要占我时间"。所以本项目的验收改为 **CI 自验证为主，人工只抽查截图**。
 
-Hosted `windows-2025` 没有嵌套虚拟化，但 **QEMU 的 TCG 软件模拟可用**。配合下面两个机制，就能机器判定"PE 真的起来了"：
+Hosted `windows-2025` 没有嵌套虚拟化，但 **QEMU 的 TCG 软件模拟可用**。验证必须加 `-cpu max`：默认 qemu64 CPU 缺 25H2 内核要的指令集，guest 在 WIM 读完约 1 分钟后三重故障（本地 TCG 复现，run 44062469206），`-cpu max` 后内核才能起来。配合下面两个机制，就能机器判定"PE 真的起来了"：
 
 **机制一：`vvfat` 回写通道（核心）**
 

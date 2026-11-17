@@ -1,11 +1,16 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    WIM handling: whitelist parsing, mounting, extraction, size assertion.
+    WIM handling: whitelist parsing, mounting, extraction, size assertion,
+    boot-image selection.
 .DESCRIPTION
     The MICPE build assembles its PE by copying a whitelisted set of files out of
     install.wim. wimlib-imagex does that far faster than DISM, and it understands
     wildcards, so the whitelists stay short. DISM is used only for mounting.
+    wimlib-imagex also sets the WIM boot image: the UUP media's boot.wim boots
+    image 2 (Windows Setup) unless told otherwise, while every build step
+    customises image 1 (Windows PE), so the build must point the boot image
+    at 1 before packaging, or winload starts Setup and the probe never runs.
 #>
 
 $script:BootWimMaxBytes = 3GB
@@ -141,6 +146,11 @@ function Export-WimFiles {
         # --preserve-dir-structure keeps the archive paths the callers
         # assert on (Windows\explorer.exe and friends must land nested,
         # not at the destination root).
+        # $LASTEXITCODE is only set by native commands; the Pester fake is
+        # a script, so it never sets the caller's value. Initialise it so
+        # the check below also works in a fresh session (a real wimlib
+        # overwrites it with its own exit code).
+        $LASTEXITCODE = 0
         & $WimlibPath extract $WimPath $Index @batch "--dest-dir=$Destination" '--preserve-dir-structure' | Out-Host
 
         if ($LASTEXITCODE -ne 0) {
@@ -149,4 +159,58 @@ function Export-WimFiles {
                 "wimlib-imagex extract failed with exit code $LASTEXITCODE in batch $batchIndex starting with: $preview")
         }
     }
+}
+
+function Get-WimBootIndex {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $WimPath,
+
+        [string] $WimlibPath = 'wimlib-imagex'
+    )
+
+    Assert-PathExists -Path $WimPath -Label 'WIM'
+
+    # $LASTEXITCODE is only set by native commands; the Pester fake is a
+    # script, so it never sets the caller's value. Initialise it so the
+    # check below also works in a fresh session (a real wimlib overwrites
+    # it with its own exit code).
+    $LASTEXITCODE = 0
+    $info = & $WimlibPath info $WimPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            "wimlib-imagex info failed with exit code $LASTEXITCODE for $WimPath")
+    }
+
+    $match = [regex]::Match(($info -join "`n"), 'Boot Index:\s*(\d+)')
+    if (-not $match.Success) {
+        throw [System.InvalidOperationException]::new(
+            "wimlib-imagex info output for $WimPath has no 'Boot Index' line")
+    }
+    return [int]$match.Groups[1].Value
+}
+
+function Set-WimBootIndex {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $WimPath,
+
+        [Parameter(Mandatory = $true)]
+        [int] $Index,
+
+        [string] $WimlibPath = 'wimlib-imagex'
+    )
+
+    Assert-PathExists -Path $WimPath -Label 'WIM'
+
+    # wimlib-imagex info --boot rewrites only the WIM header's boot-index
+    # field; it does not recompress or touch any image.
+    Write-SubStep "setting boot image of $WimPath to index $Index"
+    # $LASTEXITCODE is only set by native commands; the Pester fake is a
+    # script, so it never sets the caller's value (see Get-WimBootIndex).
+    $LASTEXITCODE = 0
+    & $WimlibPath info $WimPath --boot $Index | Out-Host
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "wimlib-imagex info --boot failed with exit code $LASTEXITCODE for $WimPath"
 }

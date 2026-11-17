@@ -22,6 +22,15 @@ Describe 'Get-QemuArgs' {
         $script:args | Should -Contain '-m'
     }
 
+    It 'passes -cpu max so the 25H2 kernel does not triple-fault under TCG' {
+        # run 44062469206: the default qemu64 CPU lacks instructions the
+        # 25H2 kernel needs, so the guest triple-faults about a minute
+        # after the WIM is read (local TCG repro); -cpu max lets the
+        # kernel boot and the spinner appear.
+        $script:args | Should -Contain '-cpu'
+        $script:args | Should -Contain 'max'
+    }
+
     It 'does not require a display' {
         $script:args | Should -Contain 'none'
         $script:args | Should -Contain '-display'

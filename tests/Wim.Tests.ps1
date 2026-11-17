@@ -101,3 +101,54 @@ Describe 'Export-WimFiles' {
         }
     }
 }
+
+Describe 'Get-WimBootIndex / Set-WimBootIndex' {
+    It 'reads the boot index back from wimlib info output' {
+        # The fake answers a plain `info` with a stock two-image header
+        # whose boot index is 2, i.e. the UUP media default (Windows Setup).
+        $wim = Join-Path $script:TempRoot "micpe-bootidx-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        Get-WimBootIndex -WimPath $wim -WimlibPath $script:fakeWimlib | Should -Be 2
+    }
+
+    It 'sets the boot image with wimlib info --boot' {
+        $wim = Join-Path $script:TempRoot "micpe-bootset-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        $log = Join-Path $script:TempRoot "micpe-wimlib-log-$(Get-Random).txt"
+        $env:MICPE_FAKE_WIMLIB_LOG = $log
+        try {
+            Set-WimBootIndex -WimPath $wim -Index 1 -WimlibPath $script:fakeWimlib
+            $logged = Get-Content -LiteralPath $log -Raw
+            $logged | Should -Match 'info'
+            $logged | Should -Match ([regex]::Escape('--boot'))
+            $logged | Should -Match '(?m)^1$'
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_WIMLIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws when the wim is missing' {
+        { Get-WimBootIndex -WimPath (Join-Path $script:TempRoot 'absent.wim') -WimlibPath $script:fakeWimlib } |
+            Should -Throw '*not found*'
+        { Set-WimBootIndex -WimPath (Join-Path $script:TempRoot 'absent.wim') -Index 1 -WimlibPath $script:fakeWimlib } |
+            Should -Throw '*not found*'
+    }
+}
+
+Describe 'Invoke-IsoStep boot image' {
+    BeforeAll {
+        $script:buildScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/Build-Micpe.ps1') -Raw
+    }
+
+    It 'points the boot image at index 1 before packaging' {
+        # run 44062469206: the UUP media boots image 2 (Setup) unless told
+        # otherwise, while every build step customises image 1 (PE). The
+        # boot image must be set (and read back) in the ISO step, after the
+        # last mount/commit, or winload starts Setup and the probe never runs.
+        $script:buildScript | Should -Match 'Set-WimBootIndex -WimPath \$bootWim -Index 1'
+        $script:buildScript | Should -Match 'Get-WimBootIndex -WimPath \$bootWim'
+        $script:buildScript | Should -Match 'bootIndex -eq 1'
+    }
+}

@@ -4,7 +4,7 @@
 
 **Goal:** 在 GitHub Actions 免费 runner 上，从 UUP dump 的原版 Windows 11 25H2 镜像构建一个 ≤3 GB、带原生 Explorer 与 UWP、可一键装机的 `boot.wim`/ISO，命名为 MICPE。
 
-**Architecture:** 以 ISO 的 `sources\boot.wim`（索引 1）为基底，按四批白名单从 `install.wim` 提取文件，整体替换 `SOFTWARE` 注册表 hive，再注入预装软件、品牌、启动脚本与 PECMD 装机工具，最后用 `oscdimg` 封成双启 ISO 并按 2 GB 分卷发布。构建由单个 PowerShell 脚本 `Build-Micpe.ps1` 以 `-Stage m1..m7` 编排，每个阶段产物都可独立成 ISO 供人工验证。
+**Architecture:** 以 ISO 的 `sources\boot.wim`（索引 1）为基底，按四批白名单从 `install.wim` 提取文件，整体替换 `SOFTWARE` 注册表 hive，再注入预装软件、品牌、启动脚本与 PECMD 装机工具，最后用 `oscdimg` 封成双启 ISO 并按 2 GB 分卷发布。构建由单个 PowerShell 脚本 `Build-Micpe.ps1` 以 `-Stage m1..m7` 编排，每个阶段产物都可独立成 ISO 供人工验证。**启动索引必须在封 ISO 前显式设为 1**（`wimlib-imagex info --boot 1` 并读回断言）：UUP 原版介质的 `boot.wim` 默认启动索引是 2（Windows Setup），而全部定制与探针只在索引 1（Windows PE）里，不设则 winload 启动 Setup、探针永远跑不到（run 44062469206 诊断）。
 
 **Tech Stack:** PowerShell 7（Pester 5 测试）、DISM、wimlib-imagex、oscdimg、7-Zip、UUP dump + uup-converter-wimlib、PECMD（WCS 脚本）、GitHub Actions（`windows-2025`）。
 

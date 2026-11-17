@@ -101,6 +101,11 @@ function Get-QemuArgs {
     $args.AddRange([string[]] @(
         '-m', "$MemoryMb"
         '-smp', "$CpuCount"
+        # '-cpu max': the default qemu64 CPU lacks instructions the 25H2
+        # kernel needs, so the guest triple-faults about a minute after the
+        # WIM is read (local TCG repro, run 44062469206) and the verify can
+        # never pass. -cpu max gives the guest the host's full feature set.
+        '-cpu', 'max'
         '-display', 'none'
         '-no-reboot'
         '-no-shutdown'

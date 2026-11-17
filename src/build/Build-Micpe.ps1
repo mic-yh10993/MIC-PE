@@ -406,6 +406,17 @@ function Invoke-InstallerStep {
 function Invoke-IsoStep {
     $bootWim = Join-Path $paths.Media 'sources/boot.wim'
     Assert-PathExists -Path $bootWim -Label 'boot.wim'
+
+    # run 44062469206 diagnosis: the UUP media's boot.wim boots image 2
+    # (Windows Setup) by default, while every build step customises image 1
+    # (Windows PE) and the probe lives only there. Point the boot image at
+    # 1 here, after the last mount/commit and before packaging, or winload
+    # starts Setup and the probe can never run.
+    Write-Step 'setting boot.wim boot image to 1 (Windows PE)'
+    Set-WimBootIndex -WimPath $bootWim -Index 1
+    $bootIndex = Get-WimBootIndex -WimPath $bootWim
+    Assert-True -Condition ($bootIndex -eq 1) -Message "boot.wim boot index is $bootIndex, expected 1 (Windows PE)"
+
     $wimBytes = (Get-Item -LiteralPath $bootWim).Length
 
     # M7 volume governance (plan Task 18 Step 3): decide the degrade before

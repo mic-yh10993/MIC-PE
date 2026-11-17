@@ -16,6 +16,20 @@ if ($env:MICPE_FAKE_WIMLIB_LOG) {
     ($args -join "`n") | Add-Content -LiteralPath $env:MICPE_FAKE_WIMLIB_LOG
 }
 
+# `info` (no --boot): print a stock two-image header so Get-WimBootIndex
+# has a 'Boot Index' line to parse. `info --boot N` only marks the image
+# bootable; the header rewrite is not simulated, the call itself is the
+# assertion (the log above records it).
+if ($args -contains 'info') {
+    if ($args -contains '--boot') {
+        $LASTEXITCODE = 0
+        return
+    }
+    @('WIM Information:', 'Image Count:    2', 'Boot Index:     2') | Write-Output
+    $LASTEXITCODE = 0
+    return
+}
+
 $destArg = @($args | Where-Object { $_ -like '--dest-dir=*' }) | Select-Object -First 1
 $hasHive = $args -contains 'Windows/System32/config/SOFTWARE'
 if ($destArg -and $hasHive) {
