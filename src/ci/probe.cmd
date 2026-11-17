@@ -18,15 +18,16 @@ rem vvfat share as the first IDE hard disk, which WinPE letters C:;
 rem the boot ISO (optical) is D: and read-only, so C: must be in the
 rem list or the scan finds nothing writable (run 44101018512).
 rem A/B are floppy letters and stay out.
-rem The write test is "echo test 2>nul > file": 2>nul must come
-rem first, because cmd reports a failed open to the stderr current
-rem at that point; the old order "> file 2>nul" printed
-rem "Access is denied" on the read-only boot ISO, run 25.
-rem A failed write just skips the drive; the loop moves on.
+rem The write test is "echo test 2>nul > file". NOTE (corrected by the
+rem run 44135105700 mechanism experiment, Test run 44154459167): a failed
+rem output open prints "Access is denied" whether 2>nul comes first or
+rem last, so the order silences nothing; the line is cosmetic noise on
+rem the read-only boot ISO. A failed write just skips the drive; the
+rem loop moves on (the file-existence check below is what skips it).
 set "PROBE_DIR="
 for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
     if exist "%%D:\" (
-        rem 2>nul comes first so a failed write stays silent, run 25.
+        rem The order is kept as-is; it does not silence the error, see the note above.
         echo test 2>nul > "%%D:\micpe-write-test.tmp"
         if exist "%%D:\micpe-write-test.tmp" (
             del "%%D:\micpe-write-test.tmp" >nul 2>&1

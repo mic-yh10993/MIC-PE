@@ -137,11 +137,13 @@ Describe 'probe.cmd drive scan (run 44101018512)' {
         $script:scanLetters | Should -Not -Contain 'B'
     }
 
-    It 'silences the write-test error so a read-only drive is skipped quietly' {
-        # cmd reports a failed output open to the stderr that is current
-        # at that point, so 2>nul must precede the > redirect: the old
-        # "> file 2>nul" order leaked "Access is denied" to the screen
-        # on the read-only boot ISO (run 25 screenshot).
+    It 'keeps the write-test in the 2>nul-first order (both orders leak Access is denied, run 44154459167)' {
+        # Corrected by the run 44135105700 mechanism experiment (Test run
+        # 44154459167): a failed output open prints "Access is denied"
+        # whether 2>nul comes first or last, so the order silences
+        # nothing. The line is cosmetic noise on the read-only boot ISO;
+        # the scan skips the drive by the file-existence check, not by
+        # silencing, and the probe still completes.
         $script:probe | Should -Match 'echo test 2>nul > "%%D:\\micpe-write-test\.tmp"'
         $script:probe | Should -Not -Match 'echo test > "%%D:\\micpe-write-test\.tmp" 2>nul'
     }

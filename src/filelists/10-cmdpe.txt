@@ -62,3 +62,11 @@ Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Window
 Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\Microsoft-Windows-PhotoBasic-PictureTools-Package~*.cat
 Windows\Fonts\segoeui.ttf
 Windows\Fonts\SegoeIcons.ttf
+# probe.cmd shell section needs tasklist.exe to check explorer/dwm: a
+# missing tasklist in a `tasklist | find` pipeline silently aborts the
+# batch (run 44135105700, mechanism run 44154459167). MUIs are the
+# en-US/zh-CN resources from the 25H2 install.wim audit list. SysWOW64
+# copies are not needed: the probe runs under 64-bit cmd.exe.
+Windows\System32\tasklist.exe
+Windows\System32\en-US\tasklist.exe.mui
+Windows\System32\zh-CN\tasklist.exe.mui

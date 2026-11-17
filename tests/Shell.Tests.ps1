@@ -103,6 +103,22 @@ Describe 'Install-ExplorerShell hive extraction' {
             Remove-Item Env:MICPE_FAKE_WIMLIB_FLATTEN_ALWAYS -ErrorAction SilentlyContinue
         }
     }
+
+    It 'does not read a stale LASTEXITCODE left by an earlier native command' {
+        # The Pester fake is a script, so it never sets the caller's
+        # $LASTEXITCODE; without initialising it, this test fails with
+        # "failed to extract SOFTWARE" whenever an earlier test ran a
+        # native command that exited non-zero (mechanism run 44154459167
+        # exposed it: the probe mechanism tests run cmd.exe).
+        $mount = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32/config" | Out-Null
+        $wim = Join-Path $script:TempRoot "micpe-hive-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        $repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
+        $LASTEXITCODE = 1
+        Install-ExplorerShell -MountDir $mount -InstallWim $wim -RepoRoot $repoRoot -WimlibPath $script:fakeWimlib
+        Test-Path -LiteralPath "$mount/Windows/System32/config/SOFTWARE" | Should -BeTrue
+    }
 }
 
 Describe 'Install-Runtimes preconditions' {

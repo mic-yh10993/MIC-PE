@@ -777,12 +777,14 @@ $script:StageProbeExpect = @{
     m1 = @{ boot='1'; share='1' }
     m2 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1' }
     m3 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; network='*'; ime='1' }
-    m4 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; ime='1'; uwp_appx='1'; uwp_launch_photos='1'; uwp_launch_media='1'; uwp_launch_calculator='1' }
+    m4 = @{ boot='1'; share='1'; ime='1'; uwp_appx='1' }
     m5 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; ime='1'; payload='1'; brand='1' }
     m6 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; installer_scan='1'; installer_deploy='1' }
     m7 = @{ boot='1'; share='1'; explorer='1'; shell_ready='1'; dwm='1'; network='*'; ime='1'; uwp_appx='1'; uwp_launch_photos='1'; uwp_launch_media='1'; uwp_launch_calculator='1'; payload='1'; brand='1'; installer_scan='1'; installer_deploy='1'; size_wim='*'; size_iso='*' }
 }
 ```
+
+m4 期望放宽（run 44135105700 轮，2026-11-18）：m4 映像无 PECMD.EXE，回退只跑 cmd、不启动 Explorer，所以 explorer / dwm / shell_ready 在 m4 下永远不可能是 1；UWP 应用启动（`uwp_launch_*`，设计上经 PECMD EXEC + explorer.exe）同样不可能。m4 只验其能产出的：能启动、探针能写到共享盘、输入法 preload 已设、UWP AppX 文件在。桌面三项留到 m5 验（PECMD 随 payload 到达），UWP 启动留到 m7 验（完整映像）。三选一的其余两项未采用：让回退启动 Explorer 只会开文件夹窗口、成不了 shell，且 startnet.cmd 退出会结束会话；把 PECMD 提前会动 M5 范围，且打包改向在即、风险高。m2/m3 表里有同样的 latent 缺陷（同样要求 explorer/shell_ready/dwm），本次未动，记在评估卡 §14 里等后续轮处理。
 
 测试补充：断言 `$script:StageProbeExpect` 的每个键都是 `m1..m7`，且 `m7` 包含 `m1` 的全部键。
 

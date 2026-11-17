@@ -51,6 +51,12 @@ function Install-ExplorerShell {
     # below looks for the hive at its nested path. Without the flag Build
     # run 44027407243 died here with "extracted SOFTWARE hive not found"
     # even though the extract itself reported 100% done.
+    # $LASTEXITCODE is only set by native commands; the Pester fake is a
+    # script, so it never sets the caller's value. Initialise it so the
+    # check below does not read a stale exit code left by an earlier
+    # native command in the same session (the probe mechanism tests run
+    # cmd.exe, mechanism run 44154459167).
+    $LASTEXITCODE = 0
     & $WimlibPath extract $InstallWim $InstallIndex 'Windows/System32/config/SOFTWARE' "--dest-dir=$staging" '--preserve-dir-structure' |
         Out-Host
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "failed to extract SOFTWARE from $InstallWim"

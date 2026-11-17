@@ -63,6 +63,16 @@ Describe 'Get-StageProbeExpect' {
         $expect.Count | Should -Be 2
     }
 
+    It 'm4 only requires what an m4 image can produce (no shell yet)' {
+        # run 44135105700: an m4 image has no PECMD.EXE, so the cmd
+        # fallback never starts Explorer; explorer / dwm / shell_ready
+        # and the uwp_launch_* keys can never be 1 there. They are
+        # verified at m5 (PECMD arrives with the payload) and m7.
+        $expect = Get-StageProbeExpect -Stage 'm4'
+        @($expect.Keys | Sort-Object) | Should -Be @('boot', 'ime', 'share', 'uwp_appx')
+        $expect.Count | Should -Be 4
+    }
+
     It 'all maps to the m7 expectations' {
         $fromAll = Get-StageProbeExpect -Stage 'all'
         $fromM7 = Get-StageProbeExpect -Stage 'm7'
