@@ -1069,23 +1069,34 @@ Expected: FAIL — `Assert-PayloadInstalled` 未定义
 
 - [ ] **Step 3: 发布三个独立 Release 资产（一次性）**
 
-用 `/root/micpe-ref/` 的本地材料打包，三个包各自一个 release、各自一份 sha256：
+用本地恢复包里的材料打包（`/root/micpe-ref/` 在本机不存在，不要再引用它；
+材料在 `~/workspace/MIC-PE-recovery/MIC-PE.7z`，已解包到
+`~/workspace/micpe-m5-material/`），三个包各自一个 release、各自一份 sha256：
 
 ```bash
+MATERIAL="$HOME/workspace/micpe-m5-material"
+PECMD="$MATERIAL/dsi/DSI-安装备份-源码/make/PECMD.EXE"
+# PECMD.EXE 必须用 DSI 附带的副本（design.md §6.5 已指定可直接作为运行时；
+# 不要用 GhostCGI 自带的另一个二进制）。缺失时明确报错停下，绝不能静默
+# 跳过——否则 payload 会悄悄缺 PECMD，镜像启动回退到 cmd 才被发现。
+test -f "$PECMD" || { echo "PECMD.EXE missing: $PECMD"; exit 1; }
+
 cd /tmp && rm -rf payload && mkdir -p payload/ProgramFiles
-cp -a /root/micpe-ref/'PE预装软件/直接塞入programfiles/.' payload/ProgramFiles/
-mkdir -p payload/ProgramFiles/MICPE/MICPE-Setup
-cp /root/micpe-ref/'参考代码'/*/make/PECMD.EXE payload/ProgramFiles/MICPE/ 2>/dev/null || true
+cp -a "$MATERIAL/PE预装软件/直接塞入programfiles/." payload/ProgramFiles/
+cp "$PECMD" payload/ProgramFiles/MICPE/PECMD.EXE
+# 保持时间戳可复现：归档哈希与 Payload.ps1 里钉死的哈希一致的前提是文件
+# 时间戳不变；cp -a 已保留，PECMD.EXE 也要对齐原文件时间戳。
+touch -d "$(stat -c %y "$PECMD")" payload/ProgramFiles/MICPE/PECMD.EXE
 cd payload && 7z a -mx=5 ../micpe-payload.7z ProgramFiles >/dev/null
-cd /tmp && cp /root/micpe-ref/'PE预装软件/安装包/googlechromestandaloneenterprise64.msi' chrome-enterprise-x64.msi
-cp /root/micpe-ref/'PE预装软件/安装包/Office.7z' office2016-green.7z
+cd /tmp && cp "$MATERIAL/PE预装软件/安装包/googlechromestandaloneenterprise64.msi" chrome-enterprise-x64.msi
+cp "$MATERIAL/PE预装软件/安装包/Office.7z" office2016-green.7z
 
 sha256sum micpe-payload.7z      > payload.sha256
 sha256sum chrome-enterprise-x64.msi > chrome.sha256
 sha256sum office2016-green.7z   > office.sha256
 
 gh release create payload-v1 --repo mic-yh10993/MIC-PE --title "MICPE payload v1 (预装软件)" \
-  --notes "第三方便携工具集，解压到 Program Files。CI 按此 release 名下载。" \
+  --notes "第三方便携工具集，解压到 Program Files。CI 按此 release 名下载。PECMD.EXE 来源：DSI 附带（DSI-安装备份-源码/make/PECMD.EXE），SHA256 7a3710297473cbb865408d41db362e6014fd3eeaaf819751495e6d928e7adf5e；第三方免费软件，不入 git、不入 GPL 覆盖范围。" \
   micpe-payload.7z payload.sha256
 
 gh release create chrome-v1 --repo mic-yh10993/MIC-PE --title "MICPE Chrome v1" \
@@ -1169,7 +1180,7 @@ Expected: FAIL — `Get-BrandRegContent` 未定义
 
 - [ ] **Step 3: 实现**
 
-`assets/` 从 `/root/micpe-ref/品牌化/` 拷入 `logo.bmp`（120×120×24bpp）与 `wallpaper.jpg`（1920×1080）。`Set-Brand` 写 `.reg` 时转 UTF-16LE。`Assert-BrandApplied` 读 BMP 头 `18..26` 字节的宽高（`[BitConverter]::ToInt32`）。`说明.txt` 用 UTF-8 with BOM 保证记事本正常显示。
+`assets/` 从本地恢复包解包目录 `~/workspace/micpe-m5-material/品牌化/` 拷入 `logo.bmp`（120×120×24bpp）与 `wallpaper.jpg`（1920×1080）（`/root/micpe-ref/品牌化/` 在本机不存在）。`Set-Brand` 写 `.reg` 时转 UTF-16LE。`Assert-BrandApplied` 读 BMP 头 `18..26` 字节的宽高（`[BitConverter]::ToInt32`）。`说明.txt` 用 UTF-8 with BOM 保证记事本正常显示。
 
 - [ ] **Step 4: 运行测试确认通过**
 
