@@ -177,4 +177,35 @@ Describe 'probe.cmd drive scan (run 44101018512)' {
         }
         & $script:PickProbeDrive $script:scanLetters $drives | Should -BeNullOrEmpty
     }
+
+    It 'has no parentheses in rem lines inside the scan block (cmd parses them as block delimiters)' {
+        # run 26: a rem line "drive (run 25 screenshot) while ..." inside
+        # the for block closed the block early at its ')', and cmd then
+        # choked on the next token: "此时不应有 while。" — probe.cmd died
+        # before writing anything. rem lines at top level may keep their
+        # parentheses; inside a (...) block they must not have any.
+        $lines = $script:probe -split "`r?`n"
+        $start = ($lines | Select-String -Pattern 'for %%D in \(' | Select-Object -First 1).LineNumber - 1
+        $end = ($lines | Select-String -Pattern 'if not defined PROBE_DIR \(' | Select-Object -First 1).LineNumber - 1
+        $blockRems = @($lines[$start..$end] | Where-Object { $_ -match '^\s*rem\b' })
+        $blockRems | Should -Not -BeNullOrEmpty -Because 'the scan block must still carry its comments'
+        foreach ($rem in $blockRems) {
+            $rem | Should -Not -Match '[()]' -Because "rem inside a (...) block must not contain parens: $rem"
+        }
+    }
+
+    It 'has no bare-text lines inside the scan block (every line is a command or a rem)' {
+        # run 26, second half of the same bug: the comment's continuation
+        # lines had lost their "rem" prefix, so cmd parsed them as
+        # commands and died with "此时不应有 while。" before writing
+        # anything. A comment inside a (...) block must keep "rem" on
+        # every line, not just the first.
+        $lines = $script:probe -split "`r?`n"
+        $start = ($lines | Select-String -Pattern 'for %%D in \(' | Select-Object -First 1).LineNumber - 1
+        $end = ($lines | Select-String -Pattern 'if not defined PROBE_DIR \(' | Select-Object -First 1).LineNumber - 1
+        $blockLines = @($lines[$start..$end] | Where-Object { $_.Trim() -ne '' })
+        foreach ($line in $blockLines) {
+            $line.Trim() | Should -Match '^(rem\b|for\b|if\b|echo\b|del\b|set\b|\)$)' -Because "bare text inside a (...) block is parsed as a command: $line"
+        }
+    }
 }
