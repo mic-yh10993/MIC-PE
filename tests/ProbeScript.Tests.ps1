@@ -84,6 +84,7 @@ Describe 'probe.cmd' {
         $script:probe | Should -Match ':skip_deploy'
     }
 
+
     It 'writes every key the stage tables assert' {
         . (Join-Path $repoRoot 'src/ci/Assert-Probe.ps1')
         $keys = [System.Collections.Generic.HashSet[string]]::new()
@@ -102,5 +103,78 @@ Describe 'probe.cmd' {
             }
             $script:probe | Should -Match ([regex]::Escape($key)) -Because "probe.cmd must emit $key"
         }
+    }
+}
+
+Describe 'probe.cmd drive scan (run 44101018512)' {
+    BeforeAll {
+        $script:probe = Get-Content -LiteralPath (Join-Path $repoRoot 'src/ci/probe.cmd') -Raw
+        # The drive list as written in the scan loop, e.g. 'C D E ... Z'.
+        $m = [regex]::Match($script:probe, 'for %%D in \(([^)]*)\)')
+        $script:scanLetters = @($m.Groups[1].Value -split '\s+' | Where-Object { $_ })
+        # Mirrors the batch scan loop over a fake drive table (no real
+        # disks are touched): a drive is picked only if it exists and
+        # the write test succeeds; the first such drive wins.
+        $script:PickProbeDrive = {
+            param($letters, $drives)
+            foreach ($letter in $letters) {
+                $d = $drives[$letter]
+                if ($null -eq $d) { continue }     # drive absent here
+                if (-not $d.Exists) { continue }
+                if (-not $d.Writable) { continue }  # read-only: skip
+                return $letter
+            }
+            return $null
+        }
+    }
+
+    It 'scans C: (the CI vvfat share) and never scans the PE system drive X:' {
+        # run 25: the scan list was D..Z, so it skipped C: (the share)
+        # and fell back to X:, which the CI host cannot see.
+        $script:scanLetters | Should -Contain 'C'
+        $script:scanLetters | Should -Not -Contain 'X'
+        $script:scanLetters | Should -Not -Contain 'A'
+        $script:scanLetters | Should -Not -Contain 'B'
+    }
+
+    It 'silences the write-test error so a read-only drive is skipped quietly' {
+        # cmd reports a failed output open to the stderr that is current
+        # at that point, so 2>nul must precede the > redirect: the old
+        # "> file 2>nul" order leaked "Access is denied" to the screen
+        # on the read-only boot ISO (run 25 screenshot).
+        $script:probe | Should -Match 'echo test 2>nul > "%%D:\\micpe-write-test\.tmp"'
+        $script:probe | Should -Not -Match 'echo test > "%%D:\\micpe-write-test\.tmp" 2>nul'
+    }
+
+    It 'picks C: on the CI layout (C: share writable, D: ISO read-only)' {
+        $drives = @{
+            C = @{ Exists = $true; Writable = $true }    # vvfat share
+            D = @{ Exists = $true; Writable = $false }   # boot ISO
+            X = @{ Exists = $true; Writable = $true }    # PE system drive
+        }
+        & $script:PickProbeDrive $script:scanLetters $drives | Should -Be 'C'
+    }
+
+    It 'skips a read-only drive and keeps going instead of stopping at it' {
+        # C: absent here: the scan must pass D: (read-only) and land on
+        # the next writable drive rather than giving up at the first.
+        $drives = @{
+            D = @{ Exists = $true; Writable = $false }
+            E = @{ Exists = $true; Writable = $true }
+            X = @{ Exists = $true; Writable = $true }
+        }
+        & $script:PickProbeDrive $script:scanLetters $drives | Should -Be 'E'
+    }
+
+    It 'finds nothing writable when every scanned drive is read-only or absent' {
+        # Then PROBE_DIR stays empty and probe.cmd falls back to X:
+        # (the run 25 behaviour); the fallback itself is covered by the
+        # 'writes boot and share first' test, not hidden here.
+        $drives = @{
+            C = @{ Exists = $false; Writable = $false }
+            D = @{ Exists = $true; Writable = $false }
+            X = @{ Exists = $true; Writable = $true }
+        }
+        & $script:PickProbeDrive $script:scanLetters $drives | Should -BeNullOrEmpty
     }
 }

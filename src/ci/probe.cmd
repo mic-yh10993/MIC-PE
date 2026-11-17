@@ -12,10 +12,21 @@ rem ---------------------------------------------------------------------------
 
 setlocal EnableDelayedExpansion
 
+rem Scan every drive except the PE system drive X: for a writable
+rem directory to put the probe file on. The CI harness attaches the
+rem vvfat share as the first IDE hard disk, which WinPE letters C:;
+rem the boot ISO (optical) is D: and read-only, so C: must be in the
+rem list or the scan finds nothing writable (run 44101018512).
+rem A/B are floppy letters and stay out.
 set "PROBE_DIR="
-for %%D in (D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
     if exist "%%D:\" (
-        echo test > "%%D:\micpe-write-test.tmp" 2>nul
+        rem 2>nul must come BEFORE the output redirect: cmd reports a
+        failed open to the stderr that is current at that point, so
+        "> file 2>nul" still prints "Access is denied" on a read-only
+        drive (run 25 screenshot) while "2>nul > file" stays silent.
+        rem A failed write just skips this drive; the loop moves on.
+        echo test 2>nul > "%%D:\micpe-write-test.tmp"
         if exist "%%D:\micpe-write-test.tmp" (
             del "%%D:\micpe-write-test.tmp" >nul 2>&1
             if not defined PROBE_DIR set "PROBE_DIR=%%D:\"
