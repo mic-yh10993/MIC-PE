@@ -45,8 +45,11 @@ Describe 'app/ component layout' {
         $script:templateBat | Should -Match 'NEVER runs inside the PE'
     }
 
-    It 'marks chrome and office as pending until M5' {
-        $script:appReadme | Should -Match 'Chrome.*待补（M5）'
-        $script:appReadme | Should -Match 'Office 2016.*待补（M5）'
+    It 'marks chrome and office as done by M5' {
+        # M5 delivered both install.bat files; the pending marker must not
+        # come back.
+        $script:appReadme | Should -Match 'Chrome.*M5 已补'
+        $script:appReadme | Should -Match 'Office 2016.*M5 已补'
+        $script:appReadme | Should -Not -Match '待补（M5）'
     }
 }

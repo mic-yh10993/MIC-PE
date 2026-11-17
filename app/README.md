@@ -22,8 +22,9 @@
 - `install.bat` **绝不在 PE 启动后运行**：不要进入 PE 再安装软件，
   太浪费性能。PE 里只有集成好的文件，没有安装过程。
 - office 的安装脚本改成 CI 能运行的版本；chrome 安装 bat 自写。
-  但这两个组件本体是 M5 的活：本轮只改说明，不补组件；下面的清单
-  里 office、chrome 均标为“待补（M5）”，免得下一轮的人按旧语义走。
+  这两个组件本体已在 M5 补齐（见 `app/chrome/`、`app/office/` 的
+  `install.bat` 与 `README.md`），下面的清单里 office、chrome 均标
+  为“M5 已补”。
 
 ## 布局
 
@@ -33,8 +34,8 @@ app/
   _template/           # 新组件的模板（复制改名后填内容）
     README.md
     install.bat
-  chrome/              # （M5，待补）Chrome 安装包
-  office/              # （M5，待补）Office 2016 安装包
+  chrome/              # （M5 已补）Chrome 安装包
+  office/              # （M5 已补）Office 2016 安装包
   <组件名>/            # 以后每加一个组件，就在这里建一个文件夹
     install.bat        # 必备：CI 里运行的自动集成脚本
     <程序文件...>      # 组件自己的文件
@@ -75,10 +76,10 @@ install.bat 按这个分工写目标路径：程序文件去 `\Program Files\MIC
 
 | 组件 | 来源 | 集成目标 | 状态 |
 | --- | --- | --- | --- |
-| Chrome | 自带安装包（用户 2026-11-16 澄清：Edge 不自带；Chrome 太重可换 Firefox 并精简；安装 bat 自写，CI 里运行） | `\Program Files\MICPE` | 待补（M5） |
-| Office 2016 | 自带安装包（安装脚本改成 CI 能运行的版本） | `\Program Files\MICPE` | 待补（M5） |
-| PE 工具 | 参考文件里的工具（见 `~/workspace/MIC-PE-recovery/`） | 按性质分两处 | M5 集成 |
-| PENetwork | 参考文件里的网络工具 | `\Program Files\MICPE` | M5 集成 |
+| Chrome | 自带安装包（用户 2026-11-16 澄清：Edge 不自带；Chrome 太重可换 Firefox 并精简；安装 bat 自写，CI 里运行） | `\Program Files\Google\Chrome`（厂商布局，见 `app/chrome/README.md`） | M5 已补 |
+| Office 2016 | 自带安装包（安装脚本改成 CI 能运行的版本） | `\Program Files\Office2016`（厂商布局，见 `app/office/README.md`） | M5 已补 |
+| PE 工具 | 参考文件里的工具（见 `~/workspace/MIC-PE-recovery/`） | 按性质分两处 | M5 已集成（payload-v1） |
+| PENetwork | 参考文件里的网络工具 | `\Program Files\MICPE` | M5 已集成（payload-v1） |
 | MICPE 装机软件 | 用户自写 | `\Program Files\MICPE` | M5 集成 |
 | UWP 核心文件 | install.wim 提取（M4）：照片、新版媒体播放器；**不含系统设置应用** | 系统位置（UWP 自带路径） | M4 |
 | 自实现设置工具 | 若 M4 决定做：改注册表实现基础设置 | `%System32%\MICPE` | M4 再定 |
