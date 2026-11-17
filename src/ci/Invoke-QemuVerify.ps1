@@ -74,6 +74,11 @@ function Get-QemuArgs {
 
         [string] $FirmwarePath,
 
+        # Writable NVRAM store for the pflash boot below. When present
+        # together with FirmwarePath, the firmware is booted from pflash
+        # drives instead of -bios.
+        [string] $FirmwareVarsPath,
+
         [string[]] $DataDisks
     )
 
@@ -101,7 +106,17 @@ function Get-QemuArgs {
         '-serial', "file:$serialLog"
     ))
 
-    if ($FirmwarePath) {
+    if ($FirmwarePath -and $FirmwareVarsPath) {
+        # Split OVMF images are pflash images, not a BIOS ROM: run 43989280052
+        # proved -bios rejects the 3,653,632-byte code file ("could not load
+        # PC BIOS"). The code drive is read-only; the vars drive is the
+        # writable NVRAM store (a per-run copy of the template).
+        $args.AddRange([string[]] @(
+            '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$FirmwarePath"
+            '-drive', "if=pflash,format=raw,unit=1,file=$FirmwareVarsPath"
+        ))
+    }
+    elseif ($FirmwarePath) {
         $args.AddRange([string[]] @('-bios', $FirmwarePath))
     }
 
@@ -319,6 +334,27 @@ function Find-OvmfCode {
                 -File -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($found) { return $found.FullName }
         }
+    }
+    return $null
+}
+
+function Find-OvmfVars {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CodePath
+    )
+
+    # The x86_64 firmware's NVRAM template is the i386 vars file: QEMU's own
+    # firmware descriptor share/firmware/60-edk2-x86_64.json pairs
+    # edk2-x86_64-code.fd with edk2-i386-vars.fd (540,672 bytes; code +
+    # vars = 4 MiB exactly). The vars file is the writable NVRAM store, so
+    # the verifier copies it per run -- it must never be passed to QEMU
+    # in place under the install directory.
+    $dir = Split-Path -Parent $CodePath
+    foreach ($name in @('edk2-i386-vars.fd', 'OVMF_VARS.fd')) {
+        $candidate = Join-Path $dir $name
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
     return $null
 }
@@ -554,9 +590,31 @@ function Invoke-QemuVerify {
         }
     }
 
+    # pflash boot needs a writable NVRAM store next to the read-only code
+    # image. The vars template lives next to the code file (Find-OvmfVars);
+    # copy it per run into the work dir instead of letting QEMU write into
+    # the install directory. Without a vars drive the split OVMF image
+    # cannot boot at all -- -bios already proved that in run 43989280052.
+    $FirmwareVarsPath = $null
+    if ($FirmwarePath -and $Firmware -ne 'bios') {
+        $varsTemplate = Find-OvmfVars -CodePath $FirmwarePath
+        if ($varsTemplate) {
+            $FirmwareVarsPath = Join-Path (Split-Path -Parent $ShareDir) 'edk2-x86_64-vars.fd'
+            Copy-Item -LiteralPath $varsTemplate -Destination $FirmwareVarsPath -Force
+            Write-Host "    firmware vars: $FirmwareVarsPath"
+        }
+        elseif ($Firmware -eq 'uefi') {
+            throw [System.InvalidOperationException]::new("Firmware=uefi but no OVMF vars template (edk2-i386-vars.fd) was found next to $FirmwarePath")
+        }
+        else {
+            Write-Host '    firmware: no OVMF vars template, falling back to SeaBIOS'
+            $FirmwarePath = $null
+        }
+    }
+
     $qemuArgs = Get-QemuArgs -Iso $Iso -ShareDir $ShareDir -MonitorPort $MonitorPort `
         -MemoryMb $MemoryMb -CpuCount $CpuCount -LogPath $LogPath `
-        -FirmwarePath $FirmwarePath -DataDisks $DataDisks
+        -FirmwarePath $FirmwarePath -FirmwareVarsPath $FirmwareVarsPath -DataDisks $DataDisks
 
     Write-Host "==> starting qemu (timeout ${TimeoutMin}m)"
     $qemuArgString = ConvertTo-NativeArgumentString -Arguments $qemuArgs

@@ -51,6 +51,18 @@ Describe 'Get-QemuArgs' {
         $args3 | Should -Contain 'C:\x\OVMF.fd'
     }
 
+    It 'boots split OVMF images from pflash drives when a vars path is given' {
+        # -bios rejects the split 3,653,632-byte code file (run 43989280052:
+        # "could not load PC BIOS"); QEMU's own firmware descriptor pairs
+        # the code with a vars template, so boot from pflash instead.
+        $args4 = Get-QemuArgs -Iso 'C:\x\a.iso' -ShareDir 'C:\x\s' `
+            -FirmwarePath 'C:\Program Files\qemu\share\edk2-x86_64-code.fd' `
+            -FirmwareVarsPath 'C:\x\work\edk2-x86_64-vars.fd'
+        $args4 | Should -Not -Contain '-bios'
+        $args4 | Should -Contain 'if=pflash,format=raw,unit=0,readonly=on,file=C:\Program Files\qemu\share\edk2-x86_64-code.fd'
+        $args4 | Should -Contain 'if=pflash,format=raw,unit=1,file=C:\x\work\edk2-x86_64-vars.fd'
+    }
+
     It 'puts the serial log next to the -D log so the verify upload can collect it' {
         $serialArgs = Get-QemuArgs -Iso 'C:\x\MICPE.iso' -ShareDir 'C:\x\share' -LogPath '/tmp/verify-out/qemu.log'
         $serial = @($serialArgs | Where-Object { $_ -like 'file:*micpe-serial.log*' })
@@ -221,6 +233,29 @@ Describe 'Find-OvmfCode' {
     }
 }
 
+Describe 'Find-OvmfVars' {
+    It 'finds the i386 vars template next to the x86_64 code file' {
+        # QEMU's firmware descriptor 60-edk2-x86_64.json pairs
+        # edk2-x86_64-code.fd with edk2-i386-vars.fd as its NVRAM template.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-vars-$(Get-Random)"
+        $shareDir = Join-Path $dir 'share'
+        New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+        $code = Join-Path $shareDir 'edk2-x86_64-code.fd'
+        New-Item -ItemType File -Path $code -Force | Out-Null
+        $vars = Join-Path $shareDir 'edk2-i386-vars.fd'
+        New-Item -ItemType File -Path $vars -Force | Out-Null
+        Find-OvmfVars -CodePath $code | Should -Be $vars
+    }
+
+    It 'returns null when no vars template sits next to the code file' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-novars-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $code = Join-Path $dir 'edk2-x86_64-code.fd'
+        New-Item -ItemType File -Path $code -Force | Out-Null
+        Find-OvmfVars -CodePath $code | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Format-MonitorReply' {
     It 'strips ANSI colour and cursor escapes from the monitor reply' {
         $reply = "$([char]27)[31;1mQEMU 11.1.0 monitor$([char]27)[0m (qemu) "
@@ -267,6 +302,19 @@ Describe 'Invoke-QemuVerify firmware selection' {
     It 'can still force SeaBIOS with the sendkey fallback' {
         $script:qemuVerify | Should -Match "'bios'"
         $script:qemuVerify | Should -Match 'SeaBIOS \(forced\)'
+    }
+
+    It 'boots UEFI from pflash with a per-run copy of the vars template' {
+        # -bios cannot load the split code image (run 43989280052), so the
+        # verifier must resolve the vars template and copy it per run.
+        $script:qemuVerify | Should -Match 'Find-OvmfVars'
+        $script:qemuVerify | Should -Match 'edk2-x86_64-vars\.fd'
+        $script:qemuVerify | Should -Match 'if=pflash,format=raw,unit=0,readonly=on'
+        $script:qemuVerify | Should -Match 'if=pflash,format=raw,unit=1'
+    }
+
+    It 'fails fast when UEFI is forced but the vars template is missing' {
+        $script:qemuVerify | Should -Match 'no OVMF vars template'
     }
 }
 
