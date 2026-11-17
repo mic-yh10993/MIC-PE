@@ -1,0 +1,22 @@
+# MICPE-Setup 界面文案（zh-CN，UTF-8）。
+# 单一来源：MICPE-Setup.wcs 里的界面文字与这里保持一致。
+Title=MICPE 一键装机
+Brand=SYSTEM-Intel-MIC
+SectionImage=1. 系统镜像
+SectionTarget=2. 安装到
+ButtonChangeImage=更换镜像
+ButtonRescan=重新扫描
+ButtonPartition=分区
+LabelVersion=版本：
+CheckFormat=格式化系统分区
+CheckBoot=自动修复引导
+CheckOem=写入 OEM 信息
+CheckUnattend=使用无人值守
+ButtonEditXml=编辑 / 选择 xml
+ButtonStart=开始安装
+NoPartition=未找到可安装的分区 · [ 打开 DiskGenius 分区 ]
+ConfirmInstall=将把 {0} 安装到 {1}，该分区将被格式化。
+InstallDone=安装完成。请选择重启进入新系统，或关机。
+InstallFailed=安装失败，退出码 {0}。日志：{1}
+TargetIsImage=目标卷就是镜像所在的卷，不能往装机源自己身上装系统
+TargetIsPe=目标卷是正在运行的 PE 所在卷，不能覆盖正在运行的系统

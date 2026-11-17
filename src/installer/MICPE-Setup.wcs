@@ -1,0 +1,192 @@
+; MICPE-Setup.wcs — MICPE 一键装机 (M6).
+; PECMD WCS wizard. Single window 760x520, Win11 styling per design §5.4:
+; #F3F3F3 background, white cards, #0067C0 primary button, #C42B1C danger
+; button, Microsoft YaHei UI font. One page, no page jumps.
+;
+; Usage:
+;   MICPE-Setup.wcs                       interactive; discover sources first
+;   MICPE-Setup.wcs -auto "<image>"       skip selection, go to confirm page
+;   MICPE-Setup.wcs -cli -discoveronly    write installer_scan keys to the
+;                                         probe file (%MICPE_PROBE_FILE%)
+;   MICPE-Setup.wcs -cli -deploy <src> <target>
+;                                         headless deploy (CI smoke path)
+;
+; install.mic protocol (design §5.4.1): a volume whose root carries
+; install.mic IS the source volume (first line = display name, image fixed
+; at <volume>\sources\install.wim). Without a marker, fall back to
+; sources\install.wim, install.wim, sources\install.esd, *.esd.
+;
+; NOTE: PECMD WCS syntax here is a first draft, confirmed by the L3 QEMU
+; run (probe.txt + screenshot), not by this file alone — same caveat as
+; PECMD.INI and Pin-Shortcuts.wcs.
+
+; --- defaults (match MICPE-Setup.ini) -------------------------------------
+ENVI SetupDir=%SystemDrive%\Program Files\MICPE\MICPE-Setup
+ENVI LogDir=%SystemDrive%\Program Files\MICPE\logs
+ENVI DiskGenius=%SystemDrive%\Program Files\DiskGenius.exe
+ENVI UnattendDir=%SystemDrive%\Program Files\WinNTSetup\unattend
+ENVI Wimlib=%SystemDrive%\Program Files\MICPE\wimlib-imagex.exe
+ENVI SourceCount=0
+ENVI AutoImage=
+ENVI ProbeFile=%MICPE_PROBE_FILE%
+IFEX %ProbeFile%=,ENVI ProbeFile=%SystemDrive%\micpe-probe.txt
+
+; --- argument dispatch ------------------------------------------------------
+; %1 = -auto | -cli | (empty = interactive).
+IFEX %1=-cli,CALL CliMode %2 %3 %4
+IFEX %1=-auto,TEAM ENVI AutoImage=%2|CALL DiscoverSources|CALL MainWindow
+IFEX %1=,TEAM CALL DiscoverSources|CALL MainWindow
+EXIT
+
+SUB DiscoverSources
+; Scan every drive letter for install sources (design §5.4.1). Marker
+; volumes first; the list is kept in Source<n>_Path / Source<n>_Name.
+ENVI SourceCount=0
+FORX C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,Y,Z,DRV,CALL ScanOneDrive %DRV%
+END
+
+SUB ScanOneDrive
+; %1 = drive letter. Marker wins over fallback on the same volume.
+IFEX "%1:\install.mic",TEAM READ %1:\install.mic,1,MicName|CALL AddSource %1: %1:\sources\install.wim 1 %MicName%|EXIT
+IFEX "%1:\sources\install.wim",TEAM CALL AddSource %1: %1:\sources\install.wim 0 install.wim|EXIT
+IFEX "%1:\install.wim",TEAM CALL AddSource %1: %1:\install.wim 0 install.wim|EXIT
+IFEX "%1:\sources\install.esd",TEAM CALL AddSource %1: %1:\sources\install.esd 0 install.esd|EXIT
+END
+
+SUB AddSource
+; %1 = root, %2 = image path, %3 = 1 when an install.mic marker exists,
+; %4 = display name (install.mic first line for marker volumes, file name
+; otherwise). A marker volume whose image is missing is reported broken
+; (Review Focus #1) and never skipped silently.
+ENVI SourceCount=%SourceCount%+1
+ENVI Source%SourceCount%_Root=%1
+ENVI Source%SourceCount%_Path=%2
+ENVI Source%SourceCount%_Marker=%3
+ENVI Source%SourceCount%_Name=%4
+END
+
+SUB MainWindow
+; Single window 760x520 (design §5.4 ASCII layout).
+ENVI @this.Font=:Microsoft YaHei UI
+ENVI @this.bkcolor=0xF3F3F3
+ENVI @this.Text=MICPE 一键装机
+ENVI @this.W=760
+ENVI @this.H=520
+; Header
+TEXT Title,L16T12W400H28,MICPE 一键装机
+TEXT Brand,L600T16W140H20,SYSTEM-Intel-MIC
+; 1. Image card
+TEXT SecImage,L16T48W200H20,1. 系统镜像
+TEXT ImageInfo,L24T72W500H20,%Source1_Path% · %Source1_Name%
+ITEM ChangeImage,L420T68W90H26,更换镜像,CALL ChangeImage
+ITEM Rescan,L516T68W90H26,重新扫描,CALL RescanSources
+ITEM Partition,L612T68W90H26,分区,EXEC "%DiskGenius%"
+; Version dropdown (filled by RefreshVersions from wimlib info)
+TEXT VerLabel,L16T108W60H20,版本：
+LIST VerList,L80T104W300H24,,CALL RefreshVersions
+; 2. Target table
+TEXT SecTarget,L16T140W200H20,2. 安装到
+LIST DiskTable,L16T164W728H160,,CALL RefreshDisks
+TEXT NoPart,L16T180W400H20,未找到可安装的分区 · [ 打开 DiskGenius 分区 ]
+; Options (defaults per design §5.4)
+ENVI 格式化系统分区.Check=1
+ENVI 自动修复引导.Check=1
+ENVI 写入 OEM 信息.Check=1
+ENVI 使用无人值守.Check=0
+CHEK 格式化系统分区,L16T340W140H20,格式化系统分区,,1
+CHEK 自动修复引导,L164T340W140H20,自动修复引导,,1
+CHEK 写入 OEM 信息,L312T340W140H20,写入 OEM 信息,,1
+CHEK 使用无人值守,L460T340W120H20,使用无人值守,,0
+ITEM EditXml,L588T336W120H26,编辑 / 选择 xml,CALL PickUnattend
+; Unattend templates shipped in the payload (opt-in, default off).
+; Win10_x64.xml = fully automatic; Win7-11-Select.xml = choose at boot.
+ENVI UnattendPath=
+; 3. Go
+ITEM StartInstall,L280T380W200H44,开始安装,CALL StartInstall
+END
+
+SUB ChangeImage
+BROW ImagePath,,选择系统镜像,*.wim|*.esd
+IFEX %ImagePath%=,EXIT
+ENVI Source1_Path=%ImagePath%
+ENVI Source1_Name=%ImagePath%
+CALL RefreshVersions
+END
+
+SUB RescanSources
+CALL DiscoverSources
+CALL RefreshDisks
+CALL RefreshVersions
+END
+
+SUB RefreshVersions
+; Fill VerList from wimlib-imagex info. Runs only when the binary exists;
+; without it the list keeps the display name from install.mic.
+IFEX "%Wimlib%",EXEC -wait -hide "%Wimlib%" info "%Source1_Path%"
+END
+
+SUB RefreshDisks
+; Rebuild DiskTable from PART enumeration (disk / partition / size / type).
+PART list disk ,DiskCount
+END
+
+SUB PickUnattend
+BROW UnattendPath,,选择无人值守文件,*.xml
+IFEX %UnattendPath%=,ENVI UnattendPath=%UnattendDir%\Win10_x64.xml
+END
+
+SUB StartInstall
+; Confirm with concrete numbers, then format -> apply -> boot repair.
+; Safety first: target must not be the image volume or the running PE
+; volume (Review Focus #4); space is checked before apply (Review Focus #2).
+MESS 将把 %Source1_Name% 安装到 %TargetDrive%:\，该分区将被格式化。@ 开始安装
+CALL CheckTarget
+IFEX $%TargetOk%=0,TEAM MESS %TargetReason%@ 无法安装|EXIT
+CALL DoDeploy
+END
+
+SUB CheckTarget
+; Native string checks (drive letters); the space check runs through
+; Deploy.ps1 Test-TargetSpace when PowerShell exists in this PE.
+ENVI TargetOk=1
+ENVI TargetReason=
+IFEX %TargetDrive%=%ImageDrive%,TEAM ENVI TargetOk=0|ENVI TargetReason=目标卷就是镜像所在的卷，不能往装机源自己身上装系统
+IFEX %TargetDrive%=%SystemDrive%,TEAM ENVI TargetOk=0|ENVI TargetReason=目标卷是正在运行的 PE 所在卷，不能覆盖正在运行的系统
+IFEX "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe",EXEC -wait -hide powershell.exe -NoProfile -Command ". '%SetupDir%\Deploy.ps1'; Test-TargetSpace -WimPath '%Source1_Path%' -Index %VerIndex% -TargetRoot '%TargetDrive%:\'"
+END
+
+SUB DoDeploy
+; format (after mountvol unmount) -> wimlib apply -> optional unattend ->
+; bcdboot. Each step logs to X:\Program Files\MICPE\logs\setup-<time>.log.
+ENVI SetupLog=%LogDir%\setup-%date%-%time%.log
+EXEC -wait -hide mountvol.exe %TargetDrive%: /D
+EXEC -wait -hide format.com %TargetDrive%: /FS:NTFS /Q /Y
+EXEC -wait "%Wimlib%" apply "%Source1_Path%" %VerIndex% "%TargetDrive%:\"
+IFEX $%ERRORLEVEL%<>0,TEAM MESS 安装失败，退出码 %ERRORLEVEL%。日志：%SetupLog%@ 安装失败|EXIT
+IFEX %使用无人值守.Check%=1,EXEC -wait -hide cmd.exe /c copy /y "%UnattendPath%" "%TargetDrive%:\autounattend.xml"
+EXEC -wait -hide bcdboot.exe "%TargetDrive%:\Windows" /s %BootDrive% /f ALL
+MESS 安装完成。请选择重启进入新系统，或关机。@ 安装完成
+END
+
+SUB CliMode
+; %1 = -discoveronly | -deploy. Writes probe keys to %ProbeFile% so the
+; CI host can read them without OCR (design §6 probe table).
+IFEX %1=-discoveronly,CALL CliDiscover
+IFEX %1=-deploy,CALL CliDeploy %2 %3
+EXIT
+
+SUB CliDiscover
+CALL DiscoverSources
+IFEX $%SourceCount%>0,TEAM EXEC -hide cmd.exe /c echo installer_scan=1>>"%ProbeFile%"|EXEC -hide cmd.exe /c echo installer_source=marker>>"%ProbeFile%"|EXEC -hide cmd.exe /c echo installer_name=%Source1_Name%>>"%ProbeFile%"
+IFEX $%SourceCount%=0,EXEC -hide cmd.exe /c echo installer_scan=0>>"%ProbeFile%"
+END
+
+SUB CliDeploy
+; %1 = source image, %2 = target drive (design §6: -cli -deploy <源> <目标盘>).
+ENVI Source1_Path=%1
+ENVI TargetDrive=%2
+CALL CheckTarget
+IFEX $%TargetOk%=0,TEAM EXEC -hide cmd.exe /c echo installer_deploy=0>>"%ProbeFile%"|EXIT
+CALL DoDeploy
+EXEC -hide cmd.exe /c echo installer_deploy=1>>"%ProbeFile%"
+END
