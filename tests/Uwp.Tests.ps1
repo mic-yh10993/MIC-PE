@@ -122,7 +122,7 @@ Describe 'UWP registry patch' {
 }
 
 Describe 'Register-ProvisionedAppx against a real hive' {
-    It 'writes the InboxApplications Path for each default app' {
+    It 'writes the Applications Path for each default app' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
 
         $mount = New-Item -ItemType Directory -Path (Join-Path $script:TempRoot "mnt-$(Get-Random)") -Force
@@ -142,9 +142,10 @@ Describe 'Register-ProvisionedAppx against a real hive' {
             Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'MICPE-UWP-TEST'
             try {
                 foreach ($name in Get-UwpDefaults) {
+                    $full = "${name}_1.0.0.0_x64__8wekyb3d8bbwe"
                     $values = Get-RegistryKeyValues -KeyName 'MICPE-UWP-TEST' `
-                        -SubKey "Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications\$name"
-                    $null -eq $values | Should -BeFalse -Because "InboxApplications\$name must exist"
+                        -SubKey "Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications\$full"
+                    $null -eq $values | Should -BeFalse -Because "Applications\$full must exist"
                     $values['Path'] | Should -Match ([regex]::Escape($name))
                 }
             }

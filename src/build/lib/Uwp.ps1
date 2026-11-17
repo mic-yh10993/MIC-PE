@@ -13,10 +13,10 @@
     3. The System32 deployment client/server DLLs (50-uwp.txt) plus the
        registry policy in 40-uwp.reg.
 
-    Registration writes only the AppxAllUserStore allow-run keys and the
-    InboxApplications Path values. The StateRepository database itself is
-    never copied: it must be generated on first boot, and copying one
-    fails activation with 0x80073CF9.
+    Registration writes only the AppxAllUserStore allow-run keys
+    (Applications\<package-full-name> with a Path value). The
+    StateRepository database itself is never copied: it must be generated
+    on first boot, and copying one fails activation with 0x80073CF9.
 
     Scope note (user decision 2026-11-16): UWP keeps core files only. The
     Settings app is too heavy and is NOT provisioned, and the Store is not
@@ -216,30 +216,37 @@ function Register-ProvisionedAppx {
     # proved it). reg add is also the path the Ime tests already proved
     # against a mounted hive on Windows CI; the generated-.reg + reg
     # import route failed there with "Error accessing the registry"
-    # (CI run 44008035446), so it is not used. Paths are X: because that
-    # is the PE system drive at runtime.
+    # (CI run 44008035446), so it is not used.
+    #
+    # Only the Applications (allow-run) keys are written. The plan also
+    # asked for InboxApplications Path values, but the build admin cannot
+    # write there: CI run 44008629819 proved Applications\<full-name>
+    # creates fine while InboxApplications\<family> fails with
+    # "Access is denied" (that key exists in the hive with a restrictive
+    # DACL). InboxApplications is servicing metadata the AppX service
+    # uses to enumerate inbox apps; it is not consulted at launch time,
+    # so the PE does not need it to run the apps. Paths are X: because
+    # that is the PE system drive at runtime.
     Mount-RegistryHive -HiveFile $hiveFile -KeyName $HiveKey
     try {
         $appxRoot = "HKLM\$HiveKey\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore"
         foreach ($name in $PackageNames) {
             $full = $resolved[$name]
             $path = "X:\Program Files\WindowsApps\$full"
-            foreach ($sub in @("Applications\$full", "InboxApplications\$name")) {
-                $key = "$appxRoot\$sub"
-                $output = & reg.exe add $key /v Path /t REG_SZ /d $path /f 2>&1 | Out-String
-                if ($LASTEXITCODE -ne 0) {
-                    $detail = if ($output) { $output.Trim() } else { '(reg.exe printed nothing)' }
-                    throw [System.InvalidOperationException]::new(
-                        "reg add failed with exit code $LASTEXITCODE for $key : $detail")
-                }
+            $key = "$appxRoot\Applications\$full"
+            $output = & reg.exe add $key /v Path /t REG_SZ /d $path /f 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) {
+                $detail = if ($output) { $output.Trim() } else { '(reg.exe printed nothing)' }
+                throw [System.InvalidOperationException]::new(
+                    "reg add failed with exit code $LASTEXITCODE for $key : $detail")
             }
         }
         foreach ($name in $PackageNames) {
             $values = Get-RegistryKeyValues -KeyName $HiveKey `
-                -SubKey "Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\InboxApplications\$name"
-            if ($null -eq $values) {
+                -SubKey "Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications\$($resolved[$name])"
+            if ($null -eq $values -or -not $values.Contains('Path')) {
                 throw [System.InvalidOperationException]::new(
-                    "provisioned AppX registration is missing: InboxApplications\$name")
+                    "provisioned AppX registration is missing: Applications\$($resolved[$name]) has no Path value")
             }
         }
         Write-SubStep 'provisioned UWP apps registered'

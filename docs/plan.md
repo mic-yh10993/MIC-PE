@@ -949,7 +949,7 @@ Expected: `ime=1`（`Preload` 含 `0804`）；`network` 为 `*`（非空即可�
 - Consumes: Task 4–6
 - Produces:
   - `Install-AppxFramework([string] $MountDir, [string] $InstallWim)` — 从 install.wim 提取 `Program Files\WindowsApps\Microsoft.VCLibs.140.00*`、`Microsoft.NET.Native.*`、`Microsoft.UI.Xaml.*`、`Microsoft.WindowsAppRuntime*`，断言至少 5 个框架包目录
-  - `Register-ProvisionedAppx([string] $MountDir, [string[]] $PackageNames)` — 向 `$MountDir\Windows\System32\config\SOFTWARE` 的 `Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications` 与 `\InboxApplications` 写键；对每个名称断言键存在
+  - `Register-ProvisionedAppx([string] $MountDir, [string[]] $PackageNames)` — 向 `$MountDir\Windows\System32\config\SOFTWARE` 的 `Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications` 写键；对每个名称断言键存在（InboxApplications 不写：构建管理员无权写入该键，见 CI run 44008629819；它是启动时不查的 servicing 元数据）
   - `Get-UwpDefaults()` — 返回 `@('Microsoft.WindowsCalculator','Microsoft.Windows.Photos','Microsoft.ZuneMusic')`（用户决定 2026-11-16：仅保留核心文件，设置与 Store 不带）
   - `Assert-UwpReady([string] $MountDir)` — 断言 `Windows\System32\AppXDeploymentClient.dll`、`Windows.StateRepository*.dll` ≥4、`Windows\System32\Windows.UI.Xaml.dll`、`AppRepository` 目录、且默认应用名对应的 `WindowsApps\<name>_*` 目录各 ≥1
 
@@ -987,7 +987,7 @@ Expected: FAIL — `Assert-UwpReady` 未定义
 
 - [ ] **Step 3: 实现**
 
-`Install-AppxFramework` 的提取清单基于 `Program Files\WindowsApps\` 前缀通配（这是 install.wim 里真实布局）。`Register-ProvisionedAppx` 只写 `AppxAllUserStore` 的允许运行键与 `InboxApplications` 的 `Path` 值；不复制 `StateRepository` 数据库（必须由首次启动生成，复制会导致 0x80073CF9）。`40-uwp.reg` 写 `Appx\AllowAllTrustedApps=1`、`Appx\Deployment\AllowDevelopmentWithoutDevLicense=1`、`StateRepository` 服务启动类型 `3`。
+`Install-AppxFramework` 的提取清单基于 `Program Files\WindowsApps\` 前缀通配（这是 install.wim 里真实布局）。`Register-ProvisionedAppx` 只写 `AppxAllUserStore` 的允许运行键（`InboxApplications` 的 `Path` 值不写：构建管理员无权写入该键，CI run 44008629819 实证）；不复制 `StateRepository` 数据库（必须由首次启动生成，复制会导致 0x80073CF9）。`40-uwp.reg` 写 `Appx\AllowAllTrustedApps=1`、`Appx\Deployment\AllowDevelopmentWithoutDevLicense=1`、`StateRepository` 服务启动类型 `3`。
 
 - [ ] **Step 4: 运行测试确认通过**
 
