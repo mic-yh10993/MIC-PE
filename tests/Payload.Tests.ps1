@@ -206,8 +206,10 @@ Describe 'New-PayloadArchive' {
         $r1.Sha256 | Should -Be $r2.Sha256
 
         $listing = & 7z l $out1 2>&1 | Out-String
-        $listing | Should -Match 'ProgramFiles/MICPE/PECMD\.EXE'
-        $listing | Should -Match 'ProgramFiles/7-zip/7z\.exe'
+        # 7z prints paths with the host separator ('/' on Linux, '\'
+        # on Windows); accept either.
+        $listing | Should -Match 'ProgramFiles[/\\]MICPE[/\\]PECMD\.EXE'
+        $listing | Should -Match 'ProgramFiles[/\\]7-zip[/\\]7z\.exe'
     }
 }
 
