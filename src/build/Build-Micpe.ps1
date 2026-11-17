@@ -161,18 +161,24 @@ function Invoke-BaseStep {
     $null = Repair-UupAria2Script -PackageDir $packageDir
 
     Write-Step 'converting UUP files into an ISO (this takes 40-90 minutes)'
-    Push-Location $packageDir
-    try {
-        $downloader = Join-Path $packageDir 'uup_download_windows.cmd'
-        # The downloader ends with `pause`, which blocks an unattended run.
-        # Feed it newlines on stdin so it drains and exits.
-        $output = & cmd.exe /c "echo. | `"$downloader`"" 2>&1
-        $output | Out-Host
-        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "uup_download_windows.cmd failed with exit code $LASTEXITCODE"
-    }
-    finally {
-        Pop-Location
-    }
+    # The converter fetches files from UUP dump itself (aria2), so it can hit
+    # the same transient 504 as the API calls: run 43985086793 died on exactly
+    # that, after every UUP file was already downloaded. Retry it the same way;
+    # aria2 resumes from its control files, so a re-run is cheap.
+    $null = Invoke-NetworkWithRetry -Action {
+        Push-Location $packageDir
+        try {
+            $downloader = Join-Path $packageDir 'uup_download_windows.cmd'
+            # The downloader ends with `pause`, which blocks an unattended run.
+            # Feed it newlines on stdin so it drains and exits.
+            $output = & cmd.exe /c "echo. | `"$downloader`"" 2>&1
+            $output | Out-Host
+            Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "uup_download_windows.cmd failed with exit code $LASTEXITCODE"
+        }
+        finally {
+            Pop-Location
+        }
+    } -MaxAttempts 3 -Label 'uup converter'
 
     $producedIso = Get-ChildItem -LiteralPath $packageDir -Filter '*.iso' -File |
         Sort-Object Length -Descending | Select-Object -First 1

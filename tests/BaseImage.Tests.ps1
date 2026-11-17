@@ -177,6 +177,17 @@ Describe 'Build-Micpe.ps1 aria2 pre-seeding' {
     }
 }
 
+Describe 'Build-Micpe.ps1 converter retry' {
+    It 'runs uup_download_windows.cmd through the network retry helper' {
+        # Run 43985086793 died on a 504 inside the converter itself, after
+        # every UUP file was already downloaded: the converter fetches from
+        # UUP dump too, so it needs the same retry as the API calls.
+        $build = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/Build-Micpe.ps1') -Raw
+        $build | Should -Match 'Invoke-NetworkWithRetry -Action \{[\s\S]*?uup_download_windows\.cmd'
+        $build | Should -Match "-Label 'uup converter'"
+    }
+}
+
 Describe 'Repair-UupAria2Script' {
     It 'replaces the bundled verifier and removes Get-FileHash' {
         $pkg = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-uup-{0}" -f [guid]::NewGuid())
