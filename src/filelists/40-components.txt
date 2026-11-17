@@ -174,3 +174,5 @@ Windows\System32\mfc42u.dll
 Windows\System32\osk.exe
 Windows\System32\utilman.exe
 Windows\System32\OskSupport.dll
+Windows\System32\InputMethod
+Windows\System32\ime

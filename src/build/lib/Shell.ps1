@@ -156,6 +156,21 @@ function Set-BootShell {
             Write-SubStep "$file installed to Program Files/MICPE"
         }
     }
+
+    # Pin-Shortcuts.wcs runs from System32 (next to probe.cmd) so PECMD.INI
+    # can CALL it with a space-free path.
+    $shortcuts = Join-Path $shellSrc 'Pin-Shortcuts.wcs'
+    if (Test-Path -LiteralPath $shortcuts) {
+        Copy-Item -LiteralPath $shortcuts -Destination (Join-Path $MountDir 'Windows/System32/Pin-Shortcuts.wcs') -Force
+        Write-SubStep 'Pin-Shortcuts.wcs installed to System32'
+    }
+
+    # PECMD.EXE is third-party freeware and deliberately not in git. Until a
+    # step supplies it (payload asset or CI download, M5/M6), startnet.cmd
+    # falls back to the command shell; say so loudly in the build log.
+    if (-not (Test-Path -LiteralPath (Join-Path $shellSrc 'PECMD.EXE'))) {
+        Write-Warn 'PECMD.EXE is not in src/shell; the image will boot to the cmd fallback until a PECMD binary is supplied'
+    }
 }
 
 function Install-Runtimes {
@@ -225,6 +240,67 @@ function Install-Components {
     }
 
     Write-SubStep 'DWM, task manager and input components verified'
+}
+
+function Get-ImePatterns {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $Patterns
+    )
+
+    # // reuse-check: filter set is plan T11 verbatim (InputMethod / ime /
+    # msctf / TextInputFramework / ChsIME / Winlangdb). Pure function so the
+    # selection is unit-testable without a real install.wim.
+    $filters = @('*InputMethod*', '*ime*', '*msctf*', '*TextInputFramework*', '*ChsIME*', '*Winlangdb*')
+    return @($Patterns | Where-Object {
+        $candidate = $_
+        @($filters | Where-Object { $candidate -like $_ }).Count -gt 0
+    })
+}
+
+function Install-Ime {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MountDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $InstallWim,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RepoRoot,
+
+        [string] $WimlibPath = 'wimlib-imagex',
+
+        [int] $InstallIndex = 1
+    )
+
+    Assert-PathExists -Path $MountDir -Label 'boot.wim mount'
+    Assert-PathExists -Path $InstallWim -Label 'install.wim'
+
+    Write-Step 'extracting the Microsoft Pinyin input method'
+    $all = Read-Whitelist -Path (Join-Path $RepoRoot 'src/filelists/40-components.txt')
+    $patterns = @(Get-ImePatterns -Patterns $all)
+    if ($patterns.Count -eq 0) {
+        throw [System.InvalidOperationException]::new(
+            'no IME patterns found in 40-components.txt (expected InputMethod/msctf entries)')
+    }
+    Export-WimFiles -WimPath $InstallWim -Index $InstallIndex `
+        -Destination $MountDir -Patterns $patterns -WimlibPath $WimlibPath
+
+    # NOTE (unverified against a real install.wim): the SHARED directory is
+    # what plan T11 asserts. If the L2 structural check shows 25H2 lays the
+    # IME out differently, re-point this assertion at ChsIME.exe instead of
+    # weakening it silently.
+    $shared = Join-Path $MountDir 'Windows/System32/InputMethod/SHARED'
+    if (-not (Test-Path -LiteralPath $shared)) {
+        throw [System.InvalidOperationException]::new(
+            "Microsoft Pinyin is incomplete: Windows\\System32\\InputMethod\\SHARED was not extracted from $InstallWim")
+    }
+
+    Write-SubStep 'Microsoft Pinyin files verified'
 }
 
 function Assert-ImeRegistered {

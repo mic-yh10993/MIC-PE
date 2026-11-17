@@ -43,7 +43,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libDir = Join-Path $PSScriptRoot 'lib'
 
-foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'BaseImage', 'Iso') {
+foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'BaseImage', 'Iso') {
     . (Join-Path $libDir "$lib.ps1")
 }
 
@@ -233,6 +233,79 @@ function Invoke-ReseedStep {
     Assert-BootWimSize -WimPath $mediaBoot
 }
 
+function Invoke-ExplorerStep {
+    Write-Step 'installing the Explorer shell'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    $installWim = Join-Path $paths.Base 'install.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+    Assert-PathExists -Path $installWim -Label 'install.wim'
+
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Install-ExplorerShell -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
+        # 10 before 20 on purpose: 20-explorer.reg overrides the Winlogon
+        # Shell pointer that 10-pe-base.reg sets (PECMD is launched from
+        # startnet.cmd; Explorer is the desktop shell).
+        $regFiles = @('10-pe-base.reg', '20-explorer.reg') |
+            ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles
+        Set-BootShell -MountDir $paths.Mount -RepoRoot $repoRoot
+        Assert-ExplorerPresent -MountDir $paths.Mount
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
+function Invoke-RuntimesStep {
+    Write-Step 'installing the WOW64 runtimes'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    $installWim = Join-Path $paths.Base 'install.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+    Assert-PathExists -Path $installWim -Label 'install.wim'
+
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Install-Runtimes -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
+function Invoke-ComponentsStep {
+    Write-Step 'installing DWM, components and the input method'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    $installWim = Join-Path $paths.Base 'install.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+    Assert-PathExists -Path $installWim -Label 'install.wim'
+
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Install-Components -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
+        Install-Ime -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
+        $regFiles = @('30-components.reg') |
+            ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles
+        Assert-ImeRegistered -MountDir $paths.Mount
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
 function Invoke-IsoStep {
     Write-Step 'packaging MICPE.iso'
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
@@ -262,6 +335,9 @@ foreach ($step in $steps) {
     switch ($step) {
         'base'      { Invoke-BaseStep }
         'reseed'    { Invoke-ReseedStep }
+        'explorer'  { Invoke-ExplorerStep }
+        'runtimes'  { Invoke-RuntimesStep }
+        'components' { Invoke-ComponentsStep }
         'iso'       { $result = Invoke-IsoStep }
         default {
             Write-Warn "step '$step' is not implemented yet (planned for a later stage)"
