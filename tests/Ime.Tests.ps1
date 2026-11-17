@@ -73,18 +73,16 @@ Describe 'IME registry patch' {
 }
 
 Describe 'Assert-ImeRegistered against a real hive' {
-    BeforeAll {
-        # $env:SystemRoot is empty off Windows; build the path only there so
-        # the BeforeAll itself does not fail on Linux (the Its skip below).
-        $script:realHive = if ($IsWindows) { Join-Path $env:SystemRoot 'System32\config\SOFTWARE' } else { $null }
-    }
-
     It 'throws naming 0804 when the hive preload lacks it' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
 
         $mount = New-Item -ItemType Directory -Path (Join-Path $script:TempRoot "mnt-$(Get-Random)") -Force
         New-Item -ItemType Directory -Force -Path "$($mount.FullName)\Windows\System32\config" | Out-Null
-        Copy-Item -LiteralPath $script:realHive -Destination "$($mount.FullName)\Windows\System32\config\SOFTWARE"
+        # The live SOFTWARE hive file is locked by the running OS, so a plain
+        # Copy-Item fails; reg save snapshots it instead.
+        $hiveCopy = "$($mount.FullName)\Windows\System32\config\SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
         try {
             { Assert-ImeRegistered -MountDir $mount.FullName } | Should -Throw '*0804*'
         }
@@ -99,7 +97,10 @@ Describe 'Assert-ImeRegistered against a real hive' {
         $mount = New-Item -ItemType Directory -Path (Join-Path $script:TempRoot "mnt-$(Get-Random)") -Force
         New-Item -ItemType Directory -Force -Path "$($mount.FullName)\Windows\System32\config" | Out-Null
         $hiveCopy = "$($mount.FullName)\Windows\System32\config\SOFTWARE"
-        Copy-Item -LiteralPath $script:realHive -Destination $hiveCopy
+        # The live SOFTWARE hive file is locked by the running OS, so a plain
+        # Copy-Item fails; reg save snapshots it instead.
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
         try {
             Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'MICPE-IME-TEST'
             try {
