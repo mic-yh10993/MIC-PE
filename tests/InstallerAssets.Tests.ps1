@@ -61,6 +61,26 @@ Describe 'installer assets' {
         $w | Should -Match '标记存在但映像缺失'
     }
 
+    It 'wcs writes the source path and the real source kind for the deploy step' {
+        $w = Get-Content "$root/src/installer/MICPE-Setup.wcs" -Raw
+        $w | Should -Match 'installer_path=%Source1_Path%'
+        $w | Should -Match 'installer_source=marker'
+        $w | Should -Match 'installer_source=fallback'
+        $w | Should -Match 'Source1_Marker'
+    }
+
+    It 'wcs resolves the default index in cli deploy mode (no dropdown there)' {
+        $w = Get-Content "$root/src/installer/MICPE-Setup.wcs" -Raw
+        $w | Should -Match 'Select-DefaultIndex'
+        $w | Should -Match 'verindex\.txt'
+        $w | Should -Match 'READ %SystemDrive%\\verindex\.txt,1,VerIndex'
+    }
+
+    It 'wcs defaults the boot drive to the target drive before bcdboot' {
+        $w = Get-Content "$root/src/installer/MICPE-Setup.wcs" -Raw
+        $w | Should -Match 'IFEX %BootDrive%=,ENVI BootDrive=%TargetDrive%'
+    }
+
     It 'lang file carries the same user-visible strings as the wcs' {
         $lang = Get-Content "$root/src/installer/lang/zh-CN.txt" -Raw
         $w = Get-Content "$root/src/installer/MICPE-Setup.wcs" -Raw

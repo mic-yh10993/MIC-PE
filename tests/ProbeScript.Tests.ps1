@@ -68,6 +68,22 @@ Describe 'probe.cmd' {
         $script:probe | Should -Match 'echo installer_scan=0 >> "%PROBE_OUT%"'
     }
 
+    It 'deploys the found source to the largest free volume when data disks are attached' {
+        # plan Task 17 Step 6: the deploy step reads the installer_path the
+        # discovery wrote, picks the biggest free volume that is not the
+        # source, the PE or the probe share, and runs -cli -deploy.
+        $script:probe | Should -Match 'installer_path='
+        $script:probe | Should -Match '-cli -deploy'
+        $script:probe | Should -Match 'installer_boot=1'
+        $script:probe | Should -Match 'EFI\\Microsoft\\Boot\\BCD'
+    }
+
+    It 'skips the deploy when no source was found or no target exists' {
+        $script:probe | Should -Match 'if not defined DEPLOY_SRC goto :skip_deploy'
+        $script:probe | Should -Match 'if not defined DEPLOY_TARGET goto :skip_deploy'
+        $script:probe | Should -Match ':skip_deploy'
+    }
+
     It 'writes every key the stage tables assert' {
         . (Join-Path $repoRoot 'src/ci/Assert-Probe.ps1')
         $keys = [System.Collections.Generic.HashSet[string]]::new()
@@ -75,8 +91,14 @@ Describe 'probe.cmd' {
             foreach ($key in (Get-StageProbeExpect -Stage $stage).Keys) { $null = $keys.Add($key) }
         }
         foreach ($key in $keys) {
-            if ($key -in @('size_wim', 'size_iso', 'installer_deploy')) {
-                continue   # written by the build host / M7 QEMU harness, not the PE probe
+            if ($key -in @('size_wim', 'size_iso')) {
+                continue   # written by the build host, not the PE probe
+            }
+            if ($key -eq 'installer_deploy') {
+                # Written by the .wcs (-cli -deploy) that probe.cmd invokes,
+                # not by a literal echo in probe.cmd itself.
+                $script:probe | Should -Match '-cli -deploy' -Because 'probe.cmd must trigger the deploy that writes installer_deploy'
+                continue
             }
             $script:probe | Should -Match ([regex]::Escape($key)) -Because "probe.cmd must emit $key"
         }

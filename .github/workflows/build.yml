@@ -146,6 +146,86 @@ jobs:
           Write-Host "firmware: $ovmf"
           "OVMF_PATH=$ovmf" | Add-Content -LiteralPath $env:GITHUB_ENV
 
+      - name: Prepare data disks
+        if: inputs.verify == 'full' && (inputs.stage == 'm6' || inputs.stage == 'm7' || inputs.stage == 'all')
+        shell: pwsh
+        run: |
+          # plan Task 17 Step 6: three qcow2 data disks + one blank 64 GB disk
+          # for the installer deploy smoke test. Windows cannot partition a
+          # qcow2 directly, so each disk is built as a VHDX with diskpart
+          # (partition + NTFS format + files), detached, then converted to
+          # qcow2 with qemu-img. install.wim comes from the ISO just built,
+          # so both source disks carry a copy of the real file.
+          $ErrorActionPreference = 'Stop'
+          $diskDir = "$env:GITHUB_WORKSPACE\verify-disks"
+          New-Item -ItemType Directory -Path $diskDir -Force | Out-Null
+          $iso = $env:ISO_PATH
+          if (-not $iso) { throw 'Prepare data disks: ISO_PATH is empty; the build step did not export it' }
+          if (-not (Test-Path -LiteralPath $iso)) { throw "Prepare data disks: ISO not found at '$iso'" }
+
+          $wimDir = Join-Path $diskDir 'wim'
+          New-Item -ItemType Directory -Path $wimDir -Force | Out-Null
+          & 7z x $iso 'sources\install.wim' "-o$wimDir" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'failed to extract sources\install.wim from the built ISO' }
+          $installWim = Join-Path $wimDir 'sources\install.wim'
+          if (-not (Test-Path -LiteralPath $installWim)) { throw 'sources\install.wim missing after extraction' }
+
+          foreach ($letter in 'T', 'U', 'V', 'W') {
+            if (Get-PSDrive -Name $letter -ErrorAction SilentlyContinue) {
+              throw "drive letter ${letter}: is already in use; cannot stage data disks"
+            }
+          }
+
+          function New-DataDisk {
+            param(
+              [Parameter(Mandatory = $true)] [string] $Name,
+              [Parameter(Mandatory = $true)] [int] $SizeMb,
+              [Parameter(Mandatory = $true)] [string] $Letter,
+              [scriptblock] $Fill = $null
+            )
+            $vhdx = Join-Path $diskDir "$Name.vhdx"
+            $create = @(
+              "create vdisk file=`"$vhdx`" maximum=$SizeMb type=expandable"
+              "select vdisk file=`"$vhdx`""
+              'attach vdisk'
+              'create partition primary'
+              'format fs=ntfs quick'
+              "assign letter=$Letter"
+            ) -join "`n"
+            $create | diskpart | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "diskpart failed while creating $Name" }
+            try {
+              if ($null -ne $Fill) { & $Fill }
+            }
+            finally {
+              @("select vdisk file=`"$vhdx`"", 'detach vdisk') -join "`n" | diskpart | Out-Null
+            }
+            $qcow2 = Join-Path $diskDir "$Name.qcow2"
+            & qemu-img convert -f vhdx -O qcow2 $vhdx $qcow2
+            if ($LASTEXITCODE -ne 0) { throw "qemu-img convert failed for $Name" }
+            Remove-Item -LiteralPath $vhdx -Force
+            Write-Host "disk ready: $qcow2"
+            return $qcow2
+          }
+
+          # disk2: blank NTFS, no marker. disk3: marker + real install.wim.
+          # disk4: real install.wim, no marker. disk5: blank 64 GB target.
+          $d2 = New-DataDisk -Name 'disk2' -SizeMb 2048 -Letter 'T'
+          $d3 = New-DataDisk -Name 'disk3' -SizeMb 8192 -Letter 'U' -Fill {
+            Set-Content -LiteralPath 'U:\install.mic' -Value 'MICPE 定制系统 v1' -Encoding utf8
+            New-Item -ItemType Directory -Path 'U:\sources' -Force | Out-Null
+            Copy-Item -LiteralPath $installWim -Destination 'U:\sources\install.wim'
+          }
+          $d4 = New-DataDisk -Name 'disk4' -SizeMb 8192 -Letter 'V' -Fill {
+            New-Item -ItemType Directory -Path 'V:\sources' -Force | Out-Null
+            Copy-Item -LiteralPath $installWim -Destination 'V:\sources\install.wim'
+          }
+          $d5 = New-DataDisk -Name 'disk5' -SizeMb 65536 -Letter 'W'
+
+          $disks = @($d2, $d3, $d4, $d5) -join ';'
+          "DATA_DISKS=$disks" | Add-Content -LiteralPath $env:GITHUB_ENV
+          Write-Host "data disks: $disks"
+
       - name: Verify in QEMU
         if: inputs.verify == 'full'
         shell: pwsh
@@ -181,9 +261,22 @@ jobs:
             throw "Verify in QEMU: OVMF firmware file not found at '$ovmf'"
           }
           $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
-          ./src/ci/Test-Stage.ps1 -Iso $iso -Stage $env:IN_STAGE `
-            -WorkDir "$env:GITHUB_WORKSPACE\verify-out" -QemuPath $qemu -TimeoutMin 45 `
-            -Firmware uefi -FirmwarePath $ovmf
+          $verifyArgs = @{
+            Iso          = $iso
+            Stage        = $env:IN_STAGE
+            WorkDir      = "$env:GITHUB_WORKSPACE\verify-out"
+            QemuPath     = $qemu
+            TimeoutMin   = 45
+            Firmware     = 'uefi'
+            FirmwarePath = $ovmf
+          }
+          if ($env:DATA_DISKS) {
+            # Data disks prepared: the deploy smoke test applies a whole
+            # image under TCG, so give the run two hours instead of 45 min.
+            $verifyArgs.DataDisks = $env:DATA_DISKS -split ';'
+            $verifyArgs.TimeoutMin = 120
+          }
+          ./src/ci/Test-Stage.ps1 @verifyArgs
 
       - name: Verify (static)
         if: inputs.verify == 'static'

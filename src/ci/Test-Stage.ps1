@@ -37,6 +37,12 @@ param(
     # name too, so it is saved and restored around the dot-source below.
     [string] $FirmwarePath,
 
+    # Extra qcow2 disks for the installer deploy smoke test (plan Task 17
+    # Step 6): the workflow's "Prepare data disks" step creates them and
+    # passes them here; empty means a plain boot-only run. Same dot-source
+    # trap: Invoke-QemuVerify.ps1 declares $DataDisks too.
+    [string[]] $DataDisks,
+
     [switch] $KeepRawScreenshots
 )
 
@@ -53,13 +59,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # empty and the Invoke-QemuVerify call died on parameter binding (runs
 # 43884981629 and 43891758991 both failed exactly this way). Save the three
 # colliding parameters first and restore them right after.
-$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware; FirmwarePath = $FirmwarePath }
+$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware; FirmwarePath = $FirmwarePath; DataDisks = $DataDisks }
 . (Join-Path $PSScriptRoot 'Invoke-QemuVerify.ps1') -ParseOnly
 $Iso = $dotSourceParams.Iso
 $TimeoutMin = $dotSourceParams.TimeoutMin
 $QemuPath = $dotSourceParams.QemuPath
 $Firmware = $dotSourceParams.Firmware
 $FirmwarePath = $dotSourceParams.FirmwarePath
+$DataDisks = $dotSourceParams.DataDisks
 
 if (-not $WorkDir) {
     $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) "micpe-verify-$Stage"
@@ -81,7 +88,7 @@ Write-SubStep "share: $shareDir"
 
 $result = Invoke-QemuVerify -Iso $Iso -ShareDir $shareDir -TimeoutMin $TimeoutMin `
     -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -Firmware $Firmware `
-    -FirmwarePath $FirmwarePath
+    -FirmwarePath $FirmwarePath -DataDisks $DataDisks
 
 if (-not $result.ProbeSeen) {
     Write-Host ''

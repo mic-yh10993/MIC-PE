@@ -166,6 +166,9 @@ END
 SUB DoDeploy
 ; format (after mountvol unmount) -> dism apply -> optional unattend ->
 ; bcdboot. Each step logs to X:\Program Files\MICPE\logs\setup-<time>.log.
+; BootDrive defaults to the target drive (same as Deploy.ps1 Repair-Boot):
+; CLI mode never sets it, and bcdboot /s with an empty value fails.
+IFEX %BootDrive%=,ENVI BootDrive=%TargetDrive%
 ENVI SetupLog=%LogDir%\setup-%date%-%time%.log
 EXEC -wait -hide mountvol.exe %TargetDrive%: /D
 EXEC -wait -hide format.com %TargetDrive%: /FS:NTFS /Q /Y
@@ -185,14 +188,28 @@ EXIT
 
 SUB CliDiscover
 CALL DiscoverSources
-IFEX $%SourceCount%>0,TEAM EXEC -hide cmd.exe /c echo installer_scan=1>>"%ProbeFile%"|EXEC -hide cmd.exe /c echo installer_source=marker>>"%ProbeFile%"|EXEC -hide cmd.exe /c echo installer_name=%Source1_Name%>>"%ProbeFile%"
+IFEX $%SourceCount%>0,TEAM EXEC -hide cmd.exe /c echo installer_scan=1>>"%ProbeFile%"|EXEC -hide cmd.exe /c echo installer_path=%Source1_Path%>>"%ProbeFile%"|EXEC -hide cmd.exe /c echo installer_name=%Source1_Name%>>"%ProbeFile%"|CALL WriteSourceKind
 IFEX $%SourceCount%=0,EXEC -hide cmd.exe /c echo installer_scan=0>>"%ProbeFile%"
+END
+
+SUB WriteSourceKind
+; installer_source must say which kind of source won the scan (plan Task 17
+; Step 6): marker when the winning volume carries install.mic, fallback when
+; it was found by the sources\install.wim fallback instead.
+IFEX %Source1_Marker%=1,EXEC -hide cmd.exe /c echo installer_source=marker>>"%ProbeFile%"
+IFEX %Source1_Marker%=0,EXEC -hide cmd.exe /c echo installer_source=fallback>>"%ProbeFile%"
 END
 
 SUB CliDeploy
 ; %1 = source image, %2 = target drive (design §6: -cli -deploy <源> <目标盘>).
+; CLI mode has no version dropdown, so resolve the default index first the
+; same way the wizard picks it: DISM lists the indexes, Deploy.ps1 picks
+; the first one (no install.mic name is passed in CLI mode). Without this
+; %VerIndex% stays empty and CheckTarget fails to bind -Index.
 ENVI Source1_Path=%1
 ENVI TargetDrive=%2
+EXEC -wait -hide powershell.exe -NoProfile -Command ". '%SetupDir%\Deploy.ps1'; (Select-DefaultIndex -Indexes (Get-WimIndexes -WimPath '%Source1_Path%')) | Out-File -FilePath '%SystemDrive%\verindex.txt' -Encoding ascii"
+READ %SystemDrive%\verindex.txt,1,VerIndex
 CALL CheckTarget
 IFEX $%TargetOk%=0,TEAM EXEC -hide cmd.exe /c echo installer_deploy=0>>"%ProbeFile%"|EXIT
 CALL DoDeploy

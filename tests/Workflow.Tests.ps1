@@ -88,7 +88,7 @@ Describe 'build.yml verify wiring' {
         # mechanism that already carries IN_STAGE and the upload steps).
         $script:buildYml | Should -Match 'IN_ISO:'
         $script:buildYml | Should -Match '\$\{\{ env\.ISO_PATH \}\}'
-        $script:buildYml | Should -Match '-Iso \$iso'
+        $script:buildYml | Should -Match 'Iso\s*=\s*\$iso'
         $script:buildYml | Should -Not -Match '-Iso \$env:ISO_PATH'
     }
 
@@ -110,9 +110,33 @@ Describe 'build.yml verify wiring' {
     }
 
     It 'forces UEFI boot in the QEMU verifier with the resolved firmware path' {
-        $script:buildYml | Should -Match '-Firmware uefi'
-        $script:buildYml | Should -Match '-FirmwarePath'
+        $script:buildYml | Should -Match "Firmware\s*=\s*'uefi'"
+        $script:buildYml | Should -Match 'FirmwarePath'
         $script:buildYml | Should -Match 'IN_OVMF:'
+    }
+
+    It 'prepares the Task 17 Step 6 data disks for m6/m7 full runs' {
+        $script:buildYml | Should -Match 'Prepare data disks'
+        $script:buildYml | Should -Match "inputs.verify == 'full'"
+        $script:buildYml | Should -Match 'diskpart'
+        $script:buildYml | Should -Match 'qemu-img convert'
+        $script:buildYml | Should -Match 'install\.mic'
+        $script:buildYml | Should -Match 'MICPE 定制系统 v1'
+        $script:buildYml | Should -Match 'DATA_DISKS='
+    }
+
+    It 'passes the data disks to the verifier and gives the deploy run two hours' {
+        $script:buildYml | Should -Match 'DataDisks'
+        $script:buildYml | Should -Match 'TimeoutMin\s*=\s*120'
+        $script:testStage | Should -Match 'DataDisks'
+    }
+
+    It 'saves and restores DataDisks around the dot-source like the other colliding names' {
+        # Invoke-QemuVerify.ps1 declares $DataDisks too, so the bare
+        # dot-source would reset Test-Stage's own value to empty (the same
+        # trap that killed runs 43884981629 and 43891758991 for $Iso).
+        $script:testStage | Should -Match 'DataDisks = \$DataDisks'
+        $script:testStage | Should -Match '-DataDisks \$DataDisks'
     }
 
     It 'fails fast in the verify step when the OVMF path is empty or missing' {

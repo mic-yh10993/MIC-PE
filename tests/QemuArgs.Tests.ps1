@@ -407,6 +407,27 @@ Describe 'Invoke-QemuVerify preconditions' {
     }
 }
 
+Describe 'Test-ProbeComplete' {
+    It 'is false for probe text without the done marker' {
+        Test-ProbeComplete -Content "boot=1`r`nexplorer=1`r`n" | Should -BeFalse
+    }
+
+    It 'is false when boot=1 is present but the probe is still running' {
+        # The old loop broke on boot=1 and returned a partial probe: boot=1
+        # is the FIRST line probe.cmd writes, minutes before the rest.
+        Test-ProbeComplete -Content "boot=1`r`nshare=1`r`nexplorer=1`r`n" | Should -BeFalse
+    }
+
+    It 'is true only when probe_done=1 is the last line' {
+        Test-ProbeComplete -Content "boot=1`r`nprobe_done=1`r`n" | Should -BeTrue
+    }
+
+    It 'is false for empty content and for probe_done=0' {
+        Test-ProbeComplete -Content '' | Should -BeFalse
+        Test-ProbeComplete -Content "probe_done=0`r`n" | Should -BeFalse
+    }
+}
+
 Describe 'dot-sourcing the helper' {
     It 'binds the helper param block in the caller scope, resetting same-named variables' {
         # This is the trap that killed runs 43884981629 and 43891758991:

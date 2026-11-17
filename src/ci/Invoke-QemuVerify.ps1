@@ -499,6 +499,21 @@ function Measure-NonBlackRatio {
     }
 }
 
+function Test-ProbeComplete {
+    [CmdletBinding()]
+    param(
+        [string] $Content
+    )
+
+    # The probe is complete only when probe.cmd has written its last line.
+    # probe.cmd writes boot=1 FIRST and then spends minutes on the shell,
+    # UWP, payload, brand and installer checks: breaking on boot=1 (what
+    # the loop used to do) returns a partial probe and every later
+    # assertion fails on keys that were simply not written yet.
+    if (-not $Content) { return $false }
+    return ($Content -match '(?m)^probe_done=1\s*$')
+}
+
 function Invoke-QemuVerify {
     [CmdletBinding()]
     param(
@@ -657,7 +672,7 @@ function Invoke-QemuVerify {
             if (Test-Path -LiteralPath $probePath) {
                 Start-Sleep -Seconds 3
                 $probe = Get-Content -LiteralPath $probePath -Raw -ErrorAction SilentlyContinue
-                if ($probe -and $probe -match 'boot=1') {
+                if (Test-ProbeComplete -Content $probe) {
                     Start-Sleep -Seconds 5
                     break
                 }

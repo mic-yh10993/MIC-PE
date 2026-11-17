@@ -105,10 +105,11 @@ echo brand=%BRAND% >> "%PROBE_OUT%"
 
 rem --- installer -------------------------------------------------------------
 rem M6: run the installer in -cli -discoveronly mode so it writes
-rem installer_scan / installer_source / installer_name into the same probe
-rem file (design §6). installer_deploy is NOT wired here: a real deploy
-rem needs the M7 QEMU harness with three qcow2 data disks (plan Task 17
-rem Step 6); until then Assert-Probe m6/m7 cannot see installer_deploy=1.
+rem installer_scan / installer_source / installer_name / installer_path
+rem into the same probe file (design §6). M7: when a source was found and
+rem data disks are attached (plan Task 17 Step 6), the deploy step below
+rem calls -cli -deploy, which writes installer_deploy after a successful
+rem apply + boot repair.
 rem The .wcs path is checked first so a missing installer fails loudly
 rem (installer_scan=0) instead of silently leaving the key out.
 set "MICPE_PROBE_FILE=%PROBE_OUT%"
@@ -117,6 +118,25 @@ if exist "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" (
 ) else (
     echo installer_scan=0 >> "%PROBE_OUT%"
 )
+
+rem --- installer deploy (M7 harness, plan Task 17 Step 6) --------------------
+rem When the scan found a source, deploy it to the largest free volume that
+rem is neither the source volume, the PE volume nor the probe share (in the
+rem CI harness that is the blank 64 GB disk). Without data disks there is
+rem no safe target: the scan only ever sees the boot ISO itself, so the
+rem target pick comes back empty and this step is skipped.
+rem installer_deploy=1 is written by the .wcs itself after a successful
+rem apply + boot repair; installer_boot=1 means bcdboot left a BCD store
+rem on the target.
+set "DEPLOY_SRC="
+for /f "tokens=1,* delims==" %%A in ('findstr /b "installer_path=" "%PROBE_OUT%" 2^>nul') do set "DEPLOY_SRC=%%B"
+if not defined DEPLOY_SRC goto :skip_deploy
+set "DEPLOY_TARGET="
+for /f "usebackq delims=" %%T in (`powershell.exe -NoProfile -Command "Get-PSDrive -PSProvider FileSystem ^| Where-Object { $_.Free -gt 0 -and $_.Root -ne '%PROBE_DIR%' -and $_.Root -ne 'X:\' -and $_.Root.Substring(0,1) -ne '%DEPLOY_SRC:~0,1%' } ^| Sort-Object Free -Descending ^| Select-Object -First 1 -ExpandProperty Name"`) do set "DEPLOY_TARGET=%%T"
+if not defined DEPLOY_TARGET goto :skip_deploy
+pecmd.exe "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" -cli -deploy "%DEPLOY_SRC%" %DEPLOY_TARGET%
+if exist "%DEPLOY_TARGET%:\EFI\Microsoft\Boot\BCD" echo installer_boot=1 >> "%PROBE_OUT%"
+:skip_deploy
 
 echo probe_done=1 >> "%PROBE_OUT%"
 

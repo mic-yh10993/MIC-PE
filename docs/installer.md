@@ -104,7 +104,9 @@ MICPE-Setup.wcs -cli -deploy <源> <目标盘>
 | `installer_scan=1` | `-cli -discoveronly` 找到至少一个装机源 |
 | `installer_source=marker` / `fallback` | 命中的来源类型 |
 | `installer_name=<名>` | `install.mic` 首行显示名 |
-| `installer_deploy=1` | `-cli -deploy` 应用 + 引导修复成功 |
+| `installer_path=<路径>` | 命中的映像全路径（供 probe.cmd 的部署步使用） |
+| `installer_deploy=1` | `-cli -deploy` 应用 + 引导修复成功（CLI 模式默认用第一个索引） |
+| `installer_boot=1` | 目标盘上存在 `EFI\Microsoft\Boot\BCD`（probe.cmd 在部署后检查） |
 
 ## 已知缺口（M7 前必须处理）
 
@@ -118,9 +120,21 @@ MICPE-Setup.wcs -cli -deploy <源> <目标盘>
   实践中可用，但本次 L3 未覆盖；分卷 `.swm` 源发现器不返回、向导也不
   接受，故无 `/SWMFile` 分支；`/ScratchDir` 未加，若 L3 报 scratch 空间
   错误再指到目标盘。
-- **QEMU 验收 harness 未接线**：plan Task 17 Step 6 要求
-  `Invoke-QemuVerify.ps1` 在 M6 阶段额外挂三块 qcow2 数据盘
-  （空白盘 / 标记盘 / 无标记盘）+ 一块空白 64 GB 盘跑完整部署。这只能由
-  一次真实 Build 验证，本轮按用户决定不触发 Build，留待 M7。
+- **QEMU 验收 harness 已接线（M7）**：build.yml 的 `Prepare data disks`
+  步骤（仅 `verify=full` 且 stage ∈ {m6, m7, all}）用 diskpart 建 VHDX
+  （分区 + NTFS 格式化 + 拷文件）再 `qemu-img convert` 成 plan 要求的
+  qcow2：disk2 空白 NTFS、disk3 标记 + 真实 install.wim 副本、disk4
+  无标记 + 真实 install.wim 副本、disk5 空白 64 GB；`Test-Stage.ps1`
+  经 `-DataDisks` 透传；`probe.cmd` 在找到源时调 `-cli -deploy` 装到
+  空闲最大的卷（即 disk5），写 `installer_deploy=1` 并检查 BCD 写
+  `installer_boot=1`。数据盘验证超时 120 分钟（TCG 下 DISM apply 很慢）。
+  未验证：整条链路一次都没在 CI 跑过（m6/m7 构建被缺失的 payload
+  Release 挡住，见下一条）；disk2-only 的 `installer_scan=nopartition`
+  场景合跑里观测不到，需单独跑一次才能验证。
+- **m6/m7 完整构建被缺失的 payload Release 挡住**：`Invoke-PayloadStep`
+  用 `gh release download` 从 `payload-v1` / `chrome-v1` / `office-v1`
+  拉资产，三个 tag 在 GitHub 上都不存在（2026-11-17 API 实测 404）。
+  等用户拍板发不发这三个 Release；在此之前 stage m5/m6/m7 的 Build
+  会在 payload 步骤失败，能实际跑通的最高完整构建是 stage m4。
 - `.wcs` 的 PECMD 语法是初稿，未经 PECMD 实际解析；L3 QEMU 运行时以
   probe.txt + 截图为准。
