@@ -121,7 +121,10 @@ Describe 'Get-WimBootIndex / Set-WimBootIndex' {
             $logged = Get-Content -LiteralPath $log -Raw
             $logged | Should -Match 'info'
             $logged | Should -Match ([regex]::Escape('--boot'))
-            $logged | Should -Match '(?m)^1$'
+            # The fake logs one argument per line; Add-Content writes CRLF
+            # on Windows, so split on either ending before matching the
+            # bare '1' (a (?m)^1$ match fails on the trailing \r).
+            @($logged -split "`r?`n") | Should -Contain '1'
         }
         finally {
             Remove-Item Env:MICPE_FAKE_WIMLIB_LOG -ErrorAction SilentlyContinue
