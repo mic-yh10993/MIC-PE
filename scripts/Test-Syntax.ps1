@@ -40,7 +40,10 @@ function Get-PowerShellFiles {
             }
         }
     }
-    return $files
+    # Comma forces array semantics: with a single file the List would
+    # otherwise unwrap to a bare string and $files.Count would throw
+    # under StrictMode (found while checking tests/Ime.Tests.ps1 alone).
+    return ,$files
 }
 
 $files = Get-PowerShellFiles -Items $Path

@@ -72,6 +72,51 @@ Describe 'IME registry patch' {
     }
 }
 
+Describe 'Assert-ImeRegistered against a real hive' {
+    BeforeAll {
+        # $env:SystemRoot is empty off Windows; build the path only there so
+        # the BeforeAll itself does not fail on Linux (the Its skip below).
+        $script:realHive = if ($IsWindows) { Join-Path $env:SystemRoot 'System32\config\SOFTWARE' } else { $null }
+    }
+
+    It 'throws naming 0804 when the hive preload lacks it' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
+
+        $mount = New-Item -ItemType Directory -Path (Join-Path $script:TempRoot "mnt-$(Get-Random)") -Force
+        New-Item -ItemType Directory -Force -Path "$($mount.FullName)\Windows\System32\config" | Out-Null
+        Copy-Item -LiteralPath $script:realHive -Destination "$($mount.FullName)\Windows\System32\config\SOFTWARE"
+        try {
+            { Assert-ImeRegistered -MountDir $mount.FullName } | Should -Throw '*0804*'
+        }
+        finally {
+            Remove-Item -LiteralPath $mount.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'passes once Preload 1 is set to 0804 in the hive copy' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
+
+        $mount = New-Item -ItemType Directory -Path (Join-Path $script:TempRoot "mnt-$(Get-Random)") -Force
+        New-Item -ItemType Directory -Force -Path "$($mount.FullName)\Windows\System32\config" | Out-Null
+        $hiveCopy = "$($mount.FullName)\Windows\System32\config\SOFTWARE"
+        Copy-Item -LiteralPath $script:realHive -Destination $hiveCopy
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'MICPE-IME-TEST'
+            try {
+                $null = & reg.exe add 'HKLM\MICPE-IME-TEST\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload' /v 1 /t REG_SZ /d 00000804 /f 2>&1
+                if ($LASTEXITCODE -ne 0) { throw 'reg add preload failed' }
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'MICPE-IME-TEST'
+            }
+            { Assert-ImeRegistered -MountDir $mount.FullName } | Should -Not -Throw
+        }
+        finally {
+            Remove-Item -LiteralPath $mount.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'IME filelist entries' {
     It '40-components.txt carries the InputMethod directory trees' {
         $all = Read-Whitelist -Path (Join-Path $script:RepoRoot 'src/filelists/40-components.txt')
