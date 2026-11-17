@@ -43,7 +43,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libDir = Join-Path $PSScriptRoot 'lib'
 
-foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'Uwp', 'Payload', 'Brand', 'BaseImage', 'Iso') {
+foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'Uwp', 'Payload', 'Brand', 'Installer', 'BaseImage', 'Iso') {
     . (Join-Path $libDir "$lib.ps1")
 }
 
@@ -383,6 +383,23 @@ function Invoke-BrandStep {
     Assert-BootWimSize -WimPath $mediaBoot
 }
 
+function Invoke-InstallerStep {
+    Write-Step 'installing the MICPE installer'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Install-Installer -MountDir $paths.Mount -RepoRoot $repoRoot
+        Assert-InstallerInstalled -MountDir $paths.Mount
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
 function Invoke-IsoStep {
     Write-Step 'packaging MICPE.iso'
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
@@ -418,6 +435,7 @@ foreach ($step in $steps) {
         'uwp'       { Invoke-UwpStep }
         'payload'   { Invoke-PayloadStep }
         'brand'     { Invoke-BrandStep }
+        'installer' { Invoke-InstallerStep }
         'iso'       { $result = Invoke-IsoStep }
         default {
             Write-Warn "step '$step' is not implemented yet (planned for a later stage)"

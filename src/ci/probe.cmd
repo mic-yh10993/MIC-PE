@@ -103,6 +103,21 @@ if errorlevel 1 set "BRAND=0"
 if not exist "%SystemRoot%\System32\oemlogo.bmp" set "BRAND=0"
 echo brand=%BRAND% >> "%PROBE_OUT%"
 
+rem --- installer -------------------------------------------------------------
+rem M6: run the installer in -cli -discoveronly mode so it writes
+rem installer_scan / installer_source / installer_name into the same probe
+rem file (design §6). installer_deploy is NOT wired here: a real deploy
+rem needs the M7 QEMU harness with three qcow2 data disks (plan Task 17
+rem Step 6); until then Assert-Probe m6/m7 cannot see installer_deploy=1.
+rem The .wcs path is checked first so a missing installer fails loudly
+rem (installer_scan=0) instead of silently leaving the key out.
+set "MICPE_PROBE_FILE=%PROBE_OUT%"
+if exist "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" (
+    pecmd.exe "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" -cli -discoveronly
+) else (
+    echo installer_scan=0 >> "%PROBE_OUT%"
+)
+
 echo probe_done=1 >> "%PROBE_OUT%"
 
 if "%MICPE_HOLD%"=="1" (

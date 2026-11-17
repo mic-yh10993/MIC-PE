@@ -62,6 +62,12 @@ Describe 'probe.cmd' {
         $script:probe | Should -Match 'echo network=pending >> "%PROBE_OUT%"'
     }
 
+    It 'runs the installer discovery in cli mode and fails loudly when it is missing' {
+        $script:probe | Should -Match 'MICPE-Setup\.wcs.*-cli -discoveronly'
+        $script:probe | Should -Match 'MICPE_PROBE_FILE=%PROBE_OUT%'
+        $script:probe | Should -Match 'echo installer_scan=0 >> "%PROBE_OUT%"'
+    }
+
     It 'writes every key the stage tables assert' {
         . (Join-Path $repoRoot 'src/ci/Assert-Probe.ps1')
         $keys = [System.Collections.Generic.HashSet[string]]::new()
@@ -69,8 +75,8 @@ Describe 'probe.cmd' {
             foreach ($key in (Get-StageProbeExpect -Stage $stage).Keys) { $null = $keys.Add($key) }
         }
         foreach ($key in $keys) {
-            if ($key -in @('size_wim', 'size_iso', 'installer_scan', 'installer_deploy')) {
-                continue   # written by the build host / installer, not the PE probe
+            if ($key -in @('size_wim', 'size_iso', 'installer_deploy')) {
+                continue   # written by the build host / M7 QEMU harness, not the PE probe
             }
             $script:probe | Should -Match ([regex]::Escape($key)) -Because "probe.cmd must emit $key"
         }

@@ -197,7 +197,7 @@ Describe 'M2/M3 step wiring' {
     It 'loads Shell.ps1' {
         # The dot-source loop appends '.ps1' to each name, so assert on the
         # library list entry rather than a literal 'Shell.ps1'.
-        $script:buildScript | Should -Match "'Registry', 'Shell', 'Uwp', 'Payload', 'Brand', 'BaseImage'"
+        $script:buildScript | Should -Match "'Registry', 'Shell', 'Uwp', 'Payload', 'Brand', 'Installer', 'BaseImage'"
     }
 
     It 'dispatches the explorer, runtimes and components steps' {
@@ -233,7 +233,7 @@ Describe 'M4 step wiring' {
     }
 
     It 'loads Uwp.ps1' {
-        $script:buildScript | Should -Match "'Shell', 'Uwp', 'Payload', 'Brand', 'BaseImage'"
+        $script:buildScript | Should -Match "'Shell', 'Uwp', 'Payload', 'Brand', 'Installer', 'BaseImage'"
     }
 
     It 'dispatches the uwp step' {
@@ -262,7 +262,7 @@ Describe 'M5 step wiring' {
     }
 
     It 'loads Payload.ps1 and Brand.ps1' {
-        $script:buildScript | Should -Match "'Uwp', 'Payload', 'Brand', 'BaseImage'"
+        $script:buildScript | Should -Match "'Uwp', 'Payload', 'Brand', 'Installer', 'BaseImage'"
     }
 
     It 'dispatches the payload and brand steps' {
@@ -286,5 +286,28 @@ Describe 'M5 step wiring' {
     It 'mounts and commits boot.wim around the payload and brand steps' {
         $script:buildScript | Should -Match 'Invoke-PayloadStep'
         $script:buildScript | Should -Match 'Invoke-BrandStep'
+    }
+}
+
+Describe 'M6 step wiring' {
+    BeforeAll {
+        $script:buildScript = Get-Content -LiteralPath (Join-Path $repoRoot 'src/build/Build-Micpe.ps1') -Raw
+    }
+
+    It 'loads Installer.ps1' {
+        $script:buildScript | Should -Match "'Brand', 'Installer', 'BaseImage'"
+    }
+
+    It 'dispatches the installer step' {
+        $script:buildScript | Should -Match "'installer'\s*\{"
+    }
+
+    It 'installs and asserts the installer in the step' {
+        $script:buildScript | Should -Match 'Install-Installer'
+        $script:buildScript | Should -Match 'Assert-InstallerInstalled'
+    }
+
+    It 'mounts and commits boot.wim around the installer step' {
+        $script:buildScript | Should -Match 'Invoke-InstallerStep'
     }
 }
