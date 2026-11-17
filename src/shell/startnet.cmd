@@ -1,11 +1,13 @@
 @echo off
-rem MICPE bootstrap for stage M1: prove the base image boots and gives us a shell.
+rem MICPE bootstrap (M2): PECMD desktop shell when present, cmd fallback otherwise.
+rem PECMD.INI (loaded by PECMD.EXE) starts Explorer, ctfmon, the desktop
+rem shortcuts and probe.cmd. When no PECMD binary was supplied with the image,
+rem fall back to the M1 behaviour: run probe.cmd directly, then a prompt.
 wpeinit
-echo.
-echo MICPE base image OK - stage M1
-echo.
-rem The build injects probe.cmd next to this file; when present it writes the
-rem self-check results to the QEMU share (or X:\) and shuts down, which is how
-rem CI knows the boot worked. Without it the image just drops to a prompt.
-if exist "%SystemRoot%\System32\probe.cmd" call probe.cmd
+if exist "%SystemDrive%\Program Files\MICPE\PECMD.EXE" (
+    "%SystemDrive%\Program Files\MICPE\PECMD.EXE" LOAD "%SystemDrive%\Program Files\MICPE\PECMD.INI"
+) else (
+    echo PECMD.EXE not found - falling back to the command shell.
+    if exist "%SystemRoot%\System32\probe.cmd" call probe.cmd
+)
 cmd.exe

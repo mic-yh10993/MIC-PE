@@ -1,0 +1,8 @@
+﻿; MICPE desktop shortcuts (M2). Run by PECMD.INI after Explorer is up.
+; Creates the three desktop icons: This PC, the MICPE folder, Command Prompt.
+; NOTE: LINK syntax is PECMD WCS; confirmed by the L3 QEMU run, not by this
+; file alone. The desktop path uses %SystemDrive% (X: in PE) on purpose.
+
+LINK %SystemDrive%\Users\Default\Desktop\此电脑.lnk,%SystemRoot%\explorer.exe, shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}
+LINK %SystemDrive%\Users\Default\Desktop\MICPE.lnk,%SystemDrive%\Program Files\MICPE
+LINK %SystemDrive%\Users\Default\Desktop\命令提示符.lnk,%SystemRoot%\System32\cmd.exe
