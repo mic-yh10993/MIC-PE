@@ -279,6 +279,35 @@ Describe 'probe watchdog mechanism (run 44285721257)' {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    It 'W6: a long wait is split into short ticks (run 44349189039)' -Skip:(-not $IsWindows) {
+        # Run 38: the loop died in its first 60-second choice wait
+        # (before_wait written, after_wait never). WD_WAIT=12 must run
+        # as two 6-second ticks: the heartbeat has to show tick=1/2
+        # and tick=2/2, proving the tick loop itself runs on Windows.
+        $workDir = & $script:NewWorkDir
+        $probeFile = Join-Path $workDir 'micpe-probe.txt'
+        $heartbeatFile = Join-Path $workDir 'micpe-watchdog-heartbeat.txt'
+        try {
+            Set-Content -LiteralPath $probeFile -Value @('boot=1', 'share=1', 'explorer=1') -Encoding ascii
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $result = & $script:InvokeWatchdog $workDir $probeFile -Limit 2 -Wait 12 -TimeoutSec 60
+            $sw.Stop()
+            Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode); elapsed seconds: $($sw.Elapsed.TotalSeconds)"
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 1 -Because 'the watchdog reports that it had to fail the probe'
+            $sw.Elapsed.TotalSeconds | Should -BeLessThan 45 -Because 'two quiet checks of twelve seconds each must not take the 5-minute default'
+            (Get-Content -LiteralPath $probeFile -Raw) | Should -Match 'probe_failed=1'
+            Test-Path -LiteralPath $heartbeatFile | Should -Be $true -Because 'the loop must leave a heartbeat trail'
+            $beats = @(Get-Content -LiteralPath $heartbeatFile)
+            Write-Host "heartbeat: [$($beats -join ' | ')]"
+            ($beats -join "`n") | Should -Match 'phase=wait_tick tick=1/2' -Because 'the first tick of a 12-second wait must be recorded'
+            ($beats -join "`n") | Should -Match 'phase=wait_tick tick=2/2' -Because 'the second tick must be recorded too, proving the tick loop runs to the end'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'probe watchdog (static)' {
@@ -341,20 +370,44 @@ Describe 'probe watchdog (static)' {
         # code lines; the comment lines start with "rem".
         $beforeLine = ($wdLines | Select-String -Pattern 'phase=before_wait' | Where-Object { $_.Line -match '^echo ' } | Select-Object -First 1).LineNumber
         $afterLine = ($wdLines | Select-String -Pattern 'phase=after_wait' | Where-Object { $_.Line -match '^echo ' } | Select-Object -First 1).LineNumber
-        $waitLine = ($wdLines | Select-String -Pattern 'choice /c Y /d Y /t %WD_WAIT%' | Select-Object -First 1).LineNumber
+        $waitLine = ($wdLines | Select-String -Pattern 'choice /c Y /d Y /t %WD_TICKLEN%' | Select-Object -First 1).LineNumber
+        $tickLine = ($wdLines | Select-String -Pattern 'phase=wait_tick' | Where-Object { $_.Line -match '^echo ' } | Select-Object -First 1).LineNumber
         $beforeLine | Should -Not -BeNullOrEmpty -Because 'the before-wait heartbeat line must exist'
         $afterLine | Should -Not -BeNullOrEmpty -Because 'the after-wait heartbeat line must exist'
         $waitLine | Should -Not -BeNullOrEmpty -Because 'the choice wait line must exist'
+        $tickLine | Should -Not -BeNullOrEmpty -Because 'the tick heartbeat line must exist (run 44349189039)'
         $beforeLine | Should -BeLessThan $waitLine -Because 'the before-wait line is written before the wait starts'
-        $waitLine | Should -BeLessThan $afterLine -Because 'the after-wait line is written only after the wait returns'
+        $waitLine | Should -BeLessThan $tickLine -Because 'the tick line is written only after a tick returns'
+        $tickLine | Should -BeLessThan $afterLine -Because 'the after-wait line is written only after the last tick returns'
     }
 
     It 'the watchdog waits with choice, not ping (run 44319967017)' {
         # ping is the prime suspect for the round-2 stall, and the
         # watchdog's ping -n 60 was one of the two candidates for it.
+        # Run 44349189039: the wait is split into short choice ticks
+        # (see the tick test below); the wait line carries the tick
+        # length now, not the whole WD_WAIT.
         $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
-        $wd | Should -Match 'choice /c Y /d Y /t %WD_WAIT%' -Because 'each loop iteration waits with choice'
+        $wd | Should -Match 'choice /c Y /d Y /t %WD_TICKLEN%' -Because 'each tick waits with choice'
         $wd | Should -Not -Match 'ping -n %WD_WAIT%' -Because 'the ping wait is gone'
+        $wd | Should -Not -Match 'choice /c Y /d Y /t %WD_WAIT%' -Because 'a single 60-second choice wait never returned in run 38'
+    }
+
+    It 'the watchdog splits a long wait into short ticks (run 44349189039)' {
+        # Run 38: before_wait written 17:02:42.67, after_wait never
+        # appeared — the loop died in its first 60-second choice wait,
+        # while the probe's 1-second choice waits returned 30 times in
+        # the same run. WD_WAIT=60 becomes 12 ticks of 5 seconds with a
+        # heartbeat line after each tick; small values used by the
+        # mechanism tests (WD_WAIT=2) stay a single tick of the same
+        # length, so the total wait is unchanged there.
+        $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
+        $wd | Should -Match 'set /a WD_TICKS=%WD_WAIT% / 5' -Because 'the tick count comes from the wait'
+        $wd | Should -Match 'if %WD_TICKS% lss 1 set "WD_TICKS=1"' -Because 'a short wait is still a single tick'
+        $wd | Should -Match 'set /a WD_TICKLEN=%WD_WAIT% / %WD_TICKS%' -Because 'the tick length divides the wait'
+        $wd | Should -Match ':watchdog_wait_tick' -Because 'the ticks run in their own loop'
+        $wd | Should -Match 'if %WD_TICK% lss %WD_TICKS% goto :watchdog_wait_tick' -Because 'the loop runs every tick'
+        $wd | Should -Match 'phase=wait_tick' -Because 'each tick leaves a heartbeat line saying which tick it was'
     }
 
     It 'the verify artifact collects the heartbeat file' {

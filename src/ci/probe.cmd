@@ -122,6 +122,100 @@ echo mark_ime=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload" 2>nul | find /i "0804" >nul
 if errorlevel 1 (echo ime=0 >> "%PROBE_OUT%") else (echo ime=1 >> "%PROBE_OUT%")
 
+rem --- uwp diagnostics -------------------------------------------------------
+rem Run 44349189039: three open questions from run 38, answered with
+rem read-only evidence except the two sc start attempts below, which
+rem are themselves the experiment (their outcomes are recorded either
+rem way, and the watchdog now bounds any stall they cause):
+rem  1. UWP apps never appear in tasklist although the start lines return
+rem     at once. Online research (eval card §25) gives three stacked
+rem     candidates: the AppX deployment service never runs in PE so the
+rem     StateRepository database is never generated; the package is not
+rem     registered for the SYSTEM session; or activation is refused for
+rem     the SYSTEM token outright (UWP needs a user token with Admin
+rem     Approval Mode / UAC; WinPE logs on as SYSTEM, and Microsoft's
+rem     own docs say WinPE only supports legacy apps). The checks below
+rem     say which link is broken: service states before and after a
+rem     start attempt, the StateRepository database file, the SYSTEM
+rem     profile Packages directory, EnableLUA, and the AppxAllUserStore
+rem     entries for the three apps.
+rem  2. Explorer is alive (explorer=1, shell_ready=1) but no desktop,
+rem     taskbar or folder window ever appears. tasklist /v prints window
+rem     titles, so the dump says whether explorer owns any window at
+rem     all; the folder-window test below says whether it can create one.
+rem     Note the frame host is missing from the image by construction:
+rem     ApplicationFrameHost.exe (the process that displays every UWP
+rem     app window) appears in no filelist, and neither do
+rem     ShellExperienceHost / StartMenuExperienceHost — so even a
+rem     successful activation could not show a window. The presence
+rem     checks below confirm that at runtime instead of asserting it.
+rem  3. The watchdog died in its first 60-second choice wait while the
+rem     probe's 1-second choice waits all returned. The watchdog now
+rem     waits in 5-second ticks; this section does not touch it.
+rem The full tasklist dump goes to micpe-tasklist.txt next to the probe
+rem file (build.yml collects it into the verify artifact); the probe file
+rem itself only carries the short presence/state keys below.
+echo mark_uwp_diag=%TIME: =0% >> "%PROBE_OUT%"
+if defined PROBE_DIR (
+    set "TASKLIST_OUT=%PROBE_DIR%micpe-tasklist.txt"
+) else (
+    set "TASKLIST_OUT=%SystemDrive%\micpe-tasklist.txt"
+)
+echo --- tasklist before UWP section --- > "%TASKLIST_OUT%"
+tasklist /v >> "%TASKLIST_OUT%" 2>nul
+echo tasklist_dump=1 >> "%PROBE_OUT%"
+tasklist /fi "imagename eq ApplicationFrameHost.exe" /nh 2>nul | find /i "ApplicationFrameHost.exe" >nul
+if errorlevel 1 (echo appframehost=0 >> "%PROBE_OUT%") else (echo appframehost=1 >> "%PROBE_OUT%")
+tasklist /fi "imagename eq ShellExperienceHost.exe" /nh 2>nul | find /i "ShellExperienceHost.exe" >nul
+if errorlevel 1 (echo shellexperiencehost=0 >> "%PROBE_OUT%") else (echo shellexperiencehost=1 >> "%PROBE_OUT%")
+tasklist /fi "imagename eq StartMenuExperienceHost.exe" /nh 2>nul | find /i "StartMenuExperienceHost.exe" >nul
+if errorlevel 1 (echo startmenuexperiencehost=0 >> "%PROBE_OUT%") else (echo startmenuexperiencehost=1 >> "%PROBE_OUT%")
+tasklist /fi "imagename eq RuntimeBroker.exe" /nh 2>nul | find /i "RuntimeBroker.exe" >nul
+if errorlevel 1 (echo runtimebroker=0 >> "%PROBE_OUT%") else (echo runtimebroker=1 >> "%PROBE_OUT%")
+rem Explorer-as-process opens a folder window (plan §14), so if no window
+rem appears at all, explorer cannot create any window — a deeper break
+rem than "no desktop". Start one, wait, and dump tasklist again: the two
+rem snapshots say whether a window appeared and what its title is.
+echo mark_folder_window=%TIME: =0% >> "%PROBE_OUT%"
+start "" explorer.exe "%SystemDrive%\"
+choice /c Y /d Y /t 3 >nul
+echo --- tasklist after folder-window test --- >> "%TASKLIST_OUT%"
+tasklist /v >> "%TASKLIST_OUT%" 2>nul
+echo folder_window_test=1 >> "%PROBE_OUT%"
+echo mark_uwp_svc=%TIME: =0% >> "%PROBE_OUT%"
+call :probe_svc AppXSVC appxsvc
+call :probe_svc StateRepository staterepo
+call :probe_svc AppReadiness appreadiness
+rem Start the two deployment services and re-check: if they were only
+rem stopped, activation may work after this; if they are missing or
+rem refuse to start, the start errorlevel and the after-state say so.
+echo mark_uwp_svc_start=%TIME: =0% >> "%PROBE_OUT%"
+sc start AppXSVC >nul 2>&1
+echo appxsvc_start=%ERRORLEVEL% >> "%PROBE_OUT%"
+sc start StateRepository >nul 2>&1
+echo staterepo_start=%ERRORLEVEL% >> "%PROBE_OUT%"
+call :probe_svc AppXSVC appxsvc_after
+call :probe_svc StateRepository staterepo_after
+if exist "%ProgramData%\Microsoft\Windows\AppRepository\StateRepository-Machine.srd" (
+    echo staterepo_db=1 >> "%PROBE_OUT%"
+) else (
+    echo staterepo_db=0 >> "%PROBE_OUT%"
+)
+if exist "%SystemRoot%\System32\config\systemprofile\AppData\Local\Packages" (
+    echo sysprofile_packages=1 >> "%PROBE_OUT%"
+) else (
+    echo sysprofile_packages=0 >> "%PROBE_OUT%"
+)
+set "ENABLELUA="
+for /f "tokens=3" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA 2^>nul ^| find /i "EnableLUA"') do set "ENABLELUA=%%A"
+if defined ENABLELUA (echo enablelua=%ENABLELUA% >> "%PROBE_OUT%") else (echo enablelua=missing >> "%PROBE_OUT%")
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.WindowsCalculator" >nul
+if errorlevel 1 (echo appxstore_calc=0 >> "%PROBE_OUT%") else (echo appxstore_calc=1 >> "%PROBE_OUT%")
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.Photos" >nul
+if errorlevel 1 (echo appxstore_photos=0 >> "%PROBE_OUT%") else (echo appxstore_photos=1 >> "%PROBE_OUT%")
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.ZuneMusic" >nul
+if errorlevel 1 (echo appxstore_media=0 >> "%PROBE_OUT%") else (echo appxstore_media=1 >> "%PROBE_OUT%")
+
 rem --- uwp -------------------------------------------------------------------
 echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"
 if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
@@ -308,3 +402,20 @@ echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_check_after=%TIME: =0% >> "%PROBE_OUT%
 set /a UWP_WAIT+=1
 if %UWP_WAIT% lss 10 goto :probe_uwp_poll
 exit /b 1
+
+:probe_svc
+rem %1 = service name, %2 = probe key (run 44349189039).
+rem Writes <key>=RUNNING, STOPPED or MISSING. sc query returns 0 when
+rem the service exists (even stopped) and 1060 when it does not.
+sc query "%~1" >nul 2>&1
+if errorlevel 1 (
+    echo %~2=MISSING >> "%PROBE_OUT%"
+    exit /b 0
+)
+sc query "%~1" 2>nul | find /i "RUNNING" >nul
+if not errorlevel 1 (
+    echo %~2=RUNNING >> "%PROBE_OUT%"
+) else (
+    echo %~2=STOPPED >> "%PROBE_OUT%"
+)
+exit /b 0

@@ -24,6 +24,13 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
             @{ Mark = 'mark_shell_check_after'; Work = 'echo shell_ready=' }
             @{ Mark = 'mark_network'; Work = 'set "IPV4="' }
             @{ Mark = 'mark_ime'; Work = 'reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload"' }
+            # Diagnostics markers (run 44349189039): the UWP activation
+            # chain is diagnosed before the launches, so a partial probe
+            # says which check it died in.
+            @{ Mark = 'mark_uwp_diag'; Work = 'set "TASKLIST_OUT=' }
+            @{ Mark = 'mark_folder_window'; Work = 'start "" explorer.exe "%SystemDrive%\"' }
+            @{ Mark = 'mark_uwp_svc'; Work = 'call :probe_svc AppXSVC appxsvc' }
+            @{ Mark = 'mark_uwp_svc_start'; Work = 'sc start AppXSVC' }
             @{ Mark = 'mark_uwp_appx'; Work = 'AppXDeploymentClient.dll' }
             @{ Mark = 'mark_uwp_launch_calculator'; Work = 'call :probe_uwp CalculatorApp' }
             @{ Mark = 'mark_uwp_launch_photos'; Work = 'call :probe_uwp Microsoft.Lightbox' }

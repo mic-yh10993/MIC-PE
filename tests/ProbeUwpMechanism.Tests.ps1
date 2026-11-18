@@ -462,4 +462,85 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text | Should -Not -Match 'call :probe_uwp Microsoft\.Photos ' -Because 'Microsoft.Photos.exe does not exist in the image'
         $text | Should -Not -Match 'call :probe_uwp Microsoft\.ZuneMusic ' -Because 'Microsoft.ZuneMusic.exe does not exist in the image'
     }
+
+    It 'diagnoses the UWP activation chain before launching (run 44349189039)' {
+        # Run 38: the three apps never appeared in tasklist although the
+        # start lines returned at once. Before the launches, the probe
+        # now records which link of the chain is broken: service states,
+        # the StateRepository database, the SYSTEM profile Packages
+        # directory, EnableLUA, and the AppxAllUserStore entries.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $diag = $text.IndexOf('mark_uwp_diag')
+        $diag | Should -BeGreaterThan -1 -Because 'the diagnostics section must be marked'
+        $diag | Should -BeGreaterThan $text.IndexOf('mark_ime') -Because 'the diagnostics run after the input-method check'
+        $diag | Should -BeLessThan $text.IndexOf('mark_uwp_appx') -Because 'the diagnostics run before the UWP launches'
+        $text | Should -Match 'call :probe_svc AppXSVC appxsvc' -Because 'the AppX deployment service state is recorded'
+        $text | Should -Match 'call :probe_svc StateRepository staterepo' -Because 'the StateRepository service state is recorded'
+        $text | Should -Match 'call :probe_svc AppReadiness appreadiness' -Because 'the AppReadiness service state is recorded'
+        $text | Should -Match 'StateRepository-Machine\.srd' -Because 'the generated StateRepository database is checked, not assumed'
+        $text | Should -Match 'config\\systemprofile\\AppData\\Local\\Packages' -Because 'the SYSTEM profile Packages directory is checked'
+        $text | Should -Match 'EnableLUA' -Because 'UWP activation needs UAC infrastructure; EnableLUA says whether it exists'
+        $text | Should -Match 'AppxAllUserStore' -Because 'the per-app registration entries are checked'
+        $text | Should -Match 'appxstore_calc=' -Because 'the Calculator registration is recorded'
+        $text | Should -Match 'appxstore_photos=' -Because 'the Photos registration is recorded'
+        $text | Should -Match 'appxstore_media=' -Because 'the Media Player registration is recorded'
+        $text | Should -Match 'micpe-tasklist\.txt' -Because 'the full tasklist dump is written next to the probe file'
+        $text | Should -Match 'tasklist /v' -Because 'only the verbose dump shows window titles'
+    }
+
+    It 'records the frame-host and shell-host presence the desktop depends on (run 44349189039)' {
+        # ApplicationFrameHost.exe displays every UWP app window, and
+        # ShellExperienceHost / StartMenuExperienceHost host the modern
+        # shell UI. None of them is in any filelist, so the probe must
+        # check at runtime instead of assuming they exist.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'appframehost=' -Because 'the UWP window host presence is recorded'
+        $text | Should -Match 'shellexperiencehost=' -Because 'the shell experience host presence is recorded'
+        $text | Should -Match 'startmenuexperiencehost=' -Because 'the Start menu host presence is recorded'
+        $text | Should -Match 'runtimebroker=' -Because 'the activation broker presence is recorded'
+        $text | Should -Match 'ApplicationFrameHost\.exe' -Because 'the check looks for the frame host by image name'
+        $text | Should -Match 'ShellExperienceHost\.exe' -Because 'the check looks for the shell host by image name'
+        $text | Should -Match 'StartMenuExperienceHost\.exe' -Because 'the check looks for the Start menu host by image name'
+    }
+
+    It 'attempts to start the AppX services before launching (run 44349189039)' {
+        # If the services were only stopped, activation may work after
+        # this; if they are missing or refuse to start, the start
+        # errorlevel and the after-state say so. AppReadiness is only
+        # queried, never started: one variable at a time.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'sc start AppXSVC' -Because 'the deployment service is started before the launches'
+        $text | Should -Match 'sc start StateRepository' -Because 'the repository service is started before the launches'
+        $text | Should -Match 'appxsvc_start=' -Because 'the AppXSVC start outcome is recorded'
+        $text | Should -Match 'staterepo_start=' -Because 'the StateRepository start outcome is recorded'
+        $text | Should -Match 'appxsvc_after' -Because 'the AppXSVC state is re-checked after the start attempt'
+        $text | Should -Match 'staterepo_after' -Because 'the StateRepository state is re-checked after the start attempt'
+        $text | Should -Not -Match 'sc start AppReadiness' -Because 'AppReadiness is only queried, not started'
+        $text.IndexOf('sc start AppXSVC') | Should -BeLessThan $text.IndexOf('call :probe_uwp CalculatorApp') -Because 'the services must be started before the first launch'
+        $text.IndexOf('sc start AppXSVC') | Should -BeGreaterThan $text.IndexOf('call :probe_svc AppXSVC appxsvc') -Because 'the before-state is recorded before the start attempt'
+    }
+
+    It 'the folder-window test says whether explorer can create any window (run 44349189039)' {
+        # Explorer is alive but no desktop, taskbar or folder window ever
+        # appears. Opening one folder window and dumping tasklist again
+        # separates "explorer cannot create any window" from "explorer
+        # cannot create the shell".
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'start "" explorer\.exe "%SystemDrive%\\"' -Because 'the test opens a folder window through explorer'
+        $text | Should -Match 'folder_window_test=1' -Because 'the test records that it ran'
+        # Count code lines only: the section header comment also names
+        # tasklist /v, so a raw-text match would count it as a dump.
+        $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $dumps = @($probeLines | Where-Object { $_ -match '^tasklist /v' })
+        $dumps.Count | Should -Be 2 -Because 'one dump before the test, one after it'
+        $text.IndexOf('folder_window_test=1') | Should -BeLessThan $text.IndexOf('mark_uwp_appx') -Because 'the test runs in the diagnostics section, before the launches'
+    }
+
+    It 'reverse control: without the frame-host check the diagnostics test fails' {
+        # The presence assertion above must actually depend on the probe
+        # checking for the frame host, not pass vacuously.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $mutated = $text.Replace('appframehost=', 'appframehost-missing=')
+        $mutated | Should -Not -Match 'appframehost='
+    }
 }

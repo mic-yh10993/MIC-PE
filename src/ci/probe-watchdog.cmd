@@ -31,6 +31,16 @@ rem choice, not ping: ping is the prime suspect for the round-2 stall,
 rem and choice.exe is in the image (20-explorer.txt:126, verified
 rem present in the run 27 boot.wim). choice /c Y /d Y /t N waits N
 rem seconds then takes the default; its errorlevel is ignored.
+rem Run 44349189039: the single 60-second choice wait never returned in
+rem run 38 (before_wait written 17:02:42.67, after_wait never appeared),
+rem while the probe's 1-second choice waits returned 30 times in the
+rem same run. A long single wait can swallow a whole round without a
+rem trace, so the wait is split into short ticks of at most 5 seconds
+rem with a heartbeat line after each tick (phase=wait_tick): a partial
+rem heartbeat says which tick it died in, and the tick loop is the
+rem same total wait (60 seconds by default). Small values used by the
+rem mechanism tests (WD_WAIT=2) stay a single tick of the same length,
+rem so the total wait is unchanged there.
 rem
 rem Usage: probe-watchdog.cmd <probe-file> [stall-limit] [wait-seconds]
 rem Defaults: 5 quiet checks of 60 seconds each. The two optional
@@ -61,7 +71,19 @@ if "%WD_NOW%"=="%WD_SIZE%" (
 )
 echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% phase=before_wait >> "%WD_HEARTBEAT%"
 if %WD_QUIET% geq %WD_LIMIT% goto :watchdog_fail
-choice /c Y /d Y /t %WD_WAIT% >nul
+rem Split the wait into short choice ticks (run 44349189039): a single
+rem 60-second choice wait never returned in run 38, while 1-second
+rem waits returned every time. WD_WAIT=60 becomes 12 ticks of 5 seconds;
+rem WD_WAIT below 5 stays one tick of the same length.
+set /a WD_TICKS=%WD_WAIT% / 5
+if %WD_TICKS% lss 1 set "WD_TICKS=1"
+set /a WD_TICKLEN=%WD_WAIT% / %WD_TICKS%
+set "WD_TICK=0"
+:watchdog_wait_tick
+choice /c Y /d Y /t %WD_TICKLEN% >nul
+set /a WD_TICK+=1
+echo %TIME: =0% phase=wait_tick tick=%WD_TICK%/%WD_TICKS% >> "%WD_HEARTBEAT%"
+if %WD_TICK% lss %WD_TICKS% goto :watchdog_wait_tick
 echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% phase=after_wait >> "%WD_HEARTBEAT%"
 goto :watchdog_loop
 :watchdog_fail

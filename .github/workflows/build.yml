@@ -323,6 +323,7 @@ jobs:
           path: |
             verify-out/share/micpe-probe.txt
             verify-out/share/micpe-watchdog-heartbeat.txt
+            verify-out/share/micpe-tasklist.txt
             verify-out/shots/*.ppm
             verify-out/qemu.log
             verify-out/micpe-serial.log

@@ -57,6 +57,10 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'micpe-serial\.log'
     }
 
+    It 'uploads the tasklist dump with the verify artifacts (run 44349189039)' {
+        $script:buildYml | Should -Match 'verify-out/share/micpe-tasklist\.txt'
+    }
+
     It 'patches the bundled aria2 verifier before the converter runs' {
         $script:buildScript | Should -Match 'Repair-UupAria2Script'
     }
