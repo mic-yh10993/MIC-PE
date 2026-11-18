@@ -190,7 +190,16 @@ Describe 'Fix-DriveLetters.cmd swap run' {
             $null = & $cmdExe /c "`"$script:FixScript`"" 2>&1
             $LASTEXITCODE | Should -Be 0
 
-            $calls = @(Get-Content -LiteralPath $logFile -Encoding utf8)
+            $calls = @(Get-Content -LiteralPath $logFile -Encoding utf8 | ForEach-Object { $_.TrimEnd() })
+            # The fake logs with `echo %* >> log`, and cmd's echo-before-
+            # redirect form writes one trailing space after the text
+            # (verified on run 31's own probe file: `echo explorer=0 >>`
+            # lines carry a trailing space while `>> file echo ...` lines
+            # do not). The product's actual arguments are unaffected --
+            # the fake's own %~1/%~2 matching proves they are exactly
+            # `D:` and `/L` (the GUID came back and all 8 calls ran).
+            # Trim the logging artifact before comparing the sequence,
+            # not the sequence itself.
             $expected = @(
                 "${winLetter}: /L",
                 "${tmpLetter}: $guidWin",
