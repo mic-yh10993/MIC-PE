@@ -12,11 +12,15 @@ rem there is no installed Windows volume (the CI harness) or C: is already
 rem the Windows volume. It never touches the PE system drive itself.
 if exist "%SystemRoot%\System32\MICPE\Fix-DriveLetters.cmd" call "%SystemRoot%\System32\MICPE\Fix-DriveLetters.cmd"
 if exist "%SystemDrive%\Program Files\MICPE\PECMD.EXE" (
-    rem Diagnostic markers, run 44267918861: PECMD.EXE is a GUI program, so
-    rem this line returns at once and startnet.cmd does not wait for the
-    rem PECMD chain. Record the launch, give the chain about 45 seconds,
-    rem then run the probe from startnet as a control if PECMD's own EXEC
-    rem never wrote one. probe.cmd copies the marks file into probe.txt.
+    rem Diagnostic markers, run 44267918861: in a batch script cmd WAITS
+    rem for a GUI program to exit (Microsoft Learn, start command: "This
+    rem behavior doesn't occur if you run the application from a command
+    rem script"), so this line blocks until PECMD.EXE finishes LOAD and
+    rem startnet.cmd only reaches the wait below after the PECMD chain
+    rem returns (run 44303866765). Record the launch, give the chain
+    rem about 45 seconds, then run the probe from startnet as a control
+    rem if PECMD's own EXEC never wrote one. probe.cmd copies the marks
+    rem file into probe.txt.
     echo mark_startnet_pecmd_before=1 >> "%SystemDrive%\micpe-pecmd-marks.txt"
     "%SystemDrive%\Program Files\MICPE\PECMD.EXE" LOAD "%SystemDrive%\Program Files\MICPE\PECMD.INI"
     echo mark_startnet_after_pecmd_launch=1 >> "%SystemDrive%\micpe-pecmd-marks.txt"

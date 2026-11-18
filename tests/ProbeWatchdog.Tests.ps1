@@ -16,6 +16,16 @@
     The watchdog stops on its own when it sees probe_done=1, or when
     probe.cmd writes the stop flag before the long installer deploy.
     All cmd.exe tests skip on Linux; the static tests run anywhere.
+
+    Run 44303866765: the watchdog process was alive (its empty-title
+    minimized window was on the screenshot) yet never wrote probe_failed
+    in 34 quiet minutes, and there was no evidence of which loop step it
+    was stuck on. Every loop iteration now appends a heartbeat line to
+    micpe-watchdog-heartbeat.txt next to the probe file on the share
+    (time, quiet count, observed size), and build.yml collects that
+    file into the verify artifact. W4 proves the heartbeat appears and
+    the fail still lands on a controlled stall; W5 proves a growing
+    probe resets the quiet count instead of being failed.
 #>
 
 BeforeAll {
@@ -168,6 +178,104 @@ Describe 'probe watchdog mechanism (run 44285721257)' {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    It 'W4: writes a heartbeat while a stalled probe is being failed (run 44303866765)' -Skip:(-not $IsWindows) {
+        # Run 35: the watchdog process was alive (empty-title minimized
+        # window on the screenshot) yet never wrote probe_failed=1 in 34
+        # quiet minutes, and there was no evidence of which loop step it
+        # was stuck on. The heartbeat must prove the loop itself runs:
+        # one line per iteration with the quiet count and the size it
+        # observed, plus a line for the fail write itself.
+        $workDir = & $script:NewWorkDir
+        $probeFile = Join-Path $workDir 'micpe-probe.txt'
+        $heartbeatFile = Join-Path $workDir 'micpe-watchdog-heartbeat.txt'
+        try {
+            Set-Content -LiteralPath $probeFile -Value @('boot=1', 'share=1', 'explorer=1') -Encoding ascii
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $result = & $script:InvokeWatchdog $workDir $probeFile -Limit 2 -Wait 2 -TimeoutSec 60
+            $sw.Stop()
+            Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode); elapsed seconds: $($sw.Elapsed.TotalSeconds)"
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 1 -Because 'the watchdog reports that it had to fail the probe'
+            (Get-Content -LiteralPath $probeFile -Raw) | Should -Match 'probe_failed=1'
+            Test-Path -LiteralPath $heartbeatFile | Should -Be $true -Because 'the loop must leave a heartbeat trail'
+            $beats = @(Get-Content -LiteralPath $heartbeatFile)
+            Write-Host "heartbeat: [$($beats -join ' | ')]"
+            $beats.Count | Should -BeGreaterOrEqual 4 -Because 'start line plus at least three iterations (quiet 0, 1, 2)'
+            ($beats -join "`n") | Should -Match 'watchdog_start=' -Because 'the start line proves the script itself began'
+            ($beats -join "`n") | Should -Match 'quiet=2' -Because 'the triggering iteration counted two quiet checks'
+            ($beats -join "`n") | Should -Match 'probe_failed_written=1' -Because 'the fail write is recorded in the heartbeat too'
+            $sizes = @([regex]::Matches(($beats -join "`n"), 'size=(\d+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+            $sizes.Count | Should -Be 1 -Because 'a stalled probe file has one size; changing sizes would explain a quiet counter that never fires'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'W5: the heartbeat shows the quiet count reset when the probe grows again' -Skip:(-not $IsWindows) {
+        # The other half of the run 35 mystery: if the observed size kept
+        # "changing", the quiet counter would reset forever and
+        # probe_failed would never fire. A growing probe must show the
+        # reset in the heartbeat (quiet=0 after quiet>=1) and must not
+        # be failed.
+        $workDir = & $script:NewWorkDir
+        $probeFile = Join-Path $workDir 'micpe-probe.txt'
+        $heartbeatFile = Join-Path $workDir 'micpe-watchdog-heartbeat.txt'
+        try {
+            Set-Content -LiteralPath $probeFile -Value @('boot=1', 'share=1') -Encoding ascii
+            $wrapper = Join-Path $workDir 'run-watchdog.bat'
+            & $script:WriteBatchCrlf $wrapper @(
+                '@echo off',
+                ('set "SystemDrive={0}"' -f $WorkDir),
+                ('call "{0}" "{1}" 5 2' -f $script:WatchdogPath, $probeFile),
+                'exit /b %errorlevel%'
+            )
+            $oldPath = $env:PATH
+            $proc = $null
+            $exited = $false
+            try {
+                $env:PATH = $workDir
+                $proc = Start-Process -FilePath $script:CmdExe -ArgumentList '/c', $wrapper -PassThru -NoNewWindow
+                # Poll the heartbeat until it proves the loop counted a
+                # quiet check, then grow the probe: the next heartbeat
+                # line after that must show the counter back at zero.
+                $countedQuiet = $false
+                for ($i = 0; $i -lt 40 -and -not $countedQuiet; $i++) {
+                    Start-Sleep -Milliseconds 500
+                    if (Test-Path -LiteralPath $heartbeatFile) {
+                        $countedQuiet = (Get-Content -LiteralPath $heartbeatFile -Raw -ErrorAction SilentlyContinue) -match 'quiet=[1-9]'
+                    }
+                }
+                $countedQuiet | Should -Be $true -Because 'the loop must count at least one quiet check before the probe grows'
+                Add-Content -LiteralPath $probeFile -Value 'explorer=1' -Encoding ascii
+                $sawReset = $false
+                for ($i = 0; $i -lt 40 -and -not $sawReset; $i++) {
+                    Start-Sleep -Milliseconds 500
+                    if (Test-Path -LiteralPath $heartbeatFile) {
+                        $lines = @(Get-Content -LiteralPath $heartbeatFile -ErrorAction SilentlyContinue)
+                        $firstQuiet = -1; $resetAfter = -1
+                        for ($j = 0; $j -lt $lines.Count; $j++) {
+                            if ($firstQuiet -lt 0 -and $lines[$j] -match 'quiet=[1-9]') { $firstQuiet = $j }
+                            if ($firstQuiet -ge 0 -and $j -gt $firstQuiet -and $lines[$j] -match 'quiet=0') { $resetAfter = $j; break }
+                        }
+                        $sawReset = ($resetAfter -ge 0)
+                    }
+                }
+                $sawReset | Should -Be $true -Because 'a growing probe file must reset the quiet counter to zero'
+                Add-Content -LiteralPath $probeFile -Value 'probe_done=1' -Encoding ascii
+                $exited = $proc.WaitForExit(30000)
+                if (-not $exited) { try { $proc.Kill($true) } catch { }; $proc.WaitForExit(10000) }
+            }
+            finally { $env:PATH = $oldPath }
+            $exited | Should -Be $true -Because 'the watchdog must stop once the probe is done'
+            $proc.ExitCode | Should -Be 0
+            (Get-Content -LiteralPath $probeFile -Raw) | Should -Not -Match 'probe_failed'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'probe watchdog (static)' {
@@ -203,6 +311,33 @@ Describe 'probe watchdog (static)' {
         # a double-quoted pattern would expand $watchdog to nothing.
         $build | Should -Match 'Copy-Item -LiteralPath \$watchdog -Destination \(Join-Path \$system32 ''probe-watchdog\.cmd''\)' -Because 'the reseed step must copy the watchdog into System32'
         $build.IndexOf('probe-watchdog.cmd') | Should -BeGreaterThan $build.IndexOf('probe.cmd') -Because 'the watchdog is injected by the same reseed step as probe.cmd'
+    }
+
+    It 'the watchdog writes a heartbeat line every loop iteration (run 44303866765)' {
+        $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
+        $wd | Should -Match 'WD_HEARTBEAT=%~dp1micpe-watchdog-heartbeat\.txt' -Because 'the heartbeat lives next to the probe file on the share, where the host can read it'
+        $wd | Should -Match 'watchdog_start=' -Because 'the start line proves the script itself began'
+        $wd | Should -Match 'quiet=%WD_QUIET% size=%WD_NOW%' -Because 'each iteration records its quiet count and the size it observed'
+        $wd | Should -Match 'probe_failed_written=1' -Because 'the fail write is recorded in the heartbeat too'
+        # The heartbeat must go to its own file: writing it into the
+        # probe file would grow the file and reset the quiet count.
+        $wdLines = Get-Content -LiteralPath $script:WatchdogPath -Encoding utf8
+        $beatLines = @($wdLines | Where-Object { $_ -match 'quiet=%WD_QUIET%' })
+        $beatLines.Count | Should -Be 1 -Because 'exactly one line writes the per-iteration heartbeat'
+        $beatLines[0] | Should -Match 'WD_HEARTBEAT' -Because 'the heartbeat goes to its own file, not the probe file'
+    }
+
+    It 'the verify artifact collects the heartbeat file' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/build.yml') -Raw -Encoding utf8
+        $buildYml | Should -Match 'verify-out/share/micpe-watchdog-heartbeat\.txt' -Because 'a heartbeat on the share is useless if the artifact upload does not collect it'
+    }
+
+    It 'reverse control: without the heartbeat write the static test fails' {
+        # The heartbeat assertion above must actually depend on the
+        # watchdog writing the line, not pass vacuously.
+        $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
+        $mutated = $wd.Replace('quiet=%WD_QUIET% size=%WD_NOW%', 'quiet=missing size=missing')
+        $mutated | Should -Not -Match 'quiet=%WD_QUIET% size=%WD_NOW%'
     }
 
     It 'reverse control: without the watchdog start the static test fails' {

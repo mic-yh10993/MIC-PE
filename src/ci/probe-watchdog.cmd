@@ -12,6 +12,18 @@ rem see Assert-Probe; it only shortens the wait, it never passes one.
 rem The watcher stops on its own when it sees probe_done=1, or when
 rem probe.cmd writes the stop flag before the long installer deploy.
 rem
+rem Heartbeat (run 44303866765): the run 35 watchdog process was alive
+rem (its empty-title minimized window was on the screenshot) yet never
+rem wrote probe_failed=1 in 34 quiet minutes, and there was no evidence
+rem of which loop step it was stuck on. Every loop iteration now appends
+rem one line to micpe-watchdog-heartbeat.txt next to the probe file on
+rem the share, so the CI host can see the loop run: time, quiet count
+rem and the file size it observed. The heartbeat is a separate file on
+rem purpose: writing it into the probe file would grow the probe file
+rem and reset this watcher's own quiet count. The heartbeat file is
+rem collected into the verify artifact by build.yml; a heartbeat on X:
+rem would be invisible to the host after shutdown.
+rem
 rem Usage: probe-watchdog.cmd <probe-file> [stall-limit] [wait-seconds]
 rem Defaults: 5 quiet checks of 60 seconds each. The two optional
 rem arguments exist only so the Pester mechanism tests can run the
@@ -24,8 +36,10 @@ if not defined WD_LIMIT set "WD_LIMIT=5"
 set "WD_WAIT=%~3"
 if not defined WD_WAIT set "WD_WAIT=60"
 set "WD_STOP=%SystemDrive%\micpe-watchdog-stop.txt"
+set "WD_HEARTBEAT=%~dp1micpe-watchdog-heartbeat.txt"
 set "WD_SIZE="
 set "WD_QUIET=0"
+echo watchdog_start=%TIME: =0% >> "%WD_HEARTBEAT%"
 :watchdog_loop
 findstr /b /c:"probe_done=1" "%WD_FILE%" >nul 2>&1
 if not errorlevel 1 exit /b 0
@@ -37,6 +51,7 @@ if "%WD_NOW%"=="%WD_SIZE%" (
     set "WD_SIZE=%WD_NOW%"
     set "WD_QUIET=0"
 )
+echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% >> "%WD_HEARTBEAT%"
 if %WD_QUIET% geq %WD_LIMIT% goto :watchdog_fail
 ping -n %WD_WAIT% 127.0.0.1 >nul 2>&1
 goto :watchdog_loop
@@ -45,4 +60,5 @@ if not exist "%WD_FILE%" exit /b 1
 findstr /b /c:"probe_done=1" "%WD_FILE%" >nul 2>&1
 if not errorlevel 1 exit /b 0
 echo probe_failed=1 >> "%WD_FILE%"
+echo %TIME: =0% probe_failed_written=1 >> "%WD_HEARTBEAT%"
 exit /b 1

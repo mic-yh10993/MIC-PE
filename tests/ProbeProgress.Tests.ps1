@@ -28,6 +28,14 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
             @{ Mark = 'mark_uwp_launch_calculator'; Work = 'call :probe_uwp CalculatorApp' }
             @{ Mark = 'mark_uwp_launch_photos'; Work = 'call :probe_uwp Microsoft.Photos' }
             @{ Mark = 'mark_uwp_launch_media'; Work = 'call :probe_uwp Microsoft.ZuneMusic' }
+            # Subroutine markers (run 44303866765): the probe died inside
+            # the Media call, so :probe_uwp brackets its own launch. The
+            # enter marker sits before the guard; start_before/start_after
+            # bracket the `start` line itself; the caller's
+            # uwp_launch_<app> line is the poll-finished witness.
+            @{ Mark = 'mark_uwp_enter'; Work = 'set "UWP_PROC=%~1"' }
+            @{ Mark = 'mark_uwp_start_before'; Work = 'start "" explorer.exe "%UWP_TARGET%"' }
+            @{ Mark = 'mark_uwp_start_after'; Work = 'set "UWP_WAIT=0"' }
             @{ Mark = 'mark_payload'; Work = 'set "PAYLOAD=1"' }
             @{ Mark = 'mark_brand'; Work = 'set "BRAND=1"' }
             @{ Mark = 'mark_installer'; Work = 'MICPE_PROBE_FILE=%PROBE_OUT%' }
