@@ -48,6 +48,18 @@ if not defined PROBE_DIR (
 >> "%PROBE_OUT%" echo share=%SHARE%
 if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
+rem --- drive letters ---------------------------------------------------------
+rem Fix-DriveLetters.cmd (startnet.cmd, user decision 2026-11-17 23:43) wrote
+rem pe_drive / win_drive / drive_fixed (and drive_fix_error on failure) to
+rem %SystemDrive%\micpe-drive-letters.txt. Copy the lines verbatim so
+rem Assert-Probe can check them. If the file is missing the image predates
+rem the fix and the keys stay missing (fail loudly, not silently).
+if exist "%SystemDrive%\micpe-drive-letters.txt" (
+    type "%SystemDrive%\micpe-drive-letters.txt" >> "%PROBE_OUT%"
+) else (
+    echo drive_letters=missing >> "%PROBE_OUT%"
+)
+
 rem --- shell -----------------------------------------------------------------
 rem Progress marker: the section start time, so a partial probe still shows
 rem where it stopped and how long each section took (run 44181949882: run 29

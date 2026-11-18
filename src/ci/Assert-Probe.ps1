@@ -22,10 +22,16 @@ $script:StageProbeExpect = [ordered]@{
     # needs the shell). Those keys are verified at m5 (PECMD arrives with
     # the payload) and m7 (full image). Relaxed in the run 44135105700
     # round; m2/m3 carry the same latent defect (see the eval card §14).
-    m4 = @{ boot = '1'; share = '1'; ime = '1'; uwp_appx = '1' }
-    m5 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; payload = '1'; brand = '1' }
-    m6 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; installer_scan = '1'; installer_deploy = '1' }
-    m7 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1'; uwp_appx = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; uwp_launch_calculator = '1'; payload = '1'; brand = '1'; installer_scan = '1'; installer_deploy = '1'; size_wim = '*'; size_iso = '*' }
+    # Drive letters (user decision 2026-11-17 23:43): the PE system drive
+    # is X:, the installed-Windows volume keeps C:. In the CI harness
+    # there is no installed-Windows volume, so win_drive=none and
+    # drive_fixed=0 are the honest expectations there; a swap on a real
+    # machine is verified by the user against docs/test-checklist.md.
+    # pe_drive is asserted from m4 on: m1-m3 predate the fix.
+    m4 = @{ boot = '1'; share = '1'; ime = '1'; uwp_appx = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0' }
+    m5 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; payload = '1'; brand = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0' }
+    m6 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; installer_scan = '1'; installer_deploy = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0' }
+    m7 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1'; uwp_appx = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; uwp_launch_calculator = '1'; payload = '1'; brand = '1'; installer_scan = '1'; installer_deploy = '1'; size_wim = '*'; size_iso = '*'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0' }
 }
 
 function Get-StageProbeExpect {

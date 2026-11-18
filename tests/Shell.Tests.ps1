@@ -152,6 +152,36 @@ Describe 'Set-BootShell' {
         Test-Path -LiteralPath "$mount/Program Files/MICPE/PECMD.INI" | Should -BeTrue
         Test-Path -LiteralPath "$mount/Windows/System32/Pin-Shortcuts.wcs" | Should -BeTrue
     }
+
+    It 'installs Fix-DriveLetters.cmd under System32\MICPE (user decision 2026-11-17 23:43)' {
+        $mount = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32" | Out-Null
+        $repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
+
+        Set-BootShell -MountDir $mount -RepoRoot $repoRoot
+
+        Test-Path -LiteralPath "$mount/Windows/System32/MICPE/Fix-DriveLetters.cmd" | Should -BeTrue
+    }
+
+    It 'reverse control: Set-BootShell fails when Fix-DriveLetters.cmd is missing from src/shell' {
+        # The script is a committed repo file; startnet.cmd would silently
+        # skip the fix and the probe would fail on the missing drive keys,
+        # so a missing source must fail the build loudly here instead.
+        $mount = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32" | Out-Null
+        $fakeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "shell-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$fakeRoot/src/shell" | Out-Null
+        # startnet.cmd present (so the copy reaches the drive-letter step),
+        # Fix-DriveLetters.cmd deliberately absent.
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../src/shell/startnet.cmd') `
+            -Destination (Join-Path $fakeRoot 'src/shell/startnet.cmd') -Force
+        try {
+            { Set-BootShell -MountDir $mount -RepoRoot $fakeRoot } | Should -Throw '*Fix-DriveLetters*'
+        }
+        finally {
+            Remove-Item -LiteralPath $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'Explorer registry patches' {

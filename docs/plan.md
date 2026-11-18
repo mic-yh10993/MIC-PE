@@ -989,7 +989,7 @@ Expected: FAIL — `Assert-UwpReady` 未定义
 
 - [ ] **Step 3: 实现**
 
-`Install-AppxFramework` 的提取清单基于 `Program Files\WindowsApps\` 前缀通配（这是 install.wim 里真实布局）。`Register-ProvisionedAppx` 只写 `AppxAllUserStore` 的允许运行键（`InboxApplications` 的 `Path` 值不写：构建管理员无权写入该键，CI run 44008629819 实证）；不复制 `StateRepository` 数据库（必须由首次启动生成，复制会导致 0x80073CF9）。`40-uwp.reg` 不再写 `Appx\AllowAllTrustedApps` / `AllowDevelopmentWithoutDevLicense`——Appx 键的 DACL 只给 Administrators 只读权限，构建时 `reg import` 写不进去（CI run 44040699722 实证）；`StateRepository` 服务键是 install.wim 原样全键照抄（Start=2 自动，含 ImagePath / parameters / Security，由生成器从真实 hive 实读）。
+`Install-AppxFramework` 的提取清单基于 `Program Files\WindowsApps\` 前缀通配（这是 install.wim 里真实布局）。`Register-ProvisionedAppx` 只写 `AppxAllUserStore` 的允许运行键（`InboxApplications` 的 `Path` 值不写：构建管理员无权写入该键，CI run 44008629819 实证）；不复制 `StateRepository` 数据库（必须由首次启动生成，复制会导致 0x80073CF9）。`40-uwp.reg` 写 `Appx\\AllowAllTrustedApps` / `AllowDevelopmentWithoutDevLicense`（=1），构建时以 SYSTEM 身份导入（Invoke-RegImportAsSystem，一次性计划任务）：Appx 键的 DACL 只给 Administrators 只读权限，管理员 `reg import` 写不进去（CI run 44040699722 实证），而该 DACL 本身给 SYSTEM 完全控制；用户决定 2026-11-17 23:43：一切注册表导入都在 CI 挂载时做，禁止进 PE 后再导入；`StateRepository` 服务键是 install.wim 原样全键照抄（Start=2 自动，含 ImagePath / parameters / Security，由生成器从真实 hive 实读）。
 
 - [ ] **Step 4: 运行测试确认通过**
 

@@ -12,9 +12,13 @@
     2. The app packages themselves (Photos, Media Player, Calculator).
     3. The System32 deployment client/server DLLs (50-uwp.txt) plus the
        StateRepository service key in 40-uwp.reg (verbatim copy from the
-       25H2 install.wim SYSTEM hive; the Appx sideload policy is NOT in
-       the .reg -- build-time Administrators have only KEY_READ on the
-       Appx key, CI run 44040699722).
+       25H2 install.wim SYSTEM hive) and the Appx sideload policy
+       (AllowAllTrustedApps / AllowDevelopmentWithoutDevLicense = 1).
+       The policy key's DACL gives Administrators only KEY_READ (CI run
+       44040699722), so 40-uwp.reg is imported as SYSTEM through a
+       one-shot scheduled task (Invoke-RegImportAsSystem in Registry.ps1);
+       user decision 2026-11-17 23:43: every registry import happens at
+       CI build time, nothing is ever set inside the running PE.
 
     Registration writes only the AppxAllUserStore allow-run keys
     (Applications\<package-full-name> with a Path value). The
@@ -258,6 +262,54 @@ function Register-ProvisionedAppx {
         # A failing unload must not mask the real assertion above: warn
         # and continue, matching Invoke-RegistryScript's finally
         # convention.
+        try {
+            Dismount-RegistryHive -KeyName $HiveKey
+        }
+        catch {
+            Write-Warn "could not unload HKLM\$HiveKey : $($_.Exception.Message)"
+        }
+    }
+}
+
+function Assert-AppxPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MountDir,
+
+        [string] $HiveKey = 'PE-APPX'
+    )
+
+    # Reads back the two Appx sideload-policy values that 40-uwp.reg
+    # imports as SYSTEM (Invoke-RegImportAsSystem). Read access is fine
+    # for the build admin: the key's DACL grants Administrators KEY_READ.
+    # reg.exe prints a DWORD as 0x1 (or 0x00000001); accept either form.
+    $hiveFile = Join-Path $MountDir 'Windows/System32/config/SOFTWARE'
+    Assert-PathExists -Path $hiveFile -Label 'SOFTWARE hive'
+
+    Mount-RegistryHive -HiveFile $hiveFile -KeyName $HiveKey
+    try {
+        $subKey = 'Microsoft\Windows\CurrentVersion\Appx'
+        $values = Get-RegistryKeyValues -KeyName $HiveKey -SubKey $subKey
+        if ($null -eq $values) {
+            throw [System.InvalidOperationException]::new(
+                "Appx sideload policy is missing: HKLM\$($HiveKey)\$($subKey) does not exist")
+        }
+        foreach ($name in 'AllowAllTrustedApps', 'AllowDevelopmentWithoutDevLicense') {
+            if (-not $values.Contains($name)) {
+                throw [System.InvalidOperationException]::new(
+                    "Appx sideload policy is missing: $name is not set under HKLM\$($HiveKey)\$($subKey)")
+            }
+            if ($values[$name] -notmatch '^0x0*1$') {
+                throw [System.InvalidOperationException]::new(
+                    "Appx sideload policy is wrong: $name is $($values[$name]), expected 0x1")
+            }
+        }
+        Write-SubStep 'Appx sideload policy present (AllowAllTrustedApps=1, AllowDevelopmentWithoutDevLicense=1)'
+    }
+    finally {
+        # A failing unload must not mask the real assertion above: warn and
+        # continue, matching Invoke-RegistryScript's finally convention.
         try {
             Dismount-RegistryHive -KeyName $HiveKey
         }

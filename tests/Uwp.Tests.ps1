@@ -110,13 +110,16 @@ Describe 'UWP registry patch' {
         $script:reg40 = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/registry/40-uwp.reg') -Raw
     }
 
-    It 'does not write the Appx sideload policy (Administrators have only KEY_READ on that key)' {
-        # CI run 44040699722: reg import of these two values fails with
-        # ERROR: Error accessing the registry. The policy must be set
-        # inside the running PE as SYSTEM, never at build time.
-        $script:reg40.Contains('"AllowAllTrustedApps"=dword:') | Should -BeFalse
-        $script:reg40.Contains('"AllowDevelopmentWithoutDevLicense"=dword:') | Should -BeFalse
-        $script:reg40 | Should -Not -Match 'CurrentVersion\\Appx\]'
+    It 'writes the Appx sideload policy for SYSTEM import (Administrators have only KEY_READ on that key)' {
+        # CI run 44040699722: a build-time reg import as admin fails with
+        # ERROR: Error accessing the registry. The values are imported as
+        # SYSTEM through Invoke-RegImportAsSystem (one-shot scheduled
+        # task); user decision 2026-11-17 23:43 forbids setting them
+        # inside the running PE, so no such text may remain anywhere.
+        $script:reg40.Contains('"AllowAllTrustedApps"=dword:00000001') | Should -BeTrue
+        $script:reg40.Contains('"AllowDevelopmentWithoutDevLicense"=dword:00000001') | Should -BeTrue
+        $script:reg40 | Should -Match 'CurrentVersion\\Appx\]'
+        $script:reg40 | Should -Not -Match 'inside the running PE'
     }
 
     It 'registers the StateRepository service verbatim from the 25H2 install.wim (automatic start)' {

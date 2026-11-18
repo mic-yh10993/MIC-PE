@@ -96,6 +96,13 @@ Describe 'whitelists' {
         $entries | Should -Contain 'Windows\System32\zh-CN\tasklist.exe.mui'
     }
 
+    It 'the cmdpe list carries mountvol.exe and its en-US/zh-CN MUIs (drive-letter fix, user decision 2026-11-17 23:43)' {
+        $entries = Read-Whitelist -Path (Join-Path $script:ListDir '10-cmdpe.txt')
+        $entries | Should -Contain 'Windows\System32\mountvol.exe'
+        $entries | Should -Contain 'Windows\System32\en-US\mountvol.exe.mui'
+        $entries | Should -Contain 'Windows\System32\zh-CN\mountvol.exe.mui'
+    }
+
     It 'the explorer list contains explorer.exe and the StateRepository family' {
         $entries = Read-Whitelist -Path (Join-Path $script:ListDir '20-explorer.txt')
         ($entries -contains 'Windows\explorer.exe') | Should -BeTrue

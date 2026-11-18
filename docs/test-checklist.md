@@ -68,6 +68,7 @@ install.wim 的前提下不可能达到**——4.48 GB 里 ~4.1 GiB 就是 media
 | 13 | 装完的新系统里 `C:\Program Files\MICPE` 不存在多余的安装器残留（装机工具只应在 PE 里） | |
 | 14 | PECMD 还在：`X:\Program Files\MICPE` 里有 PECMD.EXE，装机工具能正常弹 | |
 | 15 | probe 各项（仅供对照 CI）：`explorer=1`、`shell_ready=1`、`dwm=1`、`ime=1`、`uwp_launch_*=1`、`payload=1`、`brand=1`、`installer_scan=1`、`installer_deploy=1` | |
+| 16 | 盘符：PE 系统盘是 `X:`；原来装 Windows 的那个盘在 PE 里仍是 `C:`（不是 PE 启动盘抢了 `C:`）；资源管理器里能看到原系统盘 | |
 
 ## 已知未验证（不要当成已通过）
 

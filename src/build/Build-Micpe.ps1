@@ -323,7 +323,11 @@ function Invoke-UwpStep {
             -PackageNames (Get-UwpDefaults)
         $regFiles = @('40-uwp.reg') |
             ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
-        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles
+        # 40-uwp.reg goes in as SYSTEM: its Appx sideload-policy key gives
+        # Administrators only KEY_READ (CI run 44040699722). User decision
+        # 2026-11-17 23:43: every registry import happens at CI build time.
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg')
+        Assert-AppxPolicy -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
         Assert-UwpReady -MountDir $paths.Mount
     }

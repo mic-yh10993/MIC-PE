@@ -105,6 +105,99 @@ function Import-RegFile {
     }
 }
 
+function Invoke-RegImportAsSystem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RegFile,
+
+        [int] $TimeoutSeconds = 120
+    )
+
+    # Imports a .reg file as SYSTEM, through a one-shot scheduled task.
+    #
+    # Some keys in the 25H2 hives grant Administrators only KEY_READ: the
+    # Appx sideload-policy key in SOFTWARE gives Administrators 0x00020019
+    # and SYSTEM 0x000f003f (CI run 44040699722, regipy DACL read). A
+    # build-time `reg import` of those values therefore fails with
+    # "Error accessing the registry" for the admin running the build. The
+    # DACL itself grants SYSTEM full control, so the import runs as SYSTEM
+    # instead of weakening the hive DACL (never done: user decision
+    # 2026-11-17 23:43 puts every registry import at CI build time and
+    # forbids setting registry values inside the running PE).
+    #
+    # Mechanism: schtasks.exe is built into Windows, so no new tool is
+    # downloaded. A wrapper .cmd (paths baked in, no argument quoting)
+    # runs `reg import` and writes its exit code to a file; the caller
+    # polls for that file, reads the code, and deletes the task. The
+    # wrapper / code / log files live under ProgramData, where SYSTEM can
+    # always write -- the runner user's temp dir is not guaranteed to be
+    # writable by SYSTEM.
+    Assert-PathExists -Path $RegFile -Label 'Registry patch'
+
+    if ($null -eq (Get-Command -Name 'schtasks.exe' -ErrorAction SilentlyContinue)) {
+        throw [System.InvalidOperationException]::new(
+            'schtasks.exe is not available: a SYSTEM registry import needs Windows (one-shot scheduled task as SYSTEM)')
+    }
+
+    $taskName = "MICPE-RegImport-$([guid]::NewGuid().ToString('N'))"
+    $workDir = Join-Path $env:ProgramData $taskName
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    $wrapper = Join-Path $workDir 'import.cmd'
+    $codeFile = Join-Path $workDir 'exitcode.txt'
+    $logFile = Join-Path $workDir 'import.log'
+    try {
+        @(
+            '@echo off',
+            "reg.exe import `"$RegFile`" > `"$logFile`" 2>&1",
+            "echo %ERRORLEVEL% > `"$codeFile`""
+        ) | Set-Content -LiteralPath $wrapper -Encoding ascii
+
+        # A /sc once task needs a start time; use two minutes in the
+        # future (local time, same clock schtasks reads) and trigger it
+        # immediately with /run -- the schedule itself never fires.
+        $startAt = (Get-Date).AddMinutes(2).ToString('HH:mm')
+        $create = & schtasks.exe /create /tn $taskName /tr "`"$wrapper`"" /sc once /st $startAt /ru SYSTEM /rl highest /f 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "failed to create SYSTEM import task $taskName : $($create.Trim())")
+        }
+
+        $run = & schtasks.exe /run /tn $taskName 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "failed to start SYSTEM import task $taskName : $($run.Trim())")
+        }
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while (-not (Test-Path -LiteralPath $codeFile)) {
+            if ((Get-Date) -gt $deadline) {
+                throw [System.InvalidOperationException]::new(
+                    "SYSTEM registry import did not finish within $TimeoutSeconds seconds for $RegFile (task $taskName)")
+            }
+            Start-Sleep -Seconds 1
+        }
+        Start-Sleep -Milliseconds 200
+        $code = (Get-Content -LiteralPath $codeFile -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($null -eq $code) { $code = '' }
+        $code = "$code".Trim()
+        if ($code -ne '0') {
+            $detail = '(reg.exe printed nothing)'
+            if (Test-Path -LiteralPath $logFile) {
+                $logged = (Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue)
+                if ($logged) { $detail = "$logged".Trim() }
+            }
+            throw [System.InvalidOperationException]::new(
+                "SYSTEM reg import failed with exit code $code for $RegFile : $detail")
+        }
+        Write-SubStep "imported $(Split-Path -Leaf $RegFile) as SYSTEM"
+    }
+    finally {
+        $null = & schtasks.exe /delete /tn $taskName /f 2>&1
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function ConvertFrom-RegQueryOutput {
     [CmdletBinding()]
     param(
@@ -205,7 +298,14 @@ function Invoke-RegistryScript {
         [AllowEmptyCollection()]
         [string[]] $RegFiles,
 
-        [string[]] $Hives = @('DEFAULT', 'DRIVERS', 'SOFTWARE', 'SYSTEM')
+        [string[]] $Hives = @('DEFAULT', 'DRIVERS', 'SOFTWARE', 'SYSTEM'),
+
+        # Leaf names of .reg files whose keys the build admin cannot write
+        # (Appx sideload policy: Administrators have only KEY_READ, CI run
+        # 44040699722). Those files are imported as SYSTEM through a
+        # one-shot scheduled task (Invoke-RegImportAsSystem) instead of a
+        # plain reg import; everything else keeps the admin path.
+        [string[]] $SystemRegFiles = @()
     )
 
     $configDir = Join-Path $MountDir 'Windows/System32/config'
@@ -231,7 +331,12 @@ function Invoke-RegistryScript {
                 Write-Warn "registry patch not found, skipping: $regFile"
                 continue
             }
-            Import-RegFile -RegFile $regFile
+            if ($SystemRegFiles -contains (Split-Path -Leaf $regFile)) {
+                Invoke-RegImportAsSystem -RegFile $regFile
+            }
+            else {
+                Import-RegFile -RegFile $regFile
+            }
         }
     }
     finally {

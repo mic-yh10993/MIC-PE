@@ -176,6 +176,21 @@ function Set-BootShell {
         Write-SubStep 'Pin-Shortcuts.wcs installed to System32'
     }
 
+    # Fix-DriveLetters.cmd runs from startnet.cmd (after wpeinit, before the
+    # shell) so the installed-Windows volume keeps C: (user decision
+    # 2026-11-17 23:43). It lives under System32\MICPE per that decision.
+    # Unlike PECMD.EXE it is a committed repo file, so a missing source is
+    # a build error, not a warning: startnet.cmd would silently skip the
+    # fix and the probe would fail on the missing drive keys.
+    $micpeDir = Join-Path $MountDir 'Windows/System32/MICPE'
+    if (-not (Test-Path -LiteralPath $micpeDir)) {
+        New-Item -ItemType Directory -Path $micpeDir -Force | Out-Null
+    }
+    $fixDrives = Join-Path $shellSrc 'Fix-DriveLetters.cmd'
+    Assert-PathExists -Path $fixDrives -Label 'Fix-DriveLetters.cmd'
+    Copy-Item -LiteralPath $fixDrives -Destination (Join-Path $micpeDir 'Fix-DriveLetters.cmd') -Force
+    Write-SubStep 'Fix-DriveLetters.cmd installed to System32\MICPE'
+
     # PECMD.EXE is third-party freeware and deliberately not in git. Until a
     # step supplies it (payload asset or CI download, M5/M6), startnet.cmd
     # falls back to the command shell; say so loudly in the build log.

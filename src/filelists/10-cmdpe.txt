@@ -70,3 +70,12 @@ Windows\Fonts\SegoeIcons.ttf
 Windows\System32\tasklist.exe
 Windows\System32\en-US\tasklist.exe.mui
 Windows\System32\zh-CN\tasklist.exe.mui
+# Fix-DriveLetters.cmd swaps drive letters with mountvol (user decision
+# 2026-11-17 23:43): the installed-Windows volume must keep C:. mountvol
+# exists in the 25H2 install.wim System32 with en-US/zh-CN MUIs (same
+# audit list); the base WinPE image does not carry it. The installer
+# (Deploy.ps1 / MICPE-Setup.wcs) already calls mountvol in PE, so this
+# also closes that latent gap.
+Windows\System32\mountvol.exe
+Windows\System32\en-US\mountvol.exe.mui
+Windows\System32\zh-CN\mountvol.exe.mui

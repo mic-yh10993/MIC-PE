@@ -68,9 +68,21 @@ Describe 'Get-StageProbeExpect' {
         # fallback never starts Explorer; explorer / dwm / shell_ready
         # and the uwp_launch_* keys can never be 1 there. They are
         # verified at m5 (PECMD arrives with the payload) and m7.
+        # Drive letters are asserted from m4 on (user decision
+        # 2026-11-17 23:43); in the CI harness there is no installed
+        # Windows volume, so win_drive=none and drive_fixed=0.
         $expect = Get-StageProbeExpect -Stage 'm4'
-        @($expect.Keys | Sort-Object) | Should -Be @('boot', 'ime', 'share', 'uwp_appx')
-        $expect.Count | Should -Be 4
+        @($expect.Keys | Sort-Object) | Should -Be @('boot', 'drive_fixed', 'ime', 'pe_drive', 'share', 'uwp_appx', 'win_drive')
+        $expect.Count | Should -Be 7
+    }
+
+    It 'm5, m6 and m7 carry the drive-letter keys too' {
+        foreach ($stage in 'm5', 'm6', 'm7') {
+            $expect = Get-StageProbeExpect -Stage $stage
+            $expect['pe_drive'] | Should -Be 'X'
+            $expect['win_drive'] | Should -Be 'none'
+            $expect['drive_fixed'] | Should -Be '0'
+        }
     }
 
     It 'all maps to the m7 expectations' {

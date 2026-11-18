@@ -39,9 +39,21 @@
 BeforeAll {
     $script:RepoRoot = (Resolve-Path "$PSScriptRoot/..").Path
     $script:ProbePath = Join-Path $script:RepoRoot 'src/ci/probe.cmd'
-    $script:CmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
-    $script:FindExe = Join-Path $env:SystemRoot 'System32\find.exe'
-    $script:TasklistExe = Join-Path $env:SystemRoot 'System32\tasklist.exe'
+    # $env:SystemRoot does not exist on Linux, and Join-Path throws on a
+    # null first argument. The three Windows-only tests skip there, but
+    # BeforeAll still runs for the platform-independent cut test below, so
+    # keep the Windows paths out of it on Linux. (Latent until the Test 53
+    # cut test added the first non-skipped It to this file.)
+    if ($IsWindows) {
+        $script:CmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $script:FindExe = Join-Path $env:SystemRoot 'System32\find.exe'
+        $script:TasklistExe = Join-Path $env:SystemRoot 'System32\tasklist.exe'
+    }
+    else {
+        $script:CmdExe = $null
+        $script:FindExe = $null
+        $script:TasklistExe = $null
+    }
 
     # Run a batch with only find.exe (+ optionally tasklist.exe) on PATH,
     # so tasklist / ping / reg are all unresolvable, as in the PE image.
@@ -71,12 +83,22 @@ BeforeAll {
     # edits above it cannot shift the cut), with a marker appended so
     # completion is observable. No shutdown line, no UWP section (must
     # not launch apps on the runner).
+    #
+    # The cut pattern must be the exact echo of the shell_ready value.
+    # Test run 53 (head 211267d): the loose 'shell_ready=' pattern matched
+    # the progress marker `echo mark_shell_ready=%TIME: =0%` first (it sits
+    # before the shell section), so the head was cut at the marker and the
+    # shell section never ran -- the "completes ..." test failed on a
+    # missing explorer= key. 'echo shell_ready=[01]' matches only the real
+    # if/else line; the marker line has 'mark_' between 'echo ' and
+    # 'shell_ready='.
+    $script:ShellReadyCutPattern = 'echo shell_ready=[01]'
     $script:BuildProbeHeadBatch = {
         param([string] $Path)
         $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
         $end = -1
         for ($i = 0; $i -lt $probeLines.Count; $i++) {
-            if ($probeLines[$i] -match 'shell_ready=') { $end = $i; break }
+            if ($probeLines[$i] -match $script:ShellReadyCutPattern) { $end = $i; break }
         }
         if ($end -lt 0) { throw 'probe.cmd has no shell_ready line; the head cut is stale' }
         $lines = @($probeLines[0..$end]) + @('echo probe_head_done=1 >> "%PROBE_OUT%"')
@@ -85,6 +107,31 @@ BeforeAll {
 }
 
 Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
+    It 'cuts the probe head after the real shell_ready line, not the mark_shell_ready marker (Test run 53)' {
+        # Pure string logic: runs on Linux too, so the Test 53 regression is
+        # caught locally instead of only on the Windows runner. The old
+        # 'shell_ready=' pattern matched the marker line first; prove the
+        # new pattern picks the real if/else line and the head still carries
+        # the tasklist pipelines the shell section needs.
+        $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $marker = -1
+        $cut = -1
+        for ($i = 0; $i -lt $probeLines.Count; $i++) {
+            if ($marker -lt 0 -and $probeLines[$i] -match 'mark_shell_ready=') { $marker = $i }
+            if ($cut -lt 0 -and $probeLines[$i] -match $script:ShellReadyCutPattern) { $cut = $i }
+        }
+        $marker | Should -BeGreaterThan -1 -Because 'the progress marker must exist for this test to mean anything'
+        $cut | Should -BeGreaterThan $marker -Because 'the cut must be after the marker, not on it'
+        $probeLines[$cut] | Should -Match 'echo shell_ready=[01]'
+        ($probeLines[0..$cut] -join "`n") | Should -Match 'tasklist'
+        # And the old pattern really was the bug: it stops at the marker.
+        $oldCut = -1
+        for ($i = 0; $i -lt $probeLines.Count; $i++) {
+            if ($probeLines[$i] -match 'shell_ready=') { $oldCut = $i; break }
+        }
+        $oldCut | Should -Be $marker
+    }
+
     It 'dies silently at the first tasklist pipeline when tasklist is not on PATH' -Skip:(-not $IsWindows) {
         # The exact shell-section construct, probe.cmd lines 51-52.
         $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
