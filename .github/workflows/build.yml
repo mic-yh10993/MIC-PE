@@ -17,11 +17,11 @@ on:
         default: "26200"
         required: true
       office:
-        description: "内置 Office 2016 绿色版（+330 MB）"
+        description: "内置 Office 2016 精简版（约 +170 MB 包）"
         type: boolean
         default: false
       chrome:
-        description: "内置 Chrome（+280 MB）"
+        description: "内置 Chrome 精简版（约 +130 MB 包）"
         type: boolean
         default: false
       verify:
@@ -154,21 +154,16 @@ jobs:
           # for the installer deploy smoke test. Windows cannot partition a
           # qcow2 directly, so each disk is built as a VHDX with diskpart
           # (partition + NTFS format + files), detached, then converted to
-          # qcow2 with qemu-img. install.wim comes from the ISO just built,
-          # so both source disks carry a copy of the real file.
+          # qcow2 with qemu-img. install.wim comes from the build step's
+          # INSTALL_WIM_PATH (the base install.wim): the finished ISO no
+          # longer carries one (user decision 2026-11-17 15:09), so it
+          # cannot be extracted from the ISO anymore.
           $ErrorActionPreference = 'Stop'
           $diskDir = "$env:GITHUB_WORKSPACE\verify-disks"
           New-Item -ItemType Directory -Path $diskDir -Force | Out-Null
-          $iso = $env:ISO_PATH
-          if (-not $iso) { throw 'Prepare data disks: ISO_PATH is empty; the build step did not export it' }
-          if (-not (Test-Path -LiteralPath $iso)) { throw "Prepare data disks: ISO not found at '$iso'" }
-
-          $wimDir = Join-Path $diskDir 'wim'
-          New-Item -ItemType Directory -Path $wimDir -Force | Out-Null
-          & 7z x $iso 'sources\install.wim' "-o$wimDir" -y | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw 'failed to extract sources\install.wim from the built ISO' }
-          $installWim = Join-Path $wimDir 'sources\install.wim'
-          if (-not (Test-Path -LiteralPath $installWim)) { throw 'sources\install.wim missing after extraction' }
+          $installWim = $env:INSTALL_WIM_PATH
+          if (-not $installWim) { throw 'Prepare data disks: INSTALL_WIM_PATH is empty; the build step did not export it' }
+          if (-not (Test-Path -LiteralPath $installWim)) { throw "Prepare data disks: install.wim not found at '$installWim'" }
 
           foreach ($letter in 'T', 'U', 'V', 'W') {
             if (Get-PSDrive -Name $letter -ErrorAction SilentlyContinue) {
@@ -321,3 +316,56 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
           compression-level: 0
+
+      - name: Upload finished build to Release
+        # Long-term rule (user decision 2026-11-17 14:16): every finished
+        # build uploads itself as a Release. Tag scheme:
+        # micpe-<stage>-<build>-<yyyymmdd>-r<run_number> (never 'v*':
+        # the workflow triggers on v* tag pushes, and a release tag must
+        # not re-trigger a build). Only on manual runs: a v* tag push
+        # already has its own release. Runs even when verification
+        # failed (always()): the Release is the build artifact record;
+        # the run report is the verdict on whether it is good.
+        if: always() && github.event_name == 'workflow_dispatch' && env.ISO_PATH != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MICPE_STAGE: ${{ inputs.stage }}
+          MICPE_BUILD: ${{ inputs.build }}
+          MICPE_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = $env:MICPE_STAGE
+          $build = $env:MICPE_BUILD
+          $date = (Get-Date -Format 'yyyyMMdd')
+          $runNumber = $env:MICPE_RUN_NUMBER
+          $tag = "micpe-$stage-$build-$date-r$runNumber"
+          $iso = $env:ISO_PATH
+          $wim = $env:BOOT_WIM_PATH
+          if (-not (Test-Path -LiteralPath $iso)) { throw "release upload: ISO not found at '$iso'" }
+          if (-not (Test-Path -LiteralPath $wim)) { throw "release upload: boot.wim not found at '$wim'" }
+          $isoBytes = (Get-Item -LiteralPath $iso).Length
+          $wimBytes = (Get-Item -LiteralPath $wim).Length
+          $isoHash = (Get-FileHash -LiteralPath $iso -Algorithm SHA256).Hash.ToLower()
+          $wimHash = (Get-FileHash -LiteralPath $wim -Algorithm SHA256).Hash.ToLower()
+          $checksums = Join-Path $env:GITHUB_WORKSPACE 'checksums.sha256'
+          @("$isoHash  MICPE.iso", "$wimHash  boot.wim") |
+              Set-Content -LiteralPath $checksums -Encoding ASCII
+          $notes = @"
+          MICPE $stage $build ($date), run $runNumber.
+          ISO: $([math]::Round($isoBytes / 1MB, 1)) MB, SHA256 $isoHash
+          boot.wim: $([math]::Round($wimBytes / 1MB, 1)) MB, SHA256 $wimHash
+          The ISO carries only boot.wim (user decision 2026-11-17 15:09);
+          install.wim is NOT included — supply your own.
+          "@
+          $existing = & gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            # Re-run of the same workflow run: upload into the existing
+            # release instead of failing on the duplicate tag.
+            & gh release upload $tag $iso $wim $checksums --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            & gh release create $tag $iso $wim $checksums --repo $env:GITHUB_REPOSITORY `
+              --title "MICPE $stage $build ($date)" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag" }
+          Write-Host "released $tag"

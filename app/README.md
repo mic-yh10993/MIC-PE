@@ -78,8 +78,8 @@ install.bat 按这个分工写目标路径：程序文件去 `\Program Files\MIC
 | --- | --- | --- | --- |
 | Chrome | 自带安装包（用户 2026-11-16 澄清：Edge 不自带；Chrome 太重可换 Firefox 并精简；安装 bat 自写，CI 里运行） | `\Program Files\Google\Chrome`（厂商布局，见 `app/chrome/README.md`） | M5 已补 |
 | Office 2016 | 自带安装包（安装脚本改成 CI 能运行的版本） | `\Program Files\Office2016`（厂商布局，见 `app/office/README.md`） | M5 已补 |
-| PE 工具 | 参考文件里的工具（见 `~/workspace/MIC-PE-recovery/`） | 按性质分两处 | M5 已集成（payload-v1） |
-| PENetwork | 参考文件里的网络工具 | `\Program Files\MICPE` | M5 已集成（payload-v1） |
+| PE 工具 | 参考文件里的工具（见 `~/workspace/MIC-PE-recovery/`） | 按性质分两处 | M5 已集成（`app/payload/micpe-payload.7z`） |
+| PENetwork | 参考文件里的网络工具 | `\Program Files\MICPE` | M5 已集成（`app/payload/micpe-payload.7z`） |
 | MICPE 装机软件 | 用户自写 | `\Program Files\MICPE` | M5 集成 |
 | UWP 核心文件 | install.wim 提取（M4）：照片、新版媒体播放器；**不含系统设置应用** | 系统位置（UWP 自带路径） | M4 |
 | 自实现设置工具 | 若 M4 决定做：改注册表实现基础设置 | `%System32%\MICPE` | M4 再定 |

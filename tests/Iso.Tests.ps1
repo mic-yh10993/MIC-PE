@@ -102,10 +102,12 @@ Describe 'New-MicpeIso boot image selection' {
 }
 
 Describe 'New-MicpeIso' {
-    It 'allows a full 26200 media through the size gate' {
-        # A full 26200 media is ~4.5 GiB (install.wim alone ~4.1 GiB); the
-        # 3.2 GB product target is M7 volume governance, not an M1 gate.
-        $script:IsoMaxBytes | Should -BeGreaterOrEqual 4.5GB
+    It 'enforces the 3.2 GB product target as the size gate' {
+        # Packaging round (user decision 2026-11-17 15:09): the ISO carries
+        # only boot.wim, so the media fits the product target and the gate
+        # is the target itself. The old 5 GB runaway guard (full 26200
+        # media ~4.5 GiB) died with that layout.
+        $script:IsoMaxBytes | Should -Be ([long](3.2 * 1GB))
     }
 
     It 'throws when the media directory is missing' {
@@ -117,5 +119,37 @@ Describe 'New-MicpeIso' {
         $dir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "media-$(Get-Random)")
         { New-MicpeIso -MediaDir $dir.FullName -OutIso (Join-Path $dir.FullName 'x.iso') } |
             Should -Throw '*boot*'
+    }
+}
+
+Describe 'Remove-InstallWimFromMedia' {
+    BeforeAll {
+        $script:mediaDir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "media-nowim-$(Get-Random)") -Force
+        $sources = New-Item -ItemType Directory -Path (Join-Path $script:mediaDir 'sources') -Force
+        Set-Content -LiteralPath (Join-Path $sources 'install.wim') -Value 'fake install.wim'
+        Set-Content -LiteralPath (Join-Path $sources 'boot.wim') -Value 'fake boot.wim'
+    }
+
+    It 'removes sources\install.wim and keeps sources\boot.wim' {
+        Remove-InstallWimFromMedia -MediaDir $script:mediaDir
+        (Join-Path $script:mediaDir 'sources\install.wim') | Should -Not -Exist
+        (Join-Path $script:mediaDir 'sources\boot.wim') | Should -Exist
+    }
+
+    It 'is a no-op when install.wim is already gone (still requires boot.wim)' {
+        # Second call: install.wim already removed above; must not throw,
+        # and must still refuse a media tree with no boot.wim.
+        { Remove-InstallWimFromMedia -MediaDir $script:mediaDir } | Should -Not -Throw
+        Remove-Item -LiteralPath (Join-Path $script:mediaDir 'sources\boot.wim') -Force
+        { Remove-InstallWimFromMedia -MediaDir $script:mediaDir } | Should -Throw '*boot.wim*'
+    }
+
+    It 'reverse control: a tree with install.wim present must lose it' {
+        $dir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "media-wim-$(Get-Random)") -Force
+        $sources = New-Item -ItemType Directory -Path (Join-Path $dir 'sources') -Force
+        Set-Content -LiteralPath (Join-Path $sources 'install.wim') -Value 'fake'
+        Set-Content -LiteralPath (Join-Path $sources 'boot.wim') -Value 'fake'
+        Remove-InstallWimFromMedia -MediaDir $dir
+        (Join-Path $dir 'sources\install.wim') | Should -Not -Exist
     }
 }

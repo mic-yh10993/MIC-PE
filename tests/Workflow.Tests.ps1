@@ -125,6 +125,28 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'DATA_DISKS='
     }
 
+    It 'prepares data disks from the base install.wim, not from the ISO' {
+        # Packaging round (user decision 2026-11-17 15:09): the ISO no
+        # longer carries install.wim, so the data disks must use the
+        # build step's INSTALL_WIM_PATH export.
+        $script:buildYml | Should -Match 'INSTALL_WIM_PATH'
+        $script:buildYml | Should -Match "install\.wim not found at"
+        $script:buildYml | Should -Not -Match 'failed to extract sources\\install\.wim'
+    }
+
+    It 'uploads every finished manual build as a Release' {
+        # Long-term rule (user decision 2026-11-17 14:16). Tag scheme
+        # micpe-<stage>-<build>-<yyyymmdd>-r<run_number>: never 'v*',
+        # because the workflow triggers on v* tag pushes.
+        $script:buildYml | Should -Match 'Upload finished build to Release'
+        $script:buildYml | Should -Match "github\.event_name == 'workflow_dispatch'"
+        $script:buildYml | Should -Match '\$tag = "micpe-'
+        $script:buildYml | Should -Match 'gh release create'
+        $script:buildYml | Should -Match 'gh release upload'
+        $script:buildYml | Should -Match 'checksums\.sha256'
+        $script:buildYml | Should -Match 'install\.wim is NOT included'
+    }
+
     It 'passes the data disks to the verifier and gives the deploy run two hours' {
         $script:buildYml | Should -Match 'DataDisks'
         $script:buildYml | Should -Match 'TimeoutMin\s*=\s*120'
@@ -307,8 +329,8 @@ Describe 'M5 step wiring' {
         }
     }
 
-    It 'downloads, expands, installs and asserts the payload in the step' {
-        $script:buildScript | Should -Match 'Get-PayloadReleaseAsset'
+    It 'stages, expands, installs and asserts the payload in the step' {
+        $script:buildScript | Should -Match 'Get-AppPackageArchive'
         $script:buildScript | Should -Match 'Expand-Payload'
         $script:buildScript | Should -Match 'Install-Payload'
         $script:buildScript | Should -Match 'Assert-PayloadInstalled'

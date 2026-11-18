@@ -113,11 +113,9 @@ function Invoke-BaseStep {
     # Media Player, Calculator) live inside install.wim, and skipping them
     # would leave nothing to extract.
     # ResetBase stays 0 because component-baseline resets have broken UWP
-    # provisioning in the field. The media tree ships the full source
-    # install.wim (~4.1 GiB) as the install source, so neither flag saves
-    # ISO size anyway -- the ISO size is governed by the media, not the
-    # base images (M7: the old comment here claimed install.wim was never
-    # packaged into our ISO, which the 4.48 GB M1 ISO disproves).
+    # provisioning in the field. Neither flag saves ISO size: the ISO size
+    # is governed by the media, not the base images, and the iso step drops
+    # the media's install.wim anyway (user decision 2026-11-17 15:09).
     $config = Set-ConvertConfig -IniPath $iniPath -Overrides @{
         AddUpdates = '0'
         Cleanup    = '1'
@@ -191,7 +189,9 @@ function Invoke-BaseStep {
     $null = Get-BaseWims -IsoPath $producedIso.FullName -OutDir $baseDir
 
     # The media tree comes from the same ISO: it supplies the boot sectors,
-    # the EFI boot image, and the folder layout oscdimg packages.
+    # the EFI boot image, and the folder layout oscdimg packages. The full
+    # install.wim stays in the media tree until the iso step drops it
+    # (Remove-InstallWimFromMedia, user decision 2026-11-17 15:09).
     Write-Step 'laying out the media tree'
     if (Test-Path -LiteralPath $paths.Media) {
         Remove-Item -LiteralPath $paths.Media -Recurse -Force
@@ -346,14 +346,18 @@ function Invoke-PayloadStep {
     Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
 
     $staging = Join-Path $paths.Logs 'payload'
-    $payloadFile = Get-PayloadReleaseAsset -Name 'payload' -StagingDir $staging
+    # One source per package: the app/ tree in this repo. No Release
+    # downloads (user decision 2026-11-17 15:07). The chrome/office
+    # archives are staged into the payload dir next to the expanded
+    # payload, where Install-Payload expects them.
+    $payloadFile = Get-AppPackageArchive -Name 'payload' -RepoRoot $repoRoot -StagingDir $staging
     $payloadDir = Join-Path $staging 'payload'
     Expand-Payload -Archive $payloadFile -Destination $payloadDir
     if ($Chrome) {
-        $null = Get-PayloadReleaseAsset -Name 'chrome' -StagingDir $payloadDir
+        $null = Get-AppPackageArchive -Name 'chrome' -RepoRoot $repoRoot -StagingDir $payloadDir
     }
     if ($Office) {
-        $null = Get-PayloadReleaseAsset -Name 'office' -StagingDir $payloadDir
+        $null = Get-AppPackageArchive -Name 'office' -RepoRoot $repoRoot -StagingDir $payloadDir
     }
 
     Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
@@ -452,6 +456,11 @@ function Invoke-IsoStep {
     Write-SubStep ("boot.wim {0}，未超 3 GB 上限（若以后超限，按顺序先砍：{1}）" -f (Format-ByteSize -Bytes $wimBytes), $next)
 
     Write-Step 'packaging MICPE.iso'
+    # Minimal media (user decision 2026-11-17 15:09): the ISO carries only
+    # boot.wim. The UUP media tree still has the full install.wim; drop it
+    # here, after the last step that needs it. The installer finds the
+    # user's own install.wim on another volume (install.mic protocol).
+    Remove-InstallWimFromMedia -MediaDir $paths.Media
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
 
     $isoBytes = (Get-Item -LiteralPath $isoPath).Length
@@ -520,6 +529,11 @@ if ($result) {
         "BOOT_WIM_PATH=$($result.BootWim)" | Add-Content -LiteralPath $env:GITHUB_ENV
         "WIM_BYTES=$($result.WimBytes)" | Add-Content -LiteralPath $env:GITHUB_ENV
         "ISO_BYTES=$($result.IsoBytes)" | Add-Content -LiteralPath $env:GITHUB_ENV
+        # The base install.wim is the install source for the deploy smoke
+        # test's data disks (build.yml): the finished ISO no longer carries
+        # one (user decision 2026-11-17 15:09), so the workflow cannot
+        # extract it from the ISO anymore.
+        "INSTALL_WIM_PATH=$(Join-Path $paths.Base 'install.wim')" | Add-Content -LiteralPath $env:GITHUB_ENV
     }
 }
 else {

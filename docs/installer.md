@@ -115,8 +115,8 @@ MICPE-Setup.wcs -cli -deploy <源> <目标盘>
   进 PE。M7 改走 WinPE 自带的 `dism.exe /Apply-Image`（已在出货 boot.wim
   里两个索引都核实存在；`/Get-WimInfo` 负责版本查询，`/English` 钉死
   英文输出以便解析）。不走“把 wimlib 放进 payload”的路线：那要多带
-  `wimlib-imagex.exe` + `libwim-15.dll`，还会让已备好的 payload-v1 归档
-  哈希 pin 作废。未验证：`.esd` 的 apply 是同一条 DISM 命令，Win10+
+  `wimlib-imagex.exe` + `libwim-15.dll`，还会让已备好的
+  `micpe-payload.7z` 归档哈希 pin 作废。未验证：`.esd` 的 apply 是同一条 DISM 命令，Win10+
   实践中可用，但本次 L3 未覆盖；分卷 `.swm` 源发现器不返回、向导也不
   接受，故无 `/SWMFile` 分支；`/ScratchDir` 未加，若 L3 报 scratch 空间
   错误再指到目标盘。
@@ -128,13 +128,14 @@ MICPE-Setup.wcs -cli -deploy <源> <目标盘>
   经 `-DataDisks` 透传；`probe.cmd` 在找到源时调 `-cli -deploy` 装到
   空闲最大的卷（即 disk5），写 `installer_deploy=1` 并检查 BCD 写
   `installer_boot=1`。数据盘验证超时 120 分钟（TCG 下 DISM apply 很慢）。
-  未验证：整条链路一次都没在 CI 跑过（m6/m7 构建被缺失的 payload
-  Release 挡住，见下一条）；disk2-only 的 `installer_scan=nopartition`
+  未验证：整条链路一次都没在 CI 跑过（打包轮触发的 Build 会是第一次）；
+  disk2-only 的 `installer_scan=nopartition`
   场景合跑里观测不到，需单独跑一次才能验证。
-- **m6/m7 完整构建被缺失的 payload Release 挡住**：`Invoke-PayloadStep`
-  用 `gh release download` 从 `payload-v1` / `chrome-v1` / `office-v1`
-  拉资产，三个 tag 在 GitHub 上都不存在（2026-11-17 API 实测 404）。
-  等用户拍板发不发这三个 Release；在此之前 stage m5/m6/m7 的 Build
-  会在 payload 步骤失败，能实际跑通的最高完整构建是 stage m4。
+- **m6/m7 完整构建的 payload 阻塞已解除（打包轮）**：原来
+  `Invoke-PayloadStep` 用 `gh release download` 从 `payload-v1` /
+  `chrome-v1` / `office-v1` 拉资产，三个 tag 在 GitHub 上都不存在
+  （2026-11-17 API 实测 404），stage m5/m6/m7 的 Build 会在 payload
+  步骤失败。打包轮改走仓库 `app/` 分卷（拼回、验哈希），不再下载；
+  三个旧 Release 已于分卷版验证通过后删除。
 - `.wcs` 的 PECMD 语法是初稿，未经 PECMD 实际解析；L3 QEMU 运行时以
   probe.txt + 截图为准。

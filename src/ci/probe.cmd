@@ -77,8 +77,15 @@ if errorlevel 1 (echo dwm=0 >> "%PROBE_OUT%") else (echo dwm=1 >> "%PROBE_OUT%")
 
 rem The shell is considered ready only after it has survived a settle period;
 rem a crash-on-start explorer still appears in tasklist for a second or two.
+rem Settle markers (run 44249181100): runs 31/32 stopped between
+rem mark_shell_ready and shell_ready, and the gap holds only the ping below
+rem and one more tasklist call. These three markers say which of the two it
+rem was; they are mark_ keys, parsed but never asserted (see Assert-Probe).
+echo mark_shell_ping_before=%TIME: =0% >> "%PROBE_OUT%"
 ping -n 16 127.0.0.1 >nul 2>&1
+echo mark_shell_ping_after=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+echo mark_shell_check_after=%TIME: =0% >> "%PROBE_OUT%"
 if errorlevel 1 (echo shell_ready=0 >> "%PROBE_OUT%") else (echo shell_ready=1 >> "%PROBE_OUT%")
 
 rem --- network ---------------------------------------------------------------

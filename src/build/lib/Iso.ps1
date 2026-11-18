@@ -20,12 +20,13 @@
     cdboot with no BDS error. See eval card section 11.
 #>
 
-# The product target is a <= 3.2 GB ISO (plan.md), but a full 26200 media is
-# ~4.5 GiB (install.wim alone is ~4.1 GiB), so no full-media build can pass
-# a 3.2 GB gate. Shrinking the media (trimming or splitting install.wim)
-# is M7 volume governance, not an M1 gate: this cap only guards against
-# runaway growth, and M7 must lower it again once the media actually fits.
-$script:IsoMaxBytes = 5GB
+# The product target is a <= 3.2 GB ISO (plan.md), and the media now fits:
+# since the packaging round the ISO carries only boot.wim (user decision
+# 2026-11-17 15:09; install.wim is supplied by the user separately), so
+# the gate is the product target itself, not the old 5 GB runaway guard.
+# A full 26200 media used to be ~4.5 GiB (install.wim alone ~4.1 GiB);
+# that layout is gone — see Remove-InstallWimFromMedia.
+$script:IsoMaxBytes = [long](3.2 * 1GB)
 
 function Get-OscdimgPath {
     [CmdletBinding()]
@@ -77,6 +78,30 @@ function Get-OscdimgArgs {
         $MediaDir
         $OutIso
     )
+}
+
+function Remove-InstallWimFromMedia {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MediaDir
+    )
+
+    # User decision 2026-11-17 15:09: the finished ISO carries only
+    # boot.wim; the user supplies install.wim themselves and the
+    # installer finds it on another volume (install.mic protocol).
+    # The UUP media tree still contains the full install.wim (~3.4 GB),
+    # so drop it here, after the last step that needs it and before
+    # oscdimg. boot.wim stays: it is the payload of this ISO.
+    $installWim = Join-Path $MediaDir 'sources/install.wim'
+    if (Test-Path -LiteralPath $installWim) {
+        Remove-Item -LiteralPath $installWim -Force
+        Write-SubStep 'removed sources\install.wim from the ISO media (user supplies it)'
+    }
+    Assert-True -Condition (-not (Test-Path -LiteralPath $installWim)) -Message (
+        "sources\install.wim is still in the media tree; the ISO must not ship it")
+    $bootWim = Join-Path $MediaDir 'sources/boot.wim'
+    Assert-PathExists -Path $bootWim -Label 'boot.wim (must survive the install.wim removal)'
 }
 
 function New-MicpeIso {

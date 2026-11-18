@@ -1,20 +1,30 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Payload packages: download, verify, expand and inject the three payloads.
+    Payload packages: stage, verify, expand and inject the three payloads.
 
 .DESCRIPTION
-    MICPE ships three independently released payloads (one GitHub Release
-    each, downloaded only when the matching switch is on):
+    MICPE ships three payload packages, all committed in the repo under
+    app/ (user decision 2026-11-17 15:07 — no Release downloads anymore):
 
-        payload  micpe-payload.7z            -> Program Files (portable tools)
-        chrome   chrome-enterprise-x64.msi   -> Program Files\Google\Chrome
-        office   office2016-green.7z         -> Program Files\Office2016
+        payload  app/payload/micpe-payload.7z        -> Program Files (portable tools)
+        chrome   app/chrome/chrome-slim.7z.001/.002  -> Program Files\Google\Chrome
+        office   app/office/office2016-slim.7z.001/.002 -> Program Files\Office2016
 
-    Every asset is SHA-256 pinned below. The hashes were computed from the
-    recovered reference materials (see docs/payload.md) and the download
-    fails closed on mismatch: a republished asset must update its pin in
-    the same commit, never silently.
+    Chrome and Office are >100 MB joined, so they are stored as 95 MB
+    volumes (GitHub's single-file limit is 100 MB); the build joins the
+    volumes and verifies the SHA-256 of the JOINED archive. Every pin
+    below is the joined-archive hash, never a single volume's.
+
+    chrome-slim.7z: from the Chrome Enterprise MSI (offline installer),
+      Locales pruned to en-US + zh-CN, WidevineCdm (DRM plugin) removed.
+    office2016-slim.7z: Office 2016, Access removed (MSACCESS.EXE and
+      friends), the vendor's install/uninstall scripts removed.
+      Office self-activates per machine, so there is no key to inject.
+
+    The three payload-* Releases (payload-v1, chrome-v1, office-v1) were
+    deleted once the app/ versions passed CI; nothing here may download
+    them again, and there is exactly one source per package: the app/ tree.
 
     PECMD.EXE supply (decided M5, design.md §6.5): the runtime is the DSI
     copy (DSI-安装备份-源码/make/PECMD.EXE, SHA-256 pinned in
@@ -30,74 +40,155 @@
     app/office/install.bat (user decision 2026-11-17: install.bat runs in
     CI, never inside PE). This file only stages the asset next to the bat
     and invokes it; the .bat holds the component-specific commands
-    (msiexec /a for Chrome, 7z x for Office).
+    (7z x for both Chrome and Office).
 
     // reuse-check: function names, tags and asset names are plan T13
     verbatim. The install/assert split follows the M2/M3/M4 pattern
     (mount -> install -> assert -> commit -> size gate in Build-Micpe.ps1).
 #>
 
-$script:PayloadReleases = @{
-    payload = 'payload-v1'
-    chrome  = 'chrome-v1'
-    office  = 'office-v1'
+# app/ layout: directory per package, joined-archive name, volume names
+# (in join order). payload fits in one file, so its single "volume" is
+# the archive itself.
+$script:AppPackageDir = @{
+    payload = 'payload'
+    chrome  = 'chrome'
+    office  = 'office'
 }
 
-$script:PayloadAssets = @{
+$script:AppPackageArchive = @{
     payload = 'micpe-payload.7z'
-    chrome  = 'chrome-enterprise-x64.msi'
-    office  = 'office2016-green.7z'
+    chrome  = 'chrome-slim.7z'
+    office  = 'office2016-slim.7z'
 }
 
-# SHA-256 pins, verified 2026-11-17 from the recovered materials:
+$script:AppPackageVolumes = @{
+    payload = @('micpe-payload.7z')
+    chrome  = @('chrome-slim.7z.001', 'chrome-slim.7z.002')
+    office  = @('office2016-slim.7z.001', 'office2016-slim.7z.002')
+}
+
+# SHA-256 pins of the JOINED archives, verified 2026-11-18:
 #   micpe-payload.7z      built from the 112-file payload tree + the DSI
 #                         PECMD.EXE (see New-PayloadArchive); 28,564,811 B
-#   chrome-enterprise-x64.msi  Google Chrome 151.0.7922.138, 164,831,232 B
-#   office2016-green.7z   Office 2016 green, 170,364,185 B
-# A rebuild must reproduce the micpe-payload.7z hash (same 7z version,
-# same file timestamps — New-PayloadArchive preserves them); if it does
-# not, update the pin here in the same commit as the republish.
+#   chrome-slim.7z        Chrome 151.0.7922.138, slimmed; 125,367,407 B
+#   office2016-slim.7z    Office 2016, Access removed; 167,504,937 B
+# A rebuild must reproduce the pin (same 7z version, same file
+# timestamps); if it does not, update the pin here in the same commit
+# as the re-split.
 $script:PayloadHashes = @{
     payload = 'c95737c250d34244a548d12c983f8c73aa479271d4889201429fac5c9960319e'
-    chrome  = '0ec77319d917eb232f1b1b52e0f6f6178eacb2d5abff1517f5c17d50a0a2db1a'
-    office  = '8bb9a924b72e5d70968121d1ed88df8bea74823e4f8aed1598d766b2a3cb7caf'
+    chrome  = 'df82dc28b2e0615656dae8b362eab15dd0d8efea7941a78a5e79d0f1a95ca626'
+    office  = '8a5ec5d7d8b77303029769f2f9e043b5f6c98e0cdd7cf5d6b56dc8e2ef6301f7'
 }
-
-$script:PayloadRepo = 'mic-yh10993/MIC-PE'
 
 # DSI copy of PECMD.EXE (1,077,760 bytes, 2024-06-06). It travels inside
 # micpe-payload.7z, so there is no separate download; the hash is pinned
 # here so a future rebuild can prove it is still the same binary.
 $script:PecmdHash = '7a3710297473cbb865408d41db362e6014fd3eeaaf819751495e6d928e7adf5e'
 
-function Get-PayloadRelease {
+function Get-AppPackageArchiveName {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string] $Name
     )
 
-    if (-not $script:PayloadReleases.ContainsKey($Name)) {
+    if (-not $script:AppPackageArchive.ContainsKey($Name)) {
         throw [System.InvalidOperationException]::new(
             "unknown payload package: $Name (expected payload|chrome|office)")
     }
 
-    return $script:PayloadReleases[$Name]
+    return $script:AppPackageArchive[$Name]
 }
 
-function Get-PayloadAsset {
+function Get-AppPackageVolumePaths {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string] $Name
+        [string] $Name,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RepoRoot
     )
 
-    if (-not $script:PayloadAssets.ContainsKey($Name)) {
+    if (-not $script:AppPackageDir.ContainsKey($Name)) {
         throw [System.InvalidOperationException]::new(
             "unknown payload package: $Name (expected payload|chrome|office)")
     }
 
-    return $script:PayloadAssets[$Name]
+    $dir = Join-Path (Join-Path $RepoRoot 'app') $script:AppPackageDir[$Name]
+    # The unary comma keeps a single-volume package an array: without it
+    # PowerShell unwraps the one element to a bare string, and callers
+    # reading .Count / [0] break.
+    return , @($script:AppPackageVolumes[$Name] | ForEach-Object { Join-Path $dir $_ })
+}
+
+function Join-AppPackageVolumes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Volumes,
+
+        [Parameter(Mandatory = $true)]
+        [string] $OutFile
+    )
+
+    # Byte-exact concatenation, in order, via streams (no whole-file
+    # buffering: the joined archives are 125-167 MB). Works on Windows
+    # and Linux alike, so the unit tests can run it locally.
+    $out = [System.IO.File]::Create($OutFile)
+    try {
+        foreach ($volume in $Volumes) {
+            Assert-PathExists -Path $volume -Label 'package volume'
+            $in = [System.IO.File]::OpenRead($volume)
+            try { $in.CopyTo($out) } finally { $in.Dispose() }
+        }
+    }
+    finally { $out.Dispose() }
+}
+
+function Get-AppPackageArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string] $StagingDir
+    )
+
+    $archive = Get-AppPackageArchiveName -Name $Name
+    $expected = Get-PayloadExpectedHash -Name $Name
+    $volumes = Get-AppPackageVolumePaths -Name $Name -RepoRoot $RepoRoot
+
+    if (-not (Test-Path -LiteralPath $StagingDir)) {
+        New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
+    }
+
+    $file = Join-Path $StagingDir $archive
+    if ($volumes.Count -eq 1 -and $volumes[0] -eq (Join-Path (Join-Path (Join-Path $RepoRoot 'app') $script:AppPackageDir[$Name]) $archive)) {
+        # Single-volume package: the committed file IS the archive.
+        Copy-Item -LiteralPath $volumes[0] -Destination $file -Force
+    }
+    else {
+        Write-Step "joining $($volumes.Count) volumes for $archive"
+        Join-AppPackageVolumes -Volumes $volumes -OutFile $file
+    }
+
+    Assert-PathExists -Path $file -Label "staged $archive"
+    if (-not (Test-PayloadFileHash -Path $file -ExpectedHash $expected)) {
+        $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower()
+        throw [System.InvalidOperationException]::new(
+            "payload archive hash mismatch for $Name ($archive): expected $expected, got $actual. " +
+            "Do not ship it: re-split the archive and update the pin in Payload.ps1 in the same commit.")
+    }
+
+    Write-SubStep "$archive staged and verified"
+    return $file
 }
 
 function Get-PayloadExpectedHash {
@@ -130,53 +221,7 @@ function Test-PayloadFileHash {
     return ($actual -eq $ExpectedHash.ToLower())
 }
 
-function Get-PayloadReleaseAsset {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $Name,
 
-        [Parameter(Mandatory = $true)]
-        [string] $StagingDir,
-
-        [string] $Repo = $script:PayloadRepo
-    )
-
-    $tag = Get-PayloadRelease -Name $Name
-    $asset = Get-PayloadAsset -Name $Name
-    $expected = Get-PayloadExpectedHash -Name $Name
-
-    if (-not (Test-Path -LiteralPath $StagingDir)) {
-        New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
-    }
-
-    $gh = Get-Command 'gh' -ErrorAction SilentlyContinue
-    if ($null -eq $gh) {
-        throw [System.InvalidOperationException]::new(
-            "gh CLI is required to download payload release $tag, but it was not found on PATH")
-    }
-
-    Write-Step "downloading $asset from release $tag"
-    $output = & gh release download $tag --pattern $asset --repo $Repo --dir $StagingDir --clobber 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        $detail = if ($output) { $output.Trim() } else { '(gh printed nothing)' }
-        throw [System.InvalidOperationException]::new(
-            "failed to download $asset from release $tag ($Repo). " +
-            "Publish the payload releases first — see docs/payload.md. gh said: $detail")
-    }
-
-    $file = Join-Path $StagingDir $asset
-    Assert-PathExists -Path $file -Label "downloaded $asset"
-    if (-not (Test-PayloadFileHash -Path $file -ExpectedHash $expected)) {
-        $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLower()
-        throw [System.InvalidOperationException]::new(
-            "payload asset hash mismatch for $Name ($asset): expected $expected, got $actual. " +
-            "Do not ship it: republish the release and update the pin in Payload.ps1 in the same commit.")
-    }
-
-    Write-SubStep "$asset downloaded and verified"
-    return $file
-}
 
 function New-PayloadArchive {
     [CmdletBinding()]
@@ -397,16 +442,16 @@ function Install-Payload {
             throw [System.InvalidOperationException]::new(
                 'Install-Payload -Chrome requires -RepoRoot (the app/chrome/install.bat location)')
         }
-        $msi = Join-Path $PayloadDir 'chrome-enterprise-x64.msi'
+        $archive = Join-Path $PayloadDir 'chrome-slim.7z'
         Invoke-ComponentInstall -Component 'chrome' -MountDir $MountDir `
-            -RepoRoot $RepoRoot -AssetPath $msi -Runner $ComponentRunner
+            -RepoRoot $RepoRoot -AssetPath $archive -Runner $ComponentRunner
     }
     if ($Office) {
         if (-not $RepoRoot) {
             throw [System.InvalidOperationException]::new(
                 'Install-Payload -Office requires -RepoRoot (the app/office/install.bat location)')
         }
-        $archive = Join-Path $PayloadDir 'office2016-green.7z'
+        $archive = Join-Path $PayloadDir 'office2016-slim.7z'
         Invoke-ComponentInstall -Component 'office' -MountDir $MountDir `
             -RepoRoot $RepoRoot -AssetPath $archive -Runner $ComponentRunner
     }
@@ -444,8 +489,9 @@ function Assert-PayloadInstalled {
     }
 
     if ($Chrome) {
-        # msiexec /a layout is unverified on Windows (no real MSI run yet),
-        # so search recursively instead of pinning one subpath.
+        # Chrome is a 7z extract now (no msiexec), and the version dir
+        # under Application varies by release, so search recursively
+        # instead of pinning one subpath.
         $chromeDir = Join-Path $MountDir 'Program Files/Google/Chrome'
         $exe = @()
         if (Test-Path -LiteralPath $chromeDir) {
@@ -454,11 +500,38 @@ function Assert-PayloadInstalled {
         if ($exe.Count -eq 0) {
             $missing.Add('Program Files/Google/Chrome/**/chrome.exe')
         }
+        # Slimming assertions (packaging round): the archive must already
+        # be slimmed — pruning happens at package time, not here.
+        if (Test-Path -LiteralPath $chromeDir) {
+            $widevine = @(Get-ChildItem -LiteralPath $chromeDir -Directory -Recurse -Filter 'WidevineCdm' -ErrorAction SilentlyContinue)
+            if ($widevine.Count -gt 0) {
+                $missing.Add('Chrome not slimmed: WidevineCdm present')
+            }
+            $localeDirs = @(Get-ChildItem -LiteralPath $chromeDir -Directory -Recurse -Filter 'Locales' -ErrorAction SilentlyContinue)
+            foreach ($localeDir in $localeDirs) {
+                $extra = @(Get-ChildItem -LiteralPath $localeDir.FullName -Filter '*.pak' -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notmatch '^(en-US|zh-CN)' })
+                if ($extra.Count -gt 0) {
+                    $missing.Add("Chrome not slimmed: extra locale $($extra[0].Name)")
+                }
+            }
+        }
     }
 
     if ($Office) {
         if (-not (Test-Path -LiteralPath (Join-Path $MountDir 'Program Files/Office2016/Office16/WINWORD.EXE'))) {
             $missing.Add('Program Files/Office2016/Office16/WINWORD.EXE')
+        }
+        # Slimming assertions (packaging round): Access and the vendor's
+        # install/uninstall scripts must be gone.
+        $officeDir = Join-Path $MountDir 'Program Files/Office2016'
+        if (Test-Path -LiteralPath (Join-Path $officeDir 'Office16/MSACCESS.EXE')) {
+            $missing.Add('Office not slimmed: MSACCESS.EXE present')
+        }
+        foreach ($vendorScript in '!)inst.cmd', '-)unist.cmd') {
+            if (Test-Path -LiteralPath (Join-Path $officeDir $vendorScript)) {
+                $missing.Add("Office not slimmed: vendor script $vendorScript present")
+            }
         }
     }
 

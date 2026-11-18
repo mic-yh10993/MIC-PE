@@ -4,7 +4,7 @@
 
 **Goal:** 在 GitHub Actions 免费 runner 上，从 UUP dump 的原版 Windows 11 25H2 镜像构建一个 ≤3 GB、带原生 Explorer 与 UWP、可一键装机的 `boot.wim`/ISO，命名为 MICPE。
 
-**Architecture:** 以 ISO 的 `sources\boot.wim`（索引 1）为基底，按四批白名单从 `install.wim` 提取文件，整体替换 `SOFTWARE` 注册表 hive，再注入预装软件、品牌、启动脚本与 PECMD 装机工具，最后用 `oscdimg` 封成双启 ISO 并按 2 GB 分卷发布。构建由单个 PowerShell 脚本 `Build-Micpe.ps1` 以 `-Stage m1..m7` 编排，每个阶段产物都可独立成 ISO 供人工验证。**启动索引必须在封 ISO 前显式设为 1**（`wimlib-imagex info --boot 1` 并读回断言）：UUP 原版介质的 `boot.wim` 默认启动索引是 2（Windows Setup），而全部定制与探针只在索引 1（Windows PE）里，不设则 winload 启动 Setup、探针永远跑不到（run 44062469206 诊断）。
+**Architecture:** 以 ISO 的 `sources\boot.wim`（索引 1）为基底，按四批白名单从 `install.wim` 提取文件，整体替换 `SOFTWARE` 注册表 hive，再注入预装软件、品牌、启动脚本与 PECMD 装机工具，最后用 `oscdimg` 封成双启 ISO。成品 ISO 仅含 `boot.wim`（不带 `install.wim`，用户自己放；装机工具按 `install.mic` 协议从别的卷发现），构建出成品后自动上传 Release（tag `micpe-<stage>-<build>-<yyyymmdd>-r<run_number>`）。构建由单个 PowerShell 脚本 `Build-Micpe.ps1` 以 `-Stage m1..m7` 编排，每个阶段产物都可独立成 ISO 供人工验证。**启动索引必须在封 ISO 前显式设为 1**（`wimlib-imagex info --boot 1` 并读回断言）：UUP 原版介质的 `boot.wim` 默认启动索引是 2（Windows Setup），而全部定制与探针只在索引 1（Windows PE）里，不设则 winload 启动 Setup、探针永远跑不到（run 44062469206 诊断）。
 
 **Tech Stack:** PowerShell 7（Pester 5 测试）、DISM、wimlib-imagex、oscdimg、7-Zip、UUP dump + uup-converter-wimlib、PECMD（WCS 脚本）、GitHub Actions（`windows-2025`）。
 
@@ -15,8 +15,8 @@
 - 目标仓库：`mic-yh10993/MIC-PE`，分支 `main`，公开，许可 GPL-3.0（仅覆盖本仓库自有代码，不含微软二进制与第三方工具）。
 - 源镜像：UUP dump，`Windows 11 25H2`，`amd64`，`zh-cn`，Pro 版；构建号由 workflow 输入 `build` 指定，默认 `26200`。
 - 体积硬约束：`boot.wim` ≤ 3 GB，目标 ≤ 2.6 GB；ISO ≤ 3.2 GB。超限时按 Office → Chrome → Photos → Media Player 顺序降级。
-- 单个 Release asset ≤ 2 GB，因此 ISO 用 `7z a -v2000m -mx=0` 分卷。
-- 仓库单文件 ≤ 100 MB，因此三个包**分别**发独立 Release 资产：`payload-v1`（预装软件，约 53 MB）、`chrome-v1`（Chrome 企业版 MSI，157 MB）、`office-v1`（Office 2016 绿色版 7z，162 MB）。三者互不依赖，可单独更新、单独下载。
+- 单个 Release asset ≤ 2 GB；成品 ISO 约 1–1.5 GB，直接作为 Release 资产上传，不分卷。
+- 仓库单文件 ≤ 100 MB，因此三个包直接提交在仓库 `app/` 文件夹里：`app/payload/micpe-payload.7z`（预装软件，28.5 MB，单文件）、`app/chrome/chrome-slim.7z.001/.002`（Chrome 精简版，拼回 125 MB）、`app/office/office2016-slim.7z.001/.002`（Office 精简版，拼回 167 MB）。Chrome 去语言包（只留 en-US、zh-CN）与 WidevineCdm，Office 去 Access 与厂商安装卸载脚本；构建时拼回、验 SHA256 再用。三者互不依赖，可单独更新。旧的三个独立 Release 资产（`payload-v1` / `chrome-v1` / `office-v1`）已于分卷版验证通过后删除，不再有第二条包来源。
 - 只 zh-CN；只 amd64；不做 ARM64。
 - 品牌固定值：`OEMInformation\Manufacturer` = `MICPE`，`Model` = `SYSTEM-Intel-MIC`，`SupportProvider` = `SYSTEM-Intel-MIC`，`SupportURL` = `https://space.bilibili.com/1978487514`，`Logo` = `%SystemRoot%\System32\oemlogo.bmp`；`CurrentVersion\RegisteredOwner` = `SYSTEM-Intel-MIC`，`RegisteredOrganization` = `MICPE`；计算机名 `MICPE-XXXX`。
 - 自有程序与配置只放 `X:\Program Files\MICPE\`（`PENetwork`、`MICPE-Setup`、`说明.txt`、`logs`）；其余预装软件平铺在 `X:\Program Files\`，其中 7-Zip 目录名必须是 `7-zip`（`GhostCGI\cgi.ini` 硬编码 `%ProgramFiles%\7-ZIP\7z.exe`）。
@@ -43,7 +43,6 @@
 |---|---|
 | `.github/workflows/build.yml` | 主构建：参数输入、缓存、调用 `Build-Micpe.ps1`、分卷发布 |
 | `.github/workflows/test.yml` | 每次 push/PR 跑 Pester 与语法检查 |
-| `.github/workflows/payload.yml` | 一次性发布 `payload-v1`/`chrome-v1`/`office-v1` 三个资产（也可手工 `gh release create`） |
 | `LICENSE` | GPL-3.0 全文 |
 | `README.md` | 用法、`install.mic` 协议、内存要求、许可与来源声明 |
 | `docs/design.md` | 设计文档副本（从 spec 拷入） |
@@ -1023,10 +1022,12 @@ Expected: `uwp_appx=1`、`uwp_launch_photos=1`、`uwp_launch_media=1`、`uwp_lau
 **Interfaces:**
 - Consumes: Task 2 断言
 - Produces:
-  - `Get-PayloadRelease([string] $Name)` — `Name` ∈ `payload|chrome|office`，返回对应的 tag：`payload-v1` / `chrome-v1` / `office-v1`
-  - `Get-PayloadAsset([string] $Name)` — 返回对应资产文件名：`micpe-payload.7z` / `chrome-enterprise-x64.msi` / `office2016-green.7z`
+  - `Get-AppPackageArchiveName([string] $Name)` — `Name` ∈ `payload|chrome|office`，返回拼回后的归档名：`micpe-payload.7z` / `chrome-slim.7z` / `office2016-slim.7z`
+  - `Get-AppPackageVolumePaths([string] $Name, [string] $RepoRoot)` — 返回该包在 `app/<包>/` 下的分卷完整路径（拼回顺序）
+  - `Join-AppPackageVolumes([string[]] $Volumes, [string] $OutFile)` — 按顺序字节拼接分卷
+  - `Get-AppPackageArchive([string] $Name, [string] $RepoRoot, [string] $StagingDir)` — 拼回（单文件包直接拷）并验 SHA256，mismatch 直接报错停下；重打归档必须同 commit 更新 pin，绝不静默放宽
   - `Expand-Payload([string] $Archive, [string] $Destination)` — 用 `7z x` 展开，断言展开后有 `ProgramFiles\7-zip\7z.exe` 与 `ProgramFiles\MICPE\PENetwork\PENetwork.exe`
-  - `Install-Payload([string] $MountDir, [string] $PayloadDir, [switch] $Chrome, [switch] $Office)` — 把 `$PayloadDir\ProgramFiles\*` 拷到 `$MountDir\Program Files\`；`-Chrome` 时额外解 MSI 到 `Program Files\Google\Chrome`；`-Office` 时解 `Office2016` 到 `Program Files\Office2016`
+  - `Install-Payload([string] $MountDir, [string] $PayloadDir, [switch] $Chrome, [switch] $Office)` — 把 `$PayloadDir\ProgramFiles\*` 拷到 `$MountDir\Program Files\`；`-Chrome` 时额外解 `chrome-slim.7z` 到 `Program Files\Google\Chrome\Application`；`-Office` 时解 `office2016-slim.7z` 到 `Program Files\Office2016`
   - `Assert-PayloadInstalled([string] $MountDir, [switch] $Chrome, [switch] $Office)` — 断言 `Program Files\7-zip\7z.exe`、`Program Files\MICPE\PENetwork\PENetwork.exe`、`Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs`、`Program Files\DiskGenius.exe`、`Program Files\WinNTSetup\unattend\Win10_x64.xml`
 
 - [ ] **Step 1: 写失败测试**
@@ -1047,19 +1048,19 @@ Describe 'Assert-PayloadInstalled' {
         $msg | Should -Match 'Win10_x64\.xml'
     }
 }
-Describe 'payload releases' {
-    It 'maps each package to its own release tag' {
-        Get-PayloadRelease -Name 'payload' | Should -Be 'payload-v1'
-        Get-PayloadRelease -Name 'chrome'  | Should -Be 'chrome-v1'
-        Get-PayloadRelease -Name 'office'  | Should -Be 'office-v1'
+Describe 'app packages' {
+    It 'maps each package to its joined-archive name' {
+        Get-AppPackageArchiveName -Name 'payload' | Should -Be 'micpe-payload.7z'
+        Get-AppPackageArchiveName -Name 'chrome'  | Should -Be 'chrome-slim.7z'
+        Get-AppPackageArchiveName -Name 'office'  | Should -Be 'office2016-slim.7z'
     }
-    It 'maps each package to its own asset name' {
-        Get-PayloadAsset -Name 'payload' | Should -Be 'micpe-payload.7z'
-        Get-PayloadAsset -Name 'chrome'  | Should -Be 'chrome-enterprise-x64.msi'
-        Get-PayloadAsset -Name 'office'  | Should -Be 'office2016-green.7z'
+    It 'maps each package to its committed volumes, in join order' {
+        (Get-AppPackageVolumePaths -Name 'chrome' -RepoRoot $RepoRoot |
+            ForEach-Object { Split-Path -Leaf $_ }) -join ',' |
+            Should -Be 'chrome-slim.7z.001,chrome-slim.7z.002'
     }
     It 'rejects an unknown package name' {
-        { Get-PayloadRelease -Name 'nope' } | Should -Throw
+        { Get-AppPackageArchiveName -Name 'nope' } | Should -Throw
     }
 }
 ```
@@ -1069,11 +1070,12 @@ Describe 'payload releases' {
 Run: `pwsh -NoProfile -File scripts/Invoke-Tests.ps1 -Path tests/Payload.Tests.ps1`
 Expected: FAIL — `Assert-PayloadInstalled` 未定义
 
-- [ ] **Step 3: 发布三个独立 Release 资产（一次性）**
+- [ ] **Step 3: 三个包分卷进仓库 `app/`（打包轮，一次性）**
 
 用本地恢复包里的材料打包（`/root/micpe-ref/` 在本机不存在，不要再引用它；
 材料在 `~/workspace/MIC-PE-recovery/MIC-PE.7z`，已解包到
-`~/workspace/micpe-m5-material/`），三个包各自一个 release、各自一份 sha256：
+`~/workspace/micpe-m5-material/`）。Chrome 与 Office 先精简、重打，
+再按 95 MB 分卷提交进仓库；payload 单文件直接提交：
 
 ```bash
 MATERIAL="$HOME/workspace/micpe-m5-material"
@@ -1083,34 +1085,25 @@ PECMD="$MATERIAL/dsi/DSI-安装备份-源码/make/PECMD.EXE"
 # 跳过——否则 payload 会悄悄缺 PECMD，镜像启动回退到 cmd 才被发现。
 test -f "$PECMD" || { echo "PECMD.EXE missing: $PECMD"; exit 1; }
 
-cd /tmp && rm -rf payload && mkdir -p payload/ProgramFiles
-cp -a "$MATERIAL/PE预装软件/直接塞入programfiles/." payload/ProgramFiles/
-cp "$PECMD" payload/ProgramFiles/MICPE/PECMD.EXE
-# 保持时间戳可复现：归档哈希与 Payload.ps1 里钉死的哈希一致的前提是文件
-# 时间戳不变；cp -a 已保留，PECMD.EXE 也要对齐原文件时间戳。
-touch -d "$(stat -c %y "$PECMD")" payload/ProgramFiles/MICPE/PECMD.EXE
-cd payload && 7z a -mx=5 ../micpe-payload.7z ProgramFiles >/dev/null
-cd /tmp && cp "$MATERIAL/PE预装软件/安装包/googlechromestandaloneenterprise64.msi" chrome-enterprise-x64.msi
-cp "$MATERIAL/PE预装软件/安装包/Office.7z" office2016-green.7z
-
-sha256sum micpe-payload.7z      > payload.sha256
-sha256sum chrome-enterprise-x64.msi > chrome.sha256
-sha256sum office2016-green.7z   > office.sha256
-
-gh release create payload-v1 --repo mic-yh10993/MIC-PE --title "MICPE payload v1 (预装软件)" \
-  --notes "第三方便携工具集，解压到 Program Files。CI 按此 release 名下载。PECMD.EXE 来源：DSI 附带（DSI-安装备份-源码/make/PECMD.EXE），SHA256 7a3710297473cbb865408d41db362e6014fd3eeaaf819751495e6d928e7adf5e；第三方免费软件，不入 git、不入 GPL 覆盖范围。" \
-  micpe-payload.7z payload.sha256
-
-gh release create chrome-v1 --repo mic-yh10993/MIC-PE --title "MICPE Chrome v1" \
-  --notes "Google Chrome 企业版 MSI，仅装进 MICPE 自身。CI 按此 release 名下载。" \
-  chrome-enterprise-x64.msi chrome.sha256
-
-gh release create office-v1 --repo mic-yh10993/MIC-PE --title "MICPE Office 2016 v1" \
-  --notes "Office 2016 绿色精简版（7z，解压 474 MB），仅装进 MICPE 自身。CI 按此 release 名下载。" \
-  office2016-green.7z office.sha256
+# payload：112 文件树 + DSI PECMD.EXE，用 New-PayloadArchive 打包
+# （两次连续构建哈希一致），直接提交到 app/payload/micpe-payload.7z。
+# Chrome：从 MSI 提取 → 删 Locales（只留 en-US、zh-CN 各 4 个 .pak）→
+# 删 WidevineCdm/ → 7z -mx=9 重打 chrome-slim.7z（顶层 Chrome-bin/）。
+# Office：解包 → 删 36 个 Access 相关文件 → 删厂商 !)inst.cmd / -)unist.cmd
+# → 7z -mx=9 重打 office2016-slim.7z（顶层 Office2016/，OSPP.VBS 保留）。
+# 分卷（单文件 < 100 MB 上限）：
+split -b 95M -d --numeric-suffixes=1 --suffix-length=3 chrome-slim.7z chrome-slim.7z.
+split -b 95M -d --numeric-suffixes=1 --suffix-length=3 office2016-slim.7z office2016-slim.7z.
+# 拼回验哈希（必须与 Payload.ps1 里的 pin 一致）再提交：
+cat chrome-slim.7z.001 chrome-slim.7z.002 | sha256sum
+cat office2016-slim.7z.001 office2016-slim.7z.002 | sha256sum
 ```
 
-三个 release 相互独立：CI 只在对应开关开启时才下载对应资产。`docs/payload.md` 记录每个包的来源、许可、更新方法与替换步骤。
+三个包相互独立：CI 只在对应开关开启时才拼回对应资产。`docs/payload.md`
+记录每个包的来源、精简清单、许可、更新方法与替换步骤。旧的三个独立
+Release 资产（`payload-v1` / `chrome-v1` / `office-v1`）已于分卷版验证
+通过后删除，不再有第二条包来源；以后构建出成品自动上传 Release（tag
+`micpe-<stage>-<build>-<yyyymmdd>-r<run_number>`，见 build.yml）。
 
 - [ ] **Step 4: 实现 `Payload.ps1` 并跑测试**
 

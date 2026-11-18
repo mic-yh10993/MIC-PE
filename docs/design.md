@@ -53,8 +53,8 @@ MICPE 是一张**装机维修盘**：从 U 盘/光盘启动，进一个能联网
 | 构建环境 | 仅 GitHub Actions 免费 Hosted runner，`windows-2025`（Server 2025，26100），单 job ≤360 分钟 |
 | 内存 | `boot.wim` 全量进 RAM 盘 → 目标机内存 ≥ 4 GB |
 | 体积 | `boot.wim` ≤ 3 GB（硬顶），目标 ≤2.6 GB |
-| 发布 | 单个 Release asset ≤ 2 GB → ISO 必须 7z 分卷 |
-| 仓库 | 单文件 ≤100 MB → 三个包分别独立 Release 资产：`payload-v1`（预装软件 53 MB）、`chrome-v1`（Chrome MSI 157 MB）、`office-v1`（Office 2016 绿色版 162 MB） |
+| 发布 | 单个 Release asset ≤ 2 GB；成品 ISO 约 1–1.5 GB，直接作为 Release 资产上传，不分卷；构建出成品后自动上传 Release（tag `micpe-<stage>-<build>-<yyyymmdd>-r<run_number>`） |
+| 仓库 | 单文件 ≤100 MB → 三个包直接提交在 `app/`：`app/payload/micpe-payload.7z`（28.5 MB）、`app/chrome/chrome-slim.7z.001/.002`（拼回 125 MB）、`app/office/office2016-slim.7z.001/.002`（拼回 167 MB） |
 | 许可 | 本仓库 GPL-3.0；微软系统文件、PENetwork、PECMD、DiskGenius 等不入 git |
 | 语言 | 只 zh-CN（含微软拼音） |
 | 作者信息 | 作者 SYSTEM-Intel-MIC；OEM 型号 SYSTEM-Intel-MIC；SupportURL = https://space.bilibili.com/1978487514 |
@@ -105,8 +105,8 @@ workflow: .github/workflows/build.yml
    9. 注入品牌资产（壁纸、oemlogo.bmp、注册表 OEMInformation/winver）
   10. 注入启动脚本（startnet.cmd → PECMD.INI → 装机工具探测）
   11. 提交并导出 boot.wim（LZX 压缩），体积断言 ≤3 GB
-  12. oscdimg 生成 ISO（UDF，BIOS+UEFI 双启）
-  13. 7z 分卷 → Release
+  12. oscdimg 生成 ISO（UDF，BIOS+UEFI 双启；仅含 boot.wim，不带 install.wim）
+  13. 构建成品自动上传 Release（tag `micpe-<stage>-<build>-<yyyymmdd>-r<run_number>`）
 ```
 
 **为什么不用 ADK**：只需要 `oscdimg.exe`。`copype`/`MakeWinPEMedia` 全部不用。ADK 安装 2 GB、耗时 5–8 分钟，也走缓存避免重复。
@@ -118,7 +118,6 @@ workflow: .github/workflows/build.yml
 ```
 MIC-PE/
 ├── .github/workflows/build.yml      # 主构建
-├── .github/workflows/payload.yml    # 一次性：把大二进制打成 Release 资产
 ├── LICENSE                          # GPL-3.0
 ├── README.md
 ├── docs/
@@ -165,12 +164,12 @@ MIC-PE/
 | Photos + MediaPlayer + 依赖框架 | +300 MB | VCLibs/.NET Native/WinUI |
 | 微软拼音输入法 | +130 MB | |
 | 预装软件（53 MB → 解压约 120 MB） | +70 MB | |
-| Chrome（安装后） | +280 MB | 走 Release 资产 |
-| Office 2016 绿色版 | +330 MB | 走 Release 资产，可选开关 |
+| Chrome（精简后） | +130 MB | 分卷进 `app/chrome/`，可选开关 |
+| Office 2016 精简版 | +170 MB | 分卷进 `app/office/`，可选开关 |
 | 启动脚本/品牌/杂项 | +20 MB | |
 | **合计** | **≈ 2.28 GB** | 余量 320 MB |
 
-超限时的降级顺序（按此顺序砍，不需要重新讨论）：Office → Chrome → Photos → Media Player。每砍一项都要在 Release 说明里写明。
+超限时的降级顺序（按此顺序砍，不需要重新讨论）：Office → Chrome → Photos → Media Player。每砍一项都要在构建汇报里写明。
 
 ### 5.4 装机工具（MICPE-Setup）
 
@@ -356,7 +355,7 @@ Chrome（MSI，安装到 `X:\Program Files\Google\Chrome`）与 Office 2016 绿�
 | UUP 构建脚本 | `/tmp/winbuild/scripts/Get-UupIso.ps1`（2712 行）+ 其 workflow | **可直接裁剪复用**。只保留 UUP 下载 → 转换 → 取 install.wim/boot.wim 的部分，去掉 unattend/Office/MAS/debloat。 |
 | 预装软件树 | `/root/micpe-ref/PE预装软件/直接塞入programfiles/` | **纯绿色、无需安装**：9 目录 + 6 单文件，全部 PE32/PE32+ 独立 exe，`ls` 无 setup/install/vc_redist。唯一例外是 `GhostCGI/cgi.ini` 调用 `%ProgramFiles%\7-ZIP\7z.exe`（注意它写的是 `7-ZIP` 大写），所以 **7-zip 必须落在 `Program Files\7-zip`**。`WinNTSetup/unattend/` 自带无人值守模板，可复用。 |
 | 品牌资产 | `/root/micpe-ref/品牌化/` | `logo.bmp` 120×120×24bpp（直接符合 OEM logo 要求）、`wallpaper.jpg` 1920×1080。 |
-| 大件安装包 | `/root/micpe-ref/PE预装软件/安装包/` | `googlechromestandaloneenterprise64.msi` 157 MB（仅此一个需要安装）、`Office.7z` 162 MB（解压 474 MB 的 Office2016 绿色版）。两者**都超 GitHub 单文件 100 MB 上限**，各自独立发 Release 资产（`chrome-v1` / `office-v1`），与预装软件包 `payload-v1` 分开，可单独更新。 |
+| 大件安装包 | `/root/micpe-ref/PE预装软件/安装包/` | `googlechromestandaloneenterprise64.msi` 157 MB（仅此一个需要安装）、`Office.7z` 162 MB（解压 474 MB 的 Office2016 绿色版）。两者**都超 GitHub 单文件 100 MB 上限**，打包轮改走精简后分卷进仓库 `app/`（Chrome 去语言包与 WidevineCdm，Office 去 Access 与厂商脚本），构建时拼回、验哈希；旧的独立 Release 资产（`chrome-v1` / `office-v1` / `payload-v1`）已删。 |
 
 结论：白名单不用反向工程，M2–M4 的工期可估；DSI 逻辑可复用，M6 工期可估；预装软件是纯拷贝，M5 无需安装步骤（Chrome 除外）。
 

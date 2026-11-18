@@ -14,6 +14,14 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
         # each section took.
         $script:markers = @(
             @{ Mark = 'mark_shell_ready'; Work = 'tasklist /fi "imagename eq explorer.exe"' }
+            # Settle markers (run 44249181100): runs 31/32 stopped between
+            # mark_shell_ready and shell_ready. ping_after doubles as the
+            # "before" of the second tasklist (its line is identical to the
+            # first, so no work string can pin it); both after-markers pair
+            # with the shell_ready echo, the first work line after them.
+            @{ Mark = 'mark_shell_ping_before'; Work = 'ping -n 16 127.0.0.1' }
+            @{ Mark = 'mark_shell_ping_after'; Work = 'echo shell_ready=' }
+            @{ Mark = 'mark_shell_check_after'; Work = 'echo shell_ready=' }
             @{ Mark = 'mark_network'; Work = 'set "IPV4="' }
             @{ Mark = 'mark_ime'; Work = 'reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload"' }
             @{ Mark = 'mark_uwp_appx'; Work = 'AppXDeploymentClient.dll' }

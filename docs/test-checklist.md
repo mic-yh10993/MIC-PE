@@ -11,9 +11,9 @@ CI 能判的项由 CI 判；只有“真机确认”一节必须人来做。**QE
 | m2 | + `explorer=1`、`shell_ready=1`、`dwm=1` | 待 M7 补测（stage m4 full 覆盖） |
 | m3 | + `network=*`、`ime=1` | 待 M7 补测（stage m4 full 覆盖） |
 | m4 | + `uwp_appx=1`、`uwp_launch_photos=1`、`uwp_launch_media=1`、`uwp_launch_calculator=1` | 待 M7 补测（stage m4 full） |
-| m5 | + `payload=1`、`brand=1` | **被挡住**：payload-v1 / chrome-v1 / office-v1 三个 Release 不存在，等用户拍板 |
-| m6 | + `installer_scan=1`、`installer_deploy=1` | **被挡住**：同上；另需 4 盘 harness（M7 已接线，未跑过） |
-| m7 | m6 全套 + `size_wim=*`、`size_iso=*` | **被挡住**：同上 |
+| m5 | + `payload=1`、`brand=1` | 待验证：打包轮已改走 `app/` 分卷，下一轮 Build 首次消费 |
+| m6 | + `installer_scan=1`、`installer_deploy=1` | 待验证：同上；另需 4 盘 harness（M7 已接线，未跑过） |
+| m7 | m6 全套 + `size_wim=*`、`size_iso=*` | 待验证：同上 |
 
 两个固定回归（plan Task 18 Step 6，CI 里做）：
 
