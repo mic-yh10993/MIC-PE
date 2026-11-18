@@ -71,6 +71,14 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'oscdimg not found after installing windows-adk'
     }
 
+    It 'fails fast when wimlib-imagex is missing after the wimlib install' {
+        $script:buildYml | Should -Match 'wimlib-imagex not found on PATH after installing wimlib'
+    }
+
+    It 'fails fast when 7z is missing after the 7zip install' {
+        $script:buildYml | Should -Match '7z not found on PATH after installing 7zip'
+    }
+
     It 'passes the resolved oscdimg path to the ISO step' {
         $script:buildScript | Should -Match 'Get-OscdimgPath'
         $script:buildScript | Should -Match '-OscdimgPath \(Get-OscdimgPath\)'

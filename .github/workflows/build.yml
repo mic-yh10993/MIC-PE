@@ -66,15 +66,27 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # wimlib and 7-Zip are the only extractors the build needs.
+          # wimlib and 7-Zip are the only extractors the build needs. Both
+          # are called by bare name later (Build-Micpe.ps1 calls `7z`,
+          # Wim.ps1 calls `wimlib-imagex`), so verify each one resolves
+          # right after the install attempt and fail here instead of
+          # 15 minutes later at first use. choco refreshes the machine
+          # PATH on install, so re-read it before verifying.
           $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
           if (-not (Test-Path $sevenZip)) {
             choco install 7zip -y --no-progress
           }
-          $sevenZip | Out-Null
+          $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            throw '7z not found on PATH after installing 7zip; the build cannot extract the ISO media'
+          }
 
           if (-not (Get-Command wimlib-imagex -ErrorAction SilentlyContinue)) {
             choco install wimlib -y --no-progress
+          }
+          $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+          if (-not (Get-Command wimlib-imagex -ErrorAction SilentlyContinue)) {
+            throw 'wimlib-imagex not found on PATH after installing wimlib; the build cannot extract files'
           }
 
           # oscdimg ships in the ADK. Installing the full ADK is slow, but the
