@@ -308,6 +308,52 @@ Describe 'probe watchdog mechanism (run 44285721257)' {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    It 'W7: exits within one tick when probe_done appears mid-wait (run 44410311576)' -Skip:(-not $IsWindows) {
+        # Run 41: the heartbeat stopped at tick 3/12 although probe_done
+        # was already written and the stop flag was already set — the
+        # loop-top checks never ran because the tick loop runs the whole
+        # 60-second cycle first, and the guest's own shutdown killed the
+        # watcher mid-cycle. With the check inside the tick loop,
+        # probe_done mid-wait must end the watcher within one tick
+        # (~5 s), not at the end of the 60-second cycle.
+        $workDir = & $script:NewWorkDir
+        $probeFile = Join-Path $workDir 'micpe-probe.txt'
+        $heartbeatFile = Join-Path $workDir 'micpe-watchdog-heartbeat.txt'
+        try {
+            Set-Content -LiteralPath $probeFile -Value @('boot=1', 'share=1') -Encoding ascii
+            $wrapper = Join-Path $workDir 'run-watchdog.bat'
+            & $script:WriteBatchCrlf $wrapper @(
+                '@echo off',
+                ('set "SystemDrive={0}"' -f $WorkDir),
+                ('call "{0}" "{1}" 5 60' -f $script:WatchdogPath, $probeFile),
+                'exit /b %errorlevel%'
+            )
+            $oldPath = $env:PATH
+            $proc = $null
+            $exited = $false
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                $env:PATH = $workDir
+                $proc = Start-Process -FilePath $script:CmdExe -ArgumentList '/c', $wrapper -PassThru -NoNewWindow
+                Start-Sleep -Seconds 3
+                Add-Content -LiteralPath $probeFile -Value 'probe_done=1' -Encoding ascii
+                $exited = $proc.WaitForExit(20000)
+                if (-not $exited) { try { $proc.Kill($true) } catch { }; $proc.WaitForExit(10000) }
+            }
+            finally { $env:PATH = $oldPath }
+            $sw.Stop()
+            Write-Host "exited: $exited; exit code: $($proc.ExitCode); elapsed seconds: $($sw.Elapsed.TotalSeconds)"
+            $exited | Should -Be $true -Because 'probe_done mid-wait must end the watcher within one tick, not at the end of the 60-second cycle'
+            $sw.Elapsed.TotalSeconds | Should -BeLessThan 20 -Because 'without the in-tick check the watcher would run the full 60-second cycle'
+            $proc.ExitCode | Should -Be 0
+            (Get-Content -LiteralPath $heartbeatFile -Raw -ErrorAction SilentlyContinue) | Should -Match 'probe_done_seen=1' -Because 'the clean exit is marked, so a heartbeat that just stops is still a death'
+            (Get-Content -LiteralPath $probeFile -Raw) | Should -Not -Match 'probe_failed'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'probe watchdog (static)' {
@@ -429,5 +475,33 @@ Describe 'probe watchdog (static)' {
         $probe = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $mutated = $probe.Replace('probe-watchdog.cmd', 'probe-watchdog-missing.cmd')
         $mutated | Should -Not -Match 'probe-watchdog\.cmd'
+    }
+
+    It 'the tick loop checks the stop conditions before every tick (run 44410311576)' {
+        # Run 41: the heartbeat stopped at tick 3/12 although probe_done
+        # was already written and the stop flag was already set — the
+        # loop-top checks never ran because the tick loop runs the whole
+        # 60-second cycle first, and the guest's own shutdown killed the
+        # watcher mid-cycle. The check must live inside :watchdog_wait_tick,
+        # before the choice wait, and the clean exit is marked.
+        $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
+        $wd | Should -Match 'probe_done_seen=1' -Because 'the clean exit is marked, so a heartbeat that just stops is still a death'
+        $wd | Should -Match 'stop_seen=1' -Because 'a stop-flag exit is marked too'
+        $wdLines = Get-Content -LiteralPath $script:WatchdogPath -Encoding utf8
+        $tickLabelLine = ($wdLines | Select-String -Pattern '^:watchdog_wait_tick' | Select-Object -First 1).LineNumber
+        # The same checks also exist at the loop top, and a third
+        # probe_done check lives in :watchdog_fail; the tick-loop copies
+        # are the ones after the tick label and before the tick wait.
+        $doneCheckLine = ($wdLines | Select-String -Pattern 'findstr /b /c:"probe_done=1" "%WD_FILE%"' | Where-Object { $_.LineNumber -gt $tickLabelLine } | Select-Object -First 1).LineNumber
+        $stopCheckLine = ($wdLines | Select-String -Pattern 'if exist "%WD_STOP%"' | Where-Object { $_.LineNumber -gt $tickLabelLine } | Select-Object -First 1).LineNumber
+        $choiceLine = ($wdLines | Select-String -Pattern 'choice /c Y /d Y /t %WD_TICKLEN%' | Select-Object -First 1).LineNumber
+        $tickLabelLine | Should -Not -BeNullOrEmpty
+        $doneCheckLine | Should -Not -BeNullOrEmpty -Because 'the probe_done check must exist inside the tick loop'
+        $stopCheckLine | Should -Not -BeNullOrEmpty -Because 'the stop-flag check must exist inside the tick loop'
+        $choiceLine | Should -Not -BeNullOrEmpty
+        $doneCheckLine | Should -BeGreaterThan $tickLabelLine -Because 'the check is inside the tick loop'
+        $stopCheckLine | Should -BeGreaterThan $tickLabelLine -Because 'the check is inside the tick loop'
+        $doneCheckLine | Should -BeLessThan $choiceLine -Because 'the check runs before the tick wait'
+        $stopCheckLine | Should -BeLessThan $choiceLine -Because 'the check runs before the tick wait'
     }
 }

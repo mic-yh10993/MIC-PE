@@ -580,6 +580,55 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text.IndexOf('folder_window_test=1') | Should -BeLessThan $text.IndexOf('mark_uwp_appx') -Because 'the test runs in the diagnostics section, before the launches'
     }
 
+    It 'the launch guard records whether explorer was alive and which PID it was (run 44410311576)' {
+        # Run 41: explorer was Not Responding in the first two snapshots
+        # and gone by the end snapshot — it hung and then died inside the
+        # run (alive at the Photos guard 22:50:16, gone at the Media
+        # guard 22:50:46). The guard key says which launch found it
+        # missing, and the PID says whether a later launch sees the same
+        # process or a restarted one. ctfmon/ChsIME/WmiPrvSE were already
+        # in the FIRST snapshot in run 41, so their late appearance is
+        # not evidence about the death.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'echo explorer_guard=0 >> "%PROBE_LOCAL%"' -Because 'a launch that finds explorer missing is recorded'
+        $text | Should -Match 'echo explorer_guard=1 >> "%PROBE_LOCAL%"' -Because 'a launch that finds it alive is recorded too'
+        $text | Should -Match 'explorer_pid=%EXPLORER_PID%' -Because 'the PID is recorded for each launch'
+        $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $guardLine = ($probeLines | Select-String -Pattern 'explorer_guard=1' | Where-Object { $_.Line -match '^echo ' } | Select-Object -First 1).LineNumber
+        # The subroutine's start takes the target from %UWP_TARGET%; the
+        # folder-window test's start takes "%SystemDrive%\" and is a
+        # different line, before the subroutine.
+        $startLine = ($probeLines | Select-String -Pattern 'start "" explorer\.exe "%UWP_TARGET%"' | Select-Object -First 1).LineNumber
+        $guardLine | Should -Not -BeNullOrEmpty
+        $startLine | Should -Not -BeNullOrEmpty
+        $guardLine | Should -BeLessThan $startLine -Because 'the guard must run before the launch it guards'
+        # The guard lives in :probe_uwp: the first start after the
+        # subroutine label is the one it guards, and the static test
+        # above already pins the label-to-first-start order.
+        $text | Should -Match 'explorer_after_calculator=1 >> "%PROBE_LOCAL%"' -Because 'the caller checks survival after each launch'
+        $text | Should -Match 'explorer_after_photos=0 >> "%PROBE_LOCAL%"'
+        $text | Should -Match 'explorer_after_media=1 >> "%PROBE_LOCAL%"'
+        # The after-checks sit between the launches, splitting the death
+        # window to a single launch instead of one launch later.
+        $text.IndexOf('explorer_after_calculator=') | Should -BeLessThan $text.IndexOf('mark_uwp_launch_photos') -Because 'the Calculator after-check runs before the Photos launch'
+        $text.IndexOf('explorer_after_photos=') | Should -BeLessThan $text.IndexOf('mark_uwp_launch_media') -Because 'the Photos after-check runs before the Media launch'
+        $text.IndexOf('explorer_after_media=') | Should -BeLessThan $text.IndexOf('mark_payload') -Because 'the Media after-check runs before the payload section'
+    }
+
+    It 'the end snapshot records WerFault and dwm presence (run 44410311576)' {
+        # Run 41: explorer died inside the run with no crash handler in
+        # any snapshot. The end keys say whether a crash was ever
+        # reported (WerFault) and whether the compositor outlived the
+        # shell (dwm). Absence of WerFault in all three snapshots is
+        # itself evidence: a silent exit, not a reported crash.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'echo werfault_end=0 >> "%PROBE_LOCAL%"' -Because 'the no-crash case is recorded'
+        $text | Should -Match 'echo werfault_end=1 >> "%PROBE_OUT%"' -Because 'a reported crash is recorded too'
+        $text | Should -Match 'echo dwm_end=1 >> "%PROBE_LOCAL%"' -Because 'the compositor outliving the shell is recorded'
+        $text.IndexOf('werfault_end=') | Should -BeGreaterThan $text.IndexOf('--- tasklist at probe end ---') -Because 'the end keys run after the end snapshot'
+        $text.IndexOf('dwm_end=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the end keys run before probe_done'
+    }
+
     It 'reverse control: without the frame-host check the diagnostics test fails' {
         # The presence assertion above must actually depend on the probe
         # checking for the frame host, not pass vacuously.

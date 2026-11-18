@@ -63,6 +63,21 @@ set "PROBE_LOCAL=%SystemDrive%\micpe-probe-local.txt"
 if defined PROBE_DIR >> "%PROBE_LOCAL%" echo share_drive=%PROBE_DIR%
 if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
+rem Serial channel test (run 44410311576): probe-sync.cmd wrote zero sync
+rem lines in run 41 although it lived until the stop flag (the detached
+rem cmd 1724 only disappears from the end snapshot, after the flag was
+rem written), so the channel itself is the suspect, not the sync process.
+rem This line is the decisive test: if it lands in micpe-serial.log the
+rem channel works. The com1 key records whether cmd.exe could open COM1
+rem at all; serial_sys / serialcomm say whether the driver and the port
+rem enumeration exist. A com1=0 here convicts the channel: the local
+rem mirror then needs a different retrieval path than the serial log.
+echo sync_test=%TIME: =0% > COM1 2>nul
+if errorlevel 1 (echo com1=0 >> "%PROBE_LOCAL%" & echo com1=0 >> "%PROBE_OUT%") else (echo com1=1 >> "%PROBE_LOCAL%" & echo com1=1 >> "%PROBE_OUT%")
+if exist "%SystemRoot%\System32\drivers\serial.sys" (echo serial_sys=1 >> "%PROBE_LOCAL%" & echo serial_sys=1 >> "%PROBE_OUT%") else (echo serial_sys=0 >> "%PROBE_LOCAL%" & echo serial_sys=0 >> "%PROBE_OUT%")
+reg query "HKLM\HARDWARE\DEVICEMAP\SERIALCOMM" 2>nul | find /i "\Device\Serial0" >nul
+if errorlevel 1 (echo serialcomm=0 >> "%PROBE_LOCAL%" & echo serialcomm=0 >> "%PROBE_OUT%") else (echo serialcomm=1 >> "%PROBE_LOCAL%" & echo serialcomm=1 >> "%PROBE_OUT%")
+
 rem Watchdog (run 44285721257): if this probe stalls or dies mid-run, no
 rem probe_done line is ever written and the CI host waits out the full
 rem 45 minutes. A detached watcher notices the probe file going quiet
@@ -314,14 +329,25 @@ setlocal DisableDelayedExpansion
 echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
+rem Run 44410311576: explorer died inside the run, so the launch after
+rem each poll says whether it was still alive then. The guard of the
+rem NEXT launch only says so one launch later; this check splits the
+rem death window to a single launch (in run 41: alive at the Photos
+rem guard 22:50:16, gone at the Media guard 22:50:46).
+tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo explorer_after_calculator=0 >> "%PROBE_LOCAL%" & echo explorer_after_calculator=0 >> "%PROBE_OUT%") else (echo explorer_after_calculator=1 >> "%PROBE_LOCAL%" & echo explorer_after_calculator=1 >> "%PROBE_OUT%")
 
 echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")
+tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo explorer_after_photos=0 >> "%PROBE_LOCAL%" & echo explorer_after_photos=0 >> "%PROBE_OUT%") else (echo explorer_after_photos=1 >> "%PROBE_LOCAL%" & echo explorer_after_photos=1 >> "%PROBE_OUT%")
 
 echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
 if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
+tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo explorer_after_media=0 >> "%PROBE_LOCAL%" & echo explorer_after_media=0 >> "%PROBE_OUT%") else (echo explorer_after_media=1 >> "%PROBE_LOCAL%" & echo explorer_after_media=1 >> "%PROBE_OUT%")
 endlocal
 
 rem --- payload ---------------------------------------------------------------
@@ -410,6 +436,15 @@ echo --- tasklist at probe end --- >> "%TASKLIST_OUT%"
 tasklist /v >> "%TASKLIST_OUT%" 2>nul
 echo --- tasklist /m explorer.exe at probe end --- >> "%TASKLIST_OUT%"
 tasklist /m /fi "imagename eq explorer.exe" >> "%TASKLIST_OUT%" 2>nul
+rem Run 44410311576: explorer hung and then died inside the run with no
+rem crash handler in any snapshot, so the end keys say whether a crash
+rem was ever reported (WerFault) and whether the compositor outlived
+rem the shell (dwm). Absence of WerFault in all three snapshots is
+rem itself evidence: a silent exit, not a reported crash.
+tasklist /fi "imagename eq WerFault.exe" /nh 2>nul | find /i "WerFault.exe" >nul
+if errorlevel 1 (echo werfault_end=0 >> "%PROBE_LOCAL%" & echo werfault_end=0 >> "%PROBE_OUT%") else (echo werfault_end=1 >> "%PROBE_LOCAL%" & echo werfault_end=1 >> "%PROBE_OUT%")
+tasklist /fi "imagename eq dwm.exe" /nh 2>nul | find /i "dwm.exe" >nul
+if errorlevel 1 (echo dwm_end=0 >> "%PROBE_LOCAL%" & echo dwm_end=0 >> "%PROBE_OUT%") else (echo dwm_end=1 >> "%PROBE_LOCAL%" & echo dwm_end=1 >> "%PROBE_OUT%")
 
 echo probe_done=1 >> "%PROBE_LOCAL%" & echo probe_done=1 >> "%PROBE_OUT%"
 
@@ -446,7 +481,23 @@ rem witness. Marker values are %TIME% like the section markers; the
 rem preceding mark_uwp_launch_<app> line says which app was in flight.
 echo mark_uwp_enter=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_enter=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    echo explorer_guard=0 >> "%PROBE_LOCAL%" & echo explorer_guard=0 >> "%PROBE_OUT%"
+    exit /b 1
+)
+rem Run 44410311576: explorer was Not Responding in the first two
+rem snapshots and gone by the end snapshot, so it hung and then died
+rem inside the run (death window 22:50:16-22:50:46 in run 41: alive at
+rem the Photos guard, gone at the Media guard). The guard key says
+rem which launch found it missing, and the PID says whether a later
+rem launch sees the same process or a restarted one. ctfmon/ChsIME/
+rem WmiPrvSE were already in the FIRST snapshot in run 41 (eval card
+rem §27.5 said "first in the end snapshot" — wrong), so their late
+rem appearance is not evidence about the death.
+echo explorer_guard=1 >> "%PROBE_LOCAL%" & echo explorer_guard=1 >> "%PROBE_OUT%"
+set "EXPLORER_PID="
+for /f "tokens=2" %%P in ('tasklist /fi "imagename eq explorer.exe" /nh 2^>nul ^| find /i "explorer.exe"') do set "EXPLORER_PID=%%P"
+if defined EXPLORER_PID (echo explorer_pid=%EXPLORER_PID% >> "%PROBE_LOCAL%" & echo explorer_pid=%EXPLORER_PID% >> "%PROBE_OUT%") else (echo explorer_pid=missing >> "%PROBE_LOCAL%" & echo explorer_pid=missing >> "%PROBE_OUT%")
 
 set "UWP_PROC=%~1"
 set "UWP_TARGET=%~2"

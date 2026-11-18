@@ -41,6 +41,15 @@ rem heartbeat says which tick it died in, and the tick loop is the
 rem same total wait (60 seconds by default). Small values used by the
 rem mechanism tests (WD_WAIT=2) stay a single tick of the same length,
 rem so the total wait is unchanged there.
+rem Run 44410311576: the heartbeat stopped at tick 3/12 in run 41
+rem although probe_done was already written and the stop flag was
+rem already set — the loop-top checks never ran because the tick loop
+rem runs the whole 60-second cycle first, and the guest's own
+rem shutdown /s /t 5 killed the watcher mid-cycle. The tick loop now
+rem checks both stop conditions before every tick (like
+rem probe-sync.cmd does), and writes a probe_done_seen=1 / stop_seen=1
+rem marker when it exits that way, so a heartbeat that just stops is
+rem still a death, not a clean exit.
 rem
 rem Usage: probe-watchdog.cmd <probe-file> [stall-limit] [wait-seconds]
 rem Defaults: 5 quiet checks of 60 seconds each. The two optional
@@ -80,6 +89,24 @@ if %WD_TICKS% lss 1 set "WD_TICKS=1"
 set /a WD_TICKLEN=%WD_WAIT% / %WD_TICKS%
 set "WD_TICK=0"
 :watchdog_wait_tick
+rem Run 44410311576: the heartbeat stopped at tick 3/12 in run 41
+rem although probe_done was already written and the stop flag was
+rem already set — the loop-top checks never ran because the tick loop
+rem runs the whole 60-second cycle first, and the guest's own
+rem shutdown /s /t 5 killed the watcher mid-cycle. Check both stop
+rem conditions before every tick, like probe-sync.cmd does, so the
+rem watcher exits cleanly within one tick of the probe finishing
+rem instead of being killed by shutdown. The marker line says the
+rem exit was clean, so a heartbeat that just stops is still a death.
+findstr /b /c:"probe_done=1" "%WD_FILE%" >nul 2>&1
+if not errorlevel 1 (
+    echo %TIME: =0% probe_done_seen=1 >> "%WD_HEARTBEAT%"
+    exit /b 0
+)
+if exist "%WD_STOP%" (
+    echo %TIME: =0% stop_seen=1 >> "%WD_HEARTBEAT%"
+    exit /b 0
+)
 choice /c Y /d Y /t %WD_TICKLEN% >nul
 set /a WD_TICK+=1
 echo %TIME: =0% phase=wait_tick tick=%WD_TICK%/%WD_TICKS% >> "%WD_HEARTBEAT%"

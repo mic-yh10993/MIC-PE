@@ -198,6 +198,40 @@ Describe 'probe sync mechanism (run 44386689307)' {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    It 'S4: the COM1 open test distinguishes a writable device from a missing one (run 44410311576)' -Skip:(-not $IsWindows) {
+        # Run 41: probe-sync.cmd wrote zero sync lines although it lived
+        # until the stop flag, so the channel itself is the suspect.
+        # probe.cmd tests it with `echo sync_test > COM1` and records
+        # com1=1/0 from the redirect's errorlevel. This test proves the
+        # errorlevel logic on real cmd.exe: a redirect to an existing
+        # device succeeds, a redirect to a device that does not exist
+        # fails.
+        $workDir = & $script:NewWorkDir
+        $outFile = Join-Path $workDir 'com1-test.txt'
+        $deviceFile = Join-Path $workDir 'serial-device.log'
+        $bat = Join-Path $workDir 'com1-test.bat'
+        try {
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                ('echo sync_test > "{0}" 2>nul' -f $deviceFile),
+                ('if errorlevel 1 (echo com1=0 >> "{0}") else (echo com1=1 >> "{0}")' -f $outFile),
+                'echo sync_test > COM99 2>nul',
+                ('if errorlevel 1 (echo com1_missing=0 >> "{0}") else (echo com1_missing=1 >> "{0}")' -f $outFile)
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "com1 test: [$text]"
+            $text | Should -Match 'com1=1' -Because 'a redirect to an existing device succeeds'
+            $text | Should -Match 'com1_missing=0' -Because 'a redirect to a device that does not exist fails'
+            (Get-Content -LiteralPath $deviceFile -Raw) | Should -Match 'sync_test' -Because 'the successful write lands in the device file'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'probe local mirror (static)' {
@@ -231,6 +265,23 @@ Describe 'probe local mirror (static)' {
         $text | Should -Match 'probe-sync\.cmd "%PROBE_LOCAL%"'
         $text.IndexOf('probe-watchdog.cmd "%PROBE_OUT%"') | Should -BeLessThan $text.IndexOf('probe-sync.cmd "%PROBE_LOCAL%"')
         $text.IndexOf('probe-sync.cmd "%PROBE_LOCAL%"') | Should -BeLessThan $text.IndexOf('--- pecmd markers')
+    }
+
+    It 'probe.cmd tests the serial channel with a sync_test write to COM1 (run 44410311576)' {
+        # Run 41: probe-sync.cmd wrote zero sync lines although it lived
+        # until the stop flag, so the channel itself is the suspect.
+        # The write is the decisive test: it lands in micpe-serial.log
+        # iff the channel works. The com1 key records whether cmd.exe
+        # could open COM1 at all; serial_sys / serialcomm say whether
+        # the driver and the port enumeration exist.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'echo sync_test=%TIME: =0% > COM1 2>nul' -Because 'the write itself is the decisive test'
+        $text.IndexOf('echo sync_test=') | Should -BeLessThan $text.IndexOf('probe-watchdog.cmd') -Because 'the test must run even if the probe dies later'
+        $text | Should -Match 'echo com1=0 >> "%PROBE_LOCAL%"' -Because 'both branches of the open test record the result'
+        $text | Should -Match 'echo com1=1 >> "%PROBE_OUT%"'
+        $text | Should -Match 'serial\.sys' -Because 'a missing driver is the first suspect when COM1 cannot be opened'
+        $text | Should -Match 'SERIALCOMM' -Because 'the enumeration is read from the SERIALCOMM device map'
+        $text | Should -Match 'echo serialcomm=0 >> "%PROBE_LOCAL%"'
     }
 
     It 'probe-sync.cmd echoes the local file last line to the serial device' {
