@@ -54,6 +54,21 @@ Describe 'Assert-ProbeResult' {
         ($bad -join "`n") | Should -Match "a: expected '1', got '2'"
         ($bad -join "`n") | Should -Match "b: missing"
     }
+
+    It 'fails the run when probe_failed=1 even if every expected key matches' {
+        # Run 44285721257: the watchdog writes probe_failed=1 when the
+        # probe stalls or dies mid-run. It ends the host wait early, but
+        # it never passes a run.
+        $probe = @{ explorer = '1'; ime = '1'; probe_failed = '1' }
+        $bad = Assert-ProbeResult -Probe $probe -Expected @{ explorer = '1'; ime = '1' }
+        $bad.Count | Should -Be 1
+        ($bad -join "`n") | Should -Match 'probe_failed'
+    }
+
+    It 'ignores probe_failed=0' {
+        $probe = @{ explorer = '1'; probe_failed = '0' }
+        (Assert-ProbeResult -Probe $probe -Expected @{ explorer = '1' }).Count | Should -Be 0
+    }
 }
 
 Describe 'Get-StageProbeExpect' {

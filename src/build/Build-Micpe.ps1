@@ -213,19 +213,24 @@ function Invoke-ReseedStep {
     Copy-Item -LiteralPath $baseBoot -Destination $mediaBoot -Force
 
     # Inject the MICPE boot files so the image can self-check: the repo's
-    # startnet.cmd (which calls probe.cmd when present) and probe.cmd itself.
+    # startnet.cmd (which calls probe.cmd when present), probe.cmd itself,
+    # and probe-watchdog.cmd, the detached watcher that fails a stalled
+    # probe early (run 44285721257).
     # Mounted with DISM and committed; a failure here discards the mount so
     # a half-injected image never ships.
     Write-Step 'injecting MICPE boot files into boot.wim'
     $startnet = Join-Path $repoRoot 'src\shell\startnet.cmd'
     $probe = Join-Path $repoRoot 'src\ci\probe.cmd'
+    $watchdog = Join-Path $repoRoot 'src\ci\probe-watchdog.cmd'
     Assert-PathExists -Path $startnet -Label 'startnet.cmd'
     Assert-PathExists -Path $probe -Label 'probe.cmd'
+    Assert-PathExists -Path $watchdog -Label 'probe-watchdog.cmd'
     Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
     try {
         $system32 = Join-Path $paths.Mount 'Windows\System32'
         Copy-Item -LiteralPath $startnet -Destination (Join-Path $system32 'startnet.cmd') -Force
         Copy-Item -LiteralPath $probe -Destination (Join-Path $system32 'probe.cmd') -Force
+        Copy-Item -LiteralPath $watchdog -Destination (Join-Path $system32 'probe-watchdog.cmd') -Force
     }
     catch {
         Dismount-WimImage -MountDir $paths.Mount

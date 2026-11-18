@@ -79,6 +79,7 @@ Describe 'registry imports happen only at CI build time (user decision 2026-11-1
     BeforeAll {
         $script:RuntimeFiles = @(
             'src/ci/probe.cmd',
+            'src/ci/probe-watchdog.cmd',
             'src/shell/startnet.cmd',
             'src/shell/PECMD.INI',
             'src/shell/Pin-Shortcuts.wcs',

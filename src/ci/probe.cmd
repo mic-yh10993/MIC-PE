@@ -48,6 +48,15 @@ if not defined PROBE_DIR (
 >> "%PROBE_OUT%" echo share=%SHARE%
 if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
+rem Watchdog (run 44285721257): if this probe stalls or dies mid-run, no
+rem probe_done line is ever written and the CI host waits out the full
+rem 45 minutes. A detached watcher notices the probe file going quiet
+rem and records probe_failed=1, which ends the wait early without
+rem changing the verdict: probe_failed still fails the run, see
+rem Assert-Probe. The watcher only runs when its own script made it
+rem into the image; a missing file is a silent no-op.
+if exist "%SystemRoot%\System32\probe-watchdog.cmd" start "" /min cmd /c %SystemRoot%\System32\probe-watchdog.cmd "%PROBE_OUT%"
+
 rem --- pecmd markers ---------------------------------------------------------
 rem Diagnostic, run 44267918861: PECMD.INI and startnet.cmd write
 rem mark_pecmd_* and mark_startnet_* lines to
@@ -191,6 +200,12 @@ if exist "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" (
 
 rem --- installer deploy (M7 harness, plan Task 17 Step 6) --------------------
 echo mark_installer_deploy=%TIME: =0% >> "%PROBE_OUT%"
+rem The probe is past the hang-prone UWP section and is about to hand
+rem control to the installer .wcs, which can legitimately take a long
+rem time on a real deploy; tell the watchdog to stop watching so it
+rem cannot mistake a slow deploy for a stalled probe. The watchdog
+rem also stops on its own when it sees probe_done=1.
+echo stop > "%SystemDrive%\micpe-watchdog-stop.txt"
 rem When the scan found a source, deploy it to the largest free volume that
 rem is neither the source volume, the PE volume nor the probe share (in the
 rem CI harness that is the blank 64 GB disk). Without data disks there is
@@ -230,6 +245,10 @@ rem PECMD, the probe was attempting this launch when it froze after
 rem uwp_appx=1 in run 44161901638, so do not attempt it: report not
 rem launchable and return. The caller records 0; m7 verifies the launch
 rem with the full image.
+rem Run 44285721257: Photos hung the launch, so the wait below is a
+rem bounded poll, never a blind sleep. A launch that never shows up
+rem still returns 1 and the caller still records 0: a missing app is
+rem reported, never skipped and never faked as running.
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 exit /b 1
 
@@ -242,7 +261,19 @@ if not errorlevel 1 (
     exit /b 0
 )
 
+rem Detached launch, bounded poll (run 44285721257): the old code slept
+rem a fixed 7 seconds and then checked once. Photos never appeared and
+rem the probe never returned from this subroutine, so nothing after it
+rem was ever written. Polling once a second for at most 10 seconds
+rem bounds the worst case per app and returns 0 the moment the process
+rem shows up, instead of waiting out the whole window. The poll target
+rem is the process image name, never the shell target string.
 start "" explorer.exe "%UWP_TARGET%"
-ping -n 8 127.0.0.1 >nul 2>&1
+set "UWP_WAIT=0"
+:probe_uwp_poll
+ping -n 2 127.0.0.1 >nul 2>&1
 tasklist /fi "imagename eq %UWP_PROC%.exe" /nh 2>nul | find /i "%UWP_PROC%.exe" >nul
-exit /b %errorlevel%
+if not errorlevel 1 exit /b 0
+set /a UWP_WAIT+=1
+if %UWP_WAIT% lss 10 goto :probe_uwp_poll
+exit /b 1

@@ -106,6 +106,14 @@ function Assert-ProbeResult {
         }
     }
 
+    # probe_failed=1 (run 44285721257) is written by the probe watchdog
+    # when the probe stalls or dies mid-run. It ends the host wait early
+    # (see Test-ProbeComplete) but it never passes a run: a failed probe
+    # is a failed run even when every expected key happens to be present.
+    if ($Probe.ContainsKey('probe_failed') -and [string] $Probe['probe_failed'] -eq '1') {
+        $failures.Add('probe_failed: the probe stalled or died mid-run (see the probe file for the last section reached)')
+    }
+
     # The comma forces array semantics even when there are zero failures, so the
     # caller can always use .Count without a null check.
     return ,($failures.ToArray())

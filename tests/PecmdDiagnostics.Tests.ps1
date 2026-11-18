@@ -31,7 +31,16 @@ Describe 'PECMD chain diagnostics (run 44267918861)' {
         $script:Ini.IndexOf('mark_pecmd_after_ctfmon') | Should -BeGreaterThan $script:Ini.IndexOf('EXEC %SystemRoot%\System32\ctfmon.exe')
         $script:Ini | Should -Match 'mark_pecmd_after_shortcuts=1'
         $script:Ini.IndexOf('mark_pecmd_after_shortcuts') | Should -BeGreaterThan $script:Ini.IndexOf('CALL %SystemRoot%\System32\Pin-Shortcuts.wcs')
-        $script:Ini.IndexOf('mark_pecmd_after_shortcuts') | Should -BeLessThan $script:Ini.IndexOf('CALL %SystemRoot%\System32\probe.cmd')
+        $script:Ini.IndexOf('mark_pecmd_after_shortcuts') | Should -BeLessThan $script:Ini.IndexOf('EXEC -wait -hide cmd.exe /c %SystemRoot%\System32\probe.cmd')
+    }
+
+    It 'PECMD.INI runs probe.cmd through EXEC cmd.exe, not CALL (run 44285721257)' {
+        # PECMD's CALL only calls PECMD scripts and labels: the old CALL
+        # probe.cmd silently did nothing and the probe only ran from
+        # startnet's control call. EXEC cmd.exe /c runs the batch for
+        # real, and -wait keeps the probe before the installer scan.
+        $script:Ini | Should -Match 'EXEC -wait -hide cmd\.exe /c %SystemRoot%\\System32\\probe\.cmd'
+        $script:Ini | Should -Not -Match 'CALL %SystemRoot%\\System32\\probe\.cmd'
     }
 
     It 'PECMD.INI markers all go to the same marks file on X:' {

@@ -455,6 +455,17 @@ Describe 'Test-ProbeComplete' {
         Test-ProbeComplete -Content '' | Should -BeFalse
         Test-ProbeComplete -Content "probe_done=0`r`n" | Should -BeFalse
     }
+
+    It 'is true when probe_failed=1 is present (the watchdog ended a stalled probe)' {
+        # Run 44285721257: probe_failed ends the wait early, the same way
+        # probe_done does. The verdict is still a failure, see
+        # Assert-ProbeResult; this only shortens the wait.
+        Test-ProbeComplete -Content "boot=1`r`nprobe_failed=1`r`n" | Should -BeTrue
+    }
+
+    It 'is false for probe_failed=0' {
+        Test-ProbeComplete -Content "boot=1`r`nprobe_failed=0`r`n" | Should -BeFalse
+    }
 }
 
 Describe 'dot-sourcing the helper' {

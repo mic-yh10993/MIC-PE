@@ -15,7 +15,7 @@ if exist "%SystemDrive%\Program Files\MICPE\PECMD.EXE" (
     rem Diagnostic markers, run 44267918861: PECMD.EXE is a GUI program, so
     rem this line returns at once and startnet.cmd does not wait for the
     rem PECMD chain. Record the launch, give the chain about 45 seconds,
-    rem then run the probe from startnet as a control if PECMD's own CALL
+    rem then run the probe from startnet as a control if PECMD's own EXEC
     rem never wrote one. probe.cmd copies the marks file into probe.txt.
     echo mark_startnet_pecmd_before=1 >> "%SystemDrive%\micpe-pecmd-marks.txt"
     "%SystemDrive%\Program Files\MICPE\PECMD.EXE" LOAD "%SystemDrive%\Program Files\MICPE\PECMD.INI"

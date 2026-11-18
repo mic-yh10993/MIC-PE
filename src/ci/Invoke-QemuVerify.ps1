@@ -526,7 +526,12 @@ function Test-ProbeComplete {
     # UWP, payload, brand and installer checks: breaking on boot=1 (what
     # the loop used to do) returns a partial probe and every later
     # assertion fails on keys that were simply not written yet.
+    # probe_failed=1 (run 44285721257) is also a terminal line: the
+    # watchdog writes it when the probe stalls or dies mid-run, so the
+    # host stops waiting early. It ends the wait only; the verdict is
+    # still a failure, see Assert-ProbeResult.
     if (-not $Content) { return $false }
+    if ($Content -match '(?m)^probe_failed=1\s*$') { return $true }
     return ($Content -match '(?m)^probe_done=1\s*$')
 }
 
