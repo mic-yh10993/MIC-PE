@@ -99,6 +99,25 @@ Describe 'drive-letter fix wiring' {
         $bad | Should -BeNullOrEmpty
     }
 
+    It 'the fix script always calls mountvol with call (a bare call never returns from a .cmd)' {
+        # run 44240588434: the swap stopped after step 1 with exactly 2
+        # mountvol calls logged. A bare `mountvol` from inside this batch
+        # file transfers control to the callee and never returns when
+        # mountvol resolves to a .cmd/.bat (the CI fake is mountvol.cmd);
+        # against the real mountvol.exe `call` behaves identically. The
+        # two `for /f ('mountvol ... /L')` captures run in a child cmd and
+        # return on their own, so they are exempt. Pin it so the bare
+        # form cannot come back.
+        $lines = Get-Content -LiteralPath $script:FixScript -Encoding utf8
+        $bad = @($lines | Where-Object {
+            $_ -match 'mountvol' -and
+            $_ -notmatch '^\s*rem\b' -and
+            $_ -notmatch 'call\s+mountvol' -and
+            $_ -notmatch 'for\s+/f'
+        })
+        $bad | Should -BeNullOrEmpty
+    }
+
     It 'reverse control: removing the startnet call makes the wiring test fail' {
         $lines = Get-Content -LiteralPath $script:Startnet -Encoding utf8
         $call = @($lines | Where-Object { $_ -match 'Fix-DriveLetters\.cmd' -and $_ -match '^\s*if exist' })

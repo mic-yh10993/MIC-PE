@@ -20,6 +20,14 @@ rem give its old letter to the volume that held C:. Every other volume
 rem keeps its letter. A full re-enumeration was rejected: it would move
 rem the probe share and the boot media unpredictably.
 rem
+rem Every mountvol call below uses `call`: a bare `mountvol` from inside
+rem this batch file transfers control and never returns when mountvol
+rem resolves to a .cmd/.bat (the CI test fake is mountvol.cmd; run
+rem 44240588434 stopped after step 1 with exactly 2 calls logged).
+rem Against the real mountvol.exe `call` behaves identically and still
+rem propagates errorlevel. The two `for /f ('mountvol ... /L')`
+rem captures already run in a child cmd and return on their own.
+rem
 rem mountvol.exe comes from install.wim via src/filelists/10-cmdpe.txt
 rem (same pattern as tasklist.exe, run 44135105700). The installer
 rem (Deploy.ps1 / MICPE-Setup.wcs) already calls mountvol in PE, so
@@ -71,14 +79,14 @@ if not defined TMP_LETTER (
 
 rem Step 1: give the Windows volume the temp letter as well (a volume may
 rem hold several letters), so it is never unlettered during the swap.
-mountvol !TMP_LETTER!: !GUID_WIN! >nul 2>&1
+call mountvol !TMP_LETTER!: !GUID_WIN! >nul 2>&1
 if errorlevel 1 (
     set "DRIVE_FIX_ERROR=tmp_assign"
     goto :write_status
 )
 
 rem Step 2: drop the Windows volume's old letter.
-mountvol !WIN_DRIVE!: /D >nul 2>&1
+call mountvol !WIN_DRIVE!: /D >nul 2>&1
 if errorlevel 1 (
     set "DRIVE_FIX_ERROR=win_unletter"
     goto :write_status
@@ -90,21 +98,21 @@ if exist "C:\" if not defined GUID_C (
     set "DRIVE_FIX_ERROR=noguid_c"
     goto :write_status
 )
-if exist "C:\" mountvol C: /D >nul 2>&1
+if exist "C:\" call mountvol C: /D >nul 2>&1
 if exist "C:\" if errorlevel 1 (
     set "DRIVE_FIX_ERROR=c_unletter"
     goto :write_status
 )
 
 rem Step 4: C: now goes to the Windows volume.
-mountvol C: !GUID_WIN! >nul 2>&1
+call mountvol C: !GUID_WIN! >nul 2>&1
 if errorlevel 1 (
     set "DRIVE_FIX_ERROR=c_assign"
     goto :write_status
 )
 
 rem Step 5: the volume that held C: takes the Windows volume's old letter.
-if defined GUID_C mountvol !WIN_DRIVE!: !GUID_C! >nul 2>&1
+if defined GUID_C call mountvol !WIN_DRIVE!: !GUID_C! >nul 2>&1
 if defined GUID_C if errorlevel 1 (
     set "DRIVE_FIX_ERROR=win_reletter"
     goto :write_status
@@ -112,7 +120,7 @@ if defined GUID_C if errorlevel 1 (
 
 rem Step 6: drop the temp letter. If this fails the swap itself still
 rem stands (C: is the Windows volume); only an extra letter lingers.
-mountvol !TMP_LETTER!: /D >nul 2>&1
+call mountvol !TMP_LETTER!: /D >nul 2>&1
 if errorlevel 1 (
     set "DRIVE_FIX_ERROR=tmp_remove"
     goto :write_status
