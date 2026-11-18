@@ -134,9 +134,15 @@ rem Keys are spelled out rather than built from a suffix so the CI-side
 rem assertion table can be grepped against this file literally.
 rem No Settings probe: the Settings app is not provisioned (user decision
 rem 2026-11-16, too heavy). Calculator takes its place as the third app.
-rem NOTE (unverified against a real system): the Calculator process image
-rem is CalculatorApp.exe; if the L3 run shows uwp_launch_calculator=0
-rem while the app itself launches, correct the process name here.
+rem Process image names, verified against the provisioned packages'
+rem AppxManifest.xml in the run 27 boot.wim (same 25H2 install.wim
+rem source as CI): Calculator runs as CalculatorApp.exe, the new Photos
+rem app runs as Microsoft.Lightbox.exe (not Microsoft.Photos.exe, which
+rem does not exist in the image), and Media Player runs as
+rem Microsoft.Media.Player.exe (not Microsoft.ZuneMusic.exe, which does
+rem not exist either). The shell targets below are the manifests'
+rem Application Ids and were already right. A 0 still means "the
+rem process never appeared in ten polls", never "launch succeeded".
 rem Launching a UWP app needs a running Explorer shell. At m4 there is
 rem no shell, so the launch is skipped and 0 is recorded, meaning not
 rem launchable here; m7 verifies the launch with the full image.
@@ -150,11 +156,11 @@ call :probe_uwp CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wek
 if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
 
 echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
-call :probe_uwp Microsoft.Photos "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
+call :probe_uwp Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")
 
 echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_OUT%"
-call :probe_uwp Microsoft.ZuneMusic "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
+call :probe_uwp Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
 if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
 endlocal
 
@@ -277,14 +283,28 @@ rem was ever written. Polling once a second for at most 10 seconds
 rem bounds the worst case per app and returns 0 the moment the process
 rem shows up, instead of waiting out the whole window. The poll target
 rem is the process image name, never the shell target string.
+rem Run 44319967017: the probe died in the Media poll's first round and
+rem the loop has three steps (wait, tasklist, find), so each round now
+rem writes its own markers (wait_before / wait_after / check_after) and
+rem the one-second wait is choice, not ping: ping is the prime suspect
+rem for the stall (last proven good ~14:32:49, first proven stuck
+rem ~14:33:02, the only event in between being the Media launch), and
+rem choice.exe is in the image (20-explorer.txt:126, verified present
+rem in the run 27 boot.wim). The marker key carries the process name
+rem and round number, so the next partial probe names the exact step.
+rem choice /c Y /d Y /t 1 waits one second then takes the default; its
+rem errorlevel is ignored on purpose, only the timing matters.
 echo mark_uwp_start_before=%TIME: =0% >> "%PROBE_OUT%"
 start "" explorer.exe "%UWP_TARGET%"
 echo mark_uwp_start_after=%TIME: =0% >> "%PROBE_OUT%"
 set "UWP_WAIT=0"
 :probe_uwp_poll
-ping -n 2 127.0.0.1 >nul 2>&1
+echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_before=%TIME: =0% >> "%PROBE_OUT%"
+choice /c Y /d Y /t 1 >nul
+echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_after=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq %UWP_PROC%.exe" /nh 2>nul | find /i "%UWP_PROC%.exe" >nul
 if not errorlevel 1 exit /b 0
+echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_check_after=%TIME: =0% >> "%PROBE_OUT%"
 set /a UWP_WAIT+=1
 if %UWP_WAIT% lss 10 goto :probe_uwp_poll
 exit /b 1

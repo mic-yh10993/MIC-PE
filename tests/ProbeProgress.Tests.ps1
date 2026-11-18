@@ -26,8 +26,8 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
             @{ Mark = 'mark_ime'; Work = 'reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload"' }
             @{ Mark = 'mark_uwp_appx'; Work = 'AppXDeploymentClient.dll' }
             @{ Mark = 'mark_uwp_launch_calculator'; Work = 'call :probe_uwp CalculatorApp' }
-            @{ Mark = 'mark_uwp_launch_photos'; Work = 'call :probe_uwp Microsoft.Photos' }
-            @{ Mark = 'mark_uwp_launch_media'; Work = 'call :probe_uwp Microsoft.ZuneMusic' }
+            @{ Mark = 'mark_uwp_launch_photos'; Work = 'call :probe_uwp Microsoft.Lightbox' }
+            @{ Mark = 'mark_uwp_launch_media'; Work = 'call :probe_uwp Microsoft.Media.Player' }
             # Subroutine markers (run 44303866765): the probe died inside
             # the Media call, so :probe_uwp brackets its own launch. The
             # enter marker sits before the guard; start_before/start_after
@@ -65,10 +65,21 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
         # parsed, so every marker in the block would carry the same
         # frozen time. probe.cmd top-level commands start at column 0;
         # block contents are indented.
-        $markerLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_' })
+        # Run 44319967017: the per-round poll markers (mark_uwp_poll_)
+        # are dynamic (process name and round number sit in the key),
+        # so they cannot be pinned as fixed lines in the list above
+        # and are left out of the count; they are pinned by pattern in
+        # ProbeUwpMechanism.Tests.ps1 instead. They are column-0 lines
+        # too, so they are checked the same way right below.
+        $markerLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_' -and $_ -notmatch 'mark_uwp_poll_' })
         $markerLines.Count | Should -Be $script:markers.Count
         foreach ($line in $markerLines) {
             $line | Should -Match '^echo mark_' -Because "marker must be a top-level line, not block content: $line"
+        }
+        $pollLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_uwp_poll_' })
+        $pollLines.Count | Should -BeGreaterThan 0 -Because 'the poll loop must write per-round markers'
+        foreach ($line in $pollLines) {
+            $line | Should -Match '^echo mark_uwp_poll_' -Because "poll marker must be a top-level line, not block content: $line"
         }
     }
 

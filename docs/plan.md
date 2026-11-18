@@ -733,7 +733,7 @@ PE 内运行的自检脚本。逐项检测并 `WRIT` 到 `E:\micpe-probe.txt`（
 
 检查顺序与输出键：`boot`、`shell_ready`、`explorer`、`dwm`、`network`、`ime`、`uwp_appx`、`uwp_launch_photos`、`uwp_launch_media`、`uwp_launch_calculator`、`payload`、`brand`、`size_wim`、`size_iso`。每项值为 `1`/`0` 或数字/文本。（用户决定 2026-11-16：UWP 仅保留核心文件，设置应用不带，`uwp_launch_settings` 改为 `uwp_launch_calculator`。）
 
-`uwp_launch_*` 用 `EXEC -su explorer.exe shell:AppsFolder\<AUMID>` 后 `WAIT 3000` 再 `FIND` 对应进程名（`CalculatorApp`、`Microsoft.Photos`、`Microsoft.ZuneMusic`）。
+`uwp_launch_*` 用 `EXEC -su explorer.exe shell:AppsFolder\<AUMID>` 后 `WAIT 3000` 再 `FIND` 对应进程名（`CalculatorApp`、`Microsoft.Lightbox`、`Microsoft.Media.Player`）。进程名已按 provisioned 包的 `AppxManifest.xml` 核实（run 37，run 27 boot.wim）：新版照片应用的进程是 `Microsoft.Lightbox.exe`、媒体播放器是 `Microsoft.Media.Player.exe`；旧名 `Microsoft.Photos.exe`、`Microsoft.ZuneMusic.exe` 在映像里根本不存在。
 
 - [ ] **Step 4: 实现 `Assert-Probe.ps1` 与 `Invoke-QemuVerify.ps1` 并跑测试**
 

@@ -16,13 +16,21 @@ rem Heartbeat (run 44303866765): the run 35 watchdog process was alive
 rem (its empty-title minimized window was on the screenshot) yet never
 rem wrote probe_failed=1 in 34 quiet minutes, and there was no evidence
 rem of which loop step it was stuck on. Every loop iteration now appends
-rem one line to micpe-watchdog-heartbeat.txt next to the probe file on
+rem lines to micpe-watchdog-heartbeat.txt next to the probe file on
 rem the share, so the CI host can see the loop run: time, quiet count
 rem and the file size it observed. The heartbeat is a separate file on
 rem purpose: writing it into the probe file would grow the probe file
 rem and reset this watcher's own quiet count. The heartbeat file is
 rem collected into the verify artifact by build.yml; a heartbeat on X:
 rem would be invisible to the host after shutdown.
+rem Run 44319967017: the heartbeat proved the loop died in round 2 but
+rem could not say whether it died in the wait or in the next round's
+rem file work, so each round now writes two lines (phase=before_wait
+rem before the wait, phase=after_wait after it). The wait itself is
+rem choice, not ping: ping is the prime suspect for the round-2 stall,
+rem and choice.exe is in the image (20-explorer.txt:126, verified
+rem present in the run 27 boot.wim). choice /c Y /d Y /t N waits N
+rem seconds then takes the default; its errorlevel is ignored.
 rem
 rem Usage: probe-watchdog.cmd <probe-file> [stall-limit] [wait-seconds]
 rem Defaults: 5 quiet checks of 60 seconds each. The two optional
@@ -51,9 +59,10 @@ if "%WD_NOW%"=="%WD_SIZE%" (
     set "WD_SIZE=%WD_NOW%"
     set "WD_QUIET=0"
 )
-echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% >> "%WD_HEARTBEAT%"
+echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% phase=before_wait >> "%WD_HEARTBEAT%"
 if %WD_QUIET% geq %WD_LIMIT% goto :watchdog_fail
-ping -n %WD_WAIT% 127.0.0.1 >nul 2>&1
+choice /c Y /d Y /t %WD_WAIT% >nul
+echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% phase=after_wait >> "%WD_HEARTBEAT%"
 goto :watchdog_loop
 :watchdog_fail
 if not exist "%WD_FILE%" exit /b 1

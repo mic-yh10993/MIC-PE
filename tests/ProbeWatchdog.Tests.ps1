@@ -37,7 +37,10 @@ BeforeAll {
     # the static tests, so do not let Join-Path see a null parent.
     $script:CmdExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\cmd.exe' } else { 'cmd.exe' }
     $script:FindstrExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\findstr.exe' } else { 'findstr.exe' }
-    $script:PingExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\ping.exe' } else { 'ping.exe' }
+    # choice.exe is the watchdog's wait (run 44319967017): the work dir
+    # is the whole PATH for the test batch, so it must be copied in.
+    # ping.exe is no longer used by the watchdog and is not copied.
+    $script:ChoiceExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\choice.exe' } else { 'choice.exe' }
 
     # A CRLF batch file: cmd.exe treats a lone LF as part of the line.
     $script:WriteBatchCrlf = {
@@ -79,7 +82,7 @@ BeforeAll {
         $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $workDir -Force | Out-Null
         Copy-Item -LiteralPath $script:FindstrExe -Destination (Join-Path $workDir 'findstr.exe')
-        Copy-Item -LiteralPath $script:PingExe -Destination (Join-Path $workDir 'ping.exe')
+        Copy-Item -LiteralPath $script:ChoiceExe -Destination (Join-Path $workDir 'choice.exe')
         return $workDir
     }
 
@@ -314,6 +317,10 @@ Describe 'probe watchdog (static)' {
     }
 
     It 'the watchdog writes a heartbeat line every loop iteration (run 44303866765)' {
+        # Run 44319967017: each round writes two heartbeat lines, one
+        # before the wait and one after it, so a partial heartbeat says
+        # whether the loop died in the wait or in the next round's file
+        # work. The phase tag is what tells them apart.
         $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
         $wd | Should -Match 'WD_HEARTBEAT=%~dp1micpe-watchdog-heartbeat\.txt' -Because 'the heartbeat lives next to the probe file on the share, where the host can read it'
         $wd | Should -Match 'watchdog_start=' -Because 'the start line proves the script itself began'
@@ -323,8 +330,31 @@ Describe 'probe watchdog (static)' {
         # probe file would grow the file and reset the quiet count.
         $wdLines = Get-Content -LiteralPath $script:WatchdogPath -Encoding utf8
         $beatLines = @($wdLines | Where-Object { $_ -match 'quiet=%WD_QUIET%' })
-        $beatLines.Count | Should -Be 1 -Because 'exactly one line writes the per-iteration heartbeat'
-        $beatLines[0] | Should -Match 'WD_HEARTBEAT' -Because 'the heartbeat goes to its own file, not the probe file'
+        $beatLines.Count | Should -Be 2 -Because 'one heartbeat line before the wait, one after it'
+        $beatLines[0] | Should -Match 'phase=before_wait' -Because 'the first heartbeat line of a round proves the round started'
+        $beatLines[1] | Should -Match 'phase=after_wait' -Because 'the second heartbeat line proves the wait returned'
+        foreach ($line in $beatLines) {
+            $line | Should -Match 'WD_HEARTBEAT' -Because 'the heartbeat goes to its own file, not the probe file'
+        }
+        # Order by line number, not by IndexOf on the whole text: the
+        # header comment also names both phases. The echo lines are the
+        # code lines; the comment lines start with "rem".
+        $beforeLine = ($wdLines | Select-String -Pattern 'phase=before_wait' | Where-Object { $_.Line -match '^echo ' } | Select-Object -First 1).LineNumber
+        $afterLine = ($wdLines | Select-String -Pattern 'phase=after_wait' | Where-Object { $_.Line -match '^echo ' } | Select-Object -First 1).LineNumber
+        $waitLine = ($wdLines | Select-String -Pattern 'choice /c Y /d Y /t %WD_WAIT%' | Select-Object -First 1).LineNumber
+        $beforeLine | Should -Not -BeNullOrEmpty -Because 'the before-wait heartbeat line must exist'
+        $afterLine | Should -Not -BeNullOrEmpty -Because 'the after-wait heartbeat line must exist'
+        $waitLine | Should -Not -BeNullOrEmpty -Because 'the choice wait line must exist'
+        $beforeLine | Should -BeLessThan $waitLine -Because 'the before-wait line is written before the wait starts'
+        $waitLine | Should -BeLessThan $afterLine -Because 'the after-wait line is written only after the wait returns'
+    }
+
+    It 'the watchdog waits with choice, not ping (run 44319967017)' {
+        # ping is the prime suspect for the round-2 stall, and the
+        # watchdog's ping -n 60 was one of the two candidates for it.
+        $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
+        $wd | Should -Match 'choice /c Y /d Y /t %WD_WAIT%' -Because 'each loop iteration waits with choice'
+        $wd | Should -Not -Match 'ping -n %WD_WAIT%' -Because 'the ping wait is gone'
     }
 
     It 'the verify artifact collects the heartbeat file' {

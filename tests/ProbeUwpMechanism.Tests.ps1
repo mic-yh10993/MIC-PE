@@ -70,7 +70,11 @@ BeforeAll {
     $script:CmdExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\cmd.exe' } else { 'cmd.exe' }
     $script:FindExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\find.exe' } else { 'find.exe' }
     $script:TasklistExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\tasklist.exe' } else { 'tasklist.exe' }
-    $script:PingExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\ping.exe' } else { 'ping.exe' }
+    # choice.exe is the poll's one-second wait (run 44319967017): the
+    # work dir is the whole PATH for the test batch, so it must be
+    # copied in like find/tasklist. ping.exe is no longer used by the
+    # uwp section and is not copied.
+    $script:ChoiceExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\choice.exe' } else { 'choice.exe' }
 
     # A CRLF batch file: cmd.exe treats a lone LF as part of the line.
     $script:WriteBatchCrlf = {
@@ -154,7 +158,7 @@ BeforeAll {
         New-Item -ItemType Directory -Path $workDir -Force | Out-Null
         Copy-Item -LiteralPath $script:FindExe -Destination (Join-Path $workDir 'find.exe')
         Copy-Item -LiteralPath $script:TasklistExe -Destination (Join-Path $workDir 'tasklist.exe')
-        Copy-Item -LiteralPath $script:PingExe -Destination (Join-Path $workDir 'ping.exe')
+        Copy-Item -LiteralPath $script:ChoiceExe -Destination (Join-Path $workDir 'choice.exe')
         return $workDir
     }
 }
@@ -407,9 +411,55 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $sub | Should -BeGreaterThan -1 -Because 'probe.cmd must still carry the :probe_uwp subroutine'
         $tail = $probe[$sub..($probe.Count - 1)] -join "`n"
         $tail | Should -Match ':probe_uwp_poll' -Because 'the launch wait is a poll loop'
-        $tail | Should -Match 'ping -n 2 127\.0\.0\.1' -Because 'each poll step waits about one second'
+        # Run 44319967017: the one-second wait is choice, not ping.
+        # ping is the prime suspect for the Media poll stall, and the
+        # shell section's ping -n 16 sits outside this subroutine, so
+        # the tail must not contain a poll ping at all.
+        $tail | Should -Match 'choice /c Y /d Y /t 1' -Because 'each poll step waits about one second'
+        $tail | Should -Not -Match 'ping -n 2 127\.0\.0\.1' -Because 'the poll wait is choice now, not ping'
         $tail | Should -Match 'set /a UWP_WAIT\+=1' -Because 'the poll counts its steps'
         $tail | Should -Match 'if %UWP_WAIT% lss 10 goto :probe_uwp_poll' -Because 'the poll gives up after ten steps instead of hanging'
         $tail | Should -Not -Match 'ping -n 8 127\.0\.0\.1' -Because 'the old fixed 7-second sleep is gone'
+    }
+
+    It 'marks every poll round, so a partial probe names the step it died in (run 44319967017)' {
+        # The run 36 probe stopped inside the Media poll's first round
+        # and the loop has three steps (wait, tasklist, find). Each
+        # round writes wait_before / wait_after / check_after markers
+        # whose key carries the process name and round number: a death
+        # in the wait leaves wait_before as the last line, a death in
+        # tasklist/find leaves wait_after, and a death after the check
+        # leaves check_after.
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $sub = -1
+        for ($i = 0; $i -lt $probe.Count; $i++) {
+            if ($probe[$i] -match '^:probe_uwp') { $sub = $i; break }
+        }
+        $sub | Should -BeGreaterThan -1 -Because 'probe.cmd must still carry the :probe_uwp subroutine'
+        $tail = $probe[$sub..($probe.Count - 1)] -join "`n"
+        $tail | Should -Match 'mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_before=%TIME: =0%' -Because 'each round marks the wait start'
+        $tail | Should -Match 'mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_after=%TIME: =0%' -Because 'each round marks the wait end'
+        $tail | Should -Match 'mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_check_after=%TIME: =0%' -Because 'each round marks the check end'
+        $pollLines = @($probe | Where-Object { $_ -match 'echo mark_uwp_poll_' })
+        $pollLines.Count | Should -Be 3 -Because 'one marker per poll step: wait_before, wait_after, check_after'
+        foreach ($line in $pollLines) {
+            $line | Should -Match '^echo mark_uwp_poll_' -Because "a poll marker must be a top-level line, not block content: $line"
+        }
+    }
+
+    It 'polls the verified process image names (run 44319967017)' {
+        # The names were read off the provisioned packages'
+        # AppxManifest.xml in the run 27 boot.wim (same 25H2 install.wim
+        # source as CI): CalculatorApp.exe, Microsoft.Lightbox.exe (the
+        # new Photos app), Microsoft.Media.Player.exe. The old names
+        # Microsoft.Photos.exe and Microsoft.ZuneMusic.exe do not exist
+        # in the image, so the old poll could never see those apps even
+        # if they launched.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'call :probe_uwp CalculatorApp "shell:AppsFolder\\Microsoft\.WindowsCalculator_8wekyb3d8bbwe!App"' -Because 'Calculator runs as CalculatorApp.exe'
+        $text | Should -Match 'call :probe_uwp Microsoft\.Lightbox "shell:AppsFolder\\Microsoft\.Windows\.Photos_8wekyb3d8bbwe!App"' -Because 'the new Photos app runs as Microsoft.Lightbox.exe'
+        $text | Should -Match 'call :probe_uwp Microsoft\.Media\.Player "shell:AppsFolder\\Microsoft\.ZuneMusic_8wekyb3d8bbwe!Microsoft\.ZuneMusic"' -Because 'Media Player runs as Microsoft.Media.Player.exe'
+        $text | Should -Not -Match 'call :probe_uwp Microsoft\.Photos ' -Because 'Microsoft.Photos.exe does not exist in the image'
+        $text | Should -Not -Match 'call :probe_uwp Microsoft\.ZuneMusic ' -Because 'Microsoft.ZuneMusic.exe does not exist in the image'
     }
 }
