@@ -163,7 +163,12 @@ Describe 'Fix-DriveLetters.cmd swap run' {
         try {
             $env:PATH = $fakeDir
             $env:SystemDrive = $workDir
-            $null = & cmd.exe /c "`"$script:FixScript`"" 2>&1
+            # Absolute cmd.exe: the restricted PATH above has no cmd.exe,
+            # and PowerShell resolves the command name through PATH.
+            # The child cmd still inherits the restricted PATH, so every
+            # mountvol call inside the script hits the fake.
+            $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            $null = & $cmdExe /c "`"$script:FixScript`"" 2>&1
             $LASTEXITCODE | Should -Be 0
 
             $calls = @(Get-Content -LiteralPath $logFile -Encoding utf8)
@@ -212,7 +217,8 @@ Describe 'Fix-DriveLetters.cmd no-op run' {
         $oldSystemDrive = $env:SystemDrive
         try {
             $env:SystemDrive = $workDir
-            $null = & cmd.exe /c "`"$script:FixScript`"" 2>&1
+            $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+            $null = & $cmdExe /c "`"$script:FixScript`"" 2>&1
             $LASTEXITCODE | Should -Be 0
             $status = Join-Path $workDir 'micpe-drive-letters.txt'
             Test-Path -LiteralPath $status | Should -BeTrue

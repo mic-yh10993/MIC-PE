@@ -184,7 +184,13 @@ Describe 'Invoke-RegImportAsSystem' {
         $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
         if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
         $keyName = 'MICPE-APPX-TEST'
-        $appxSub = 'Microsoft\Windows\CurrentVersion\Appx'
+        # A fresh key name, not the real Appx key: the SOFTWARE snapshot
+        # already contains Microsoft\Windows\CurrentVersion\Appx with its
+        # live restrictive DACL (run 22), so reg add on it fails for the
+        # runner admin before the test can set its own DACL. The DACL
+        # shape applied below is the same one (SYSTEM full, Administrators
+        # read-only), so the mechanism is still what is being proved.
+        $appxSub = 'Microsoft\Windows\CurrentVersion\MicpeAppxTest'
         $testReg = Join-Path $work 'appx-test.reg'
         $regText = @(
             'Windows Registry Editor Version 5.00',
@@ -198,8 +204,8 @@ Describe 'Invoke-RegImportAsSystem' {
         try {
             Mount-RegistryHive -HiveFile $hiveCopy -KeyName $keyName
             try {
-                $null = & reg.exe add "HKLM\$keyName\$appxSub" /f 2>&1
-                if ($LASTEXITCODE -ne 0) { throw 'reg add Appx key failed' }
+                $addOut = & reg.exe add "HKLM\$keyName\$appxSub" /f 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "reg add Appx key failed: $addOut" }
 
                 $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
                     "$keyName\$appxSub",
