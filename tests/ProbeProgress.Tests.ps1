@@ -58,7 +58,19 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
             @{ Mark = 'mark_payload'; Work = 'set "PAYLOAD=1"' }
             @{ Mark = 'mark_brand'; Work = 'set "BRAND=1"' }
             @{ Mark = 'mark_installer'; Work = 'MICPE_PROBE_FILE=%PROBE_OUT%' }
+            # Run 44386689307: the probe stopped after brand=1 and never
+            # wrote mark_installer, so the scan call is bracketed with a
+            # before/after pair the same way the reg queries are. The
+            # deploy pair brackets the .wcs deploy call the same way.
+            # The deploy-before anchor is the full stop-flag echo line:
+            # the bare filename also appears in the watchdog comment at
+            # the top of probe.cmd, which would put the anchor before
+            # the marker.
+            @{ Mark = 'mark_installer_before'; Work = 'MICPE_PROBE_FILE=%PROBE_OUT%' }
+            @{ Mark = 'mark_installer_after'; Work = 'set "DEPLOY_SRC="' }
             @{ Mark = 'mark_installer_deploy'; Work = 'set "DEPLOY_SRC="' }
+            @{ Mark = 'mark_installer_deploy_before'; Work = 'echo stop > "%SystemDrive%\micpe-watchdog-stop.txt"' }
+            @{ Mark = 'mark_installer_deploy_after'; Work = 'echo probe_done=1' }
         )
     }
 

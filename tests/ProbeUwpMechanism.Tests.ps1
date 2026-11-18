@@ -576,7 +576,7 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # tasklist /v, so a raw-text match would count it as a dump.
         $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
         $dumps = @($probeLines | Where-Object { $_ -match '^tasklist /v' })
-        $dumps.Count | Should -Be 2 -Because 'one dump before the test, one after it'
+        $dumps.Count | Should -Be 3 -Because 'one dump before the test, one after it, and one at probe end (run 44386689307)'
         $text.IndexOf('folder_window_test=1') | Should -BeLessThan $text.IndexOf('mark_uwp_appx') -Because 'the test runs in the diagnostics section, before the launches'
     }
 

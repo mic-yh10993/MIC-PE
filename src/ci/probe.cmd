@@ -44,8 +44,23 @@ if not defined PROBE_DIR (
     set "SHARE=1"
 )
 
-> "%PROBE_OUT%" echo boot=1
->> "%PROBE_OUT%" echo share=%SHARE%
+rem Local mirror (run 44386689307): every section marker is written to
+rem this file on the PE system drive FIRST and to the share second, so
+rem a wedged share write cannot hide how far the probe got. The share
+rem file stays the asserted probe file; the local file is diagnostics
+rem only. The detached probe-sync.cmd (started below next to the
+rem watchdog) echoes the local file's last line to the serial log every
+rem few seconds, which the host reads without the share: if the serial
+rem markers keep coming while the share probe stops growing, the guest
+rem is alive and the share is wedged; if the serial markers stop too,
+rem the guest itself froze. The poll markers are not mirrored (they
+rem fire every second; the section markers bracket the freeze points
+rem runs 39/40 actually hit).
+set "PROBE_LOCAL=%SystemDrive%\micpe-probe-local.txt"
+
+> "%PROBE_LOCAL%" echo boot=1 & > "%PROBE_OUT%" echo boot=1
+>> "%PROBE_LOCAL%" echo share=%SHARE% & >> "%PROBE_OUT%" echo share=%SHARE%
+if defined PROBE_DIR >> "%PROBE_LOCAL%" echo share_drive=%PROBE_DIR%
 if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
 rem Watchdog (run 44285721257): if this probe stalls or dies mid-run, no
@@ -56,6 +71,14 @@ rem changing the verdict: probe_failed still fails the run, see
 rem Assert-Probe. The watcher only runs when its own script made it
 rem into the image; a missing file is a silent no-op.
 if exist "%SystemRoot%\System32\probe-watchdog.cmd" start "" /min cmd /c %SystemRoot%\System32\probe-watchdog.cmd "%PROBE_OUT%"
+
+rem Local-mirror sync (run 44386689307): the detached probe-sync.cmd
+rem echoes the local mirror's last line to the serial log, so the host
+rem can tell a wedged share from a frozen guest. It stops on its own
+rem when it sees probe_done=1 in the local file, or when probe.cmd
+rem writes the stop flag before the long installer deploy. Same
+rem missing-file-is-a-silent-no-op rule as the watchdog above.
+if exist "%SystemRoot%\System32\probe-sync.cmd" start "" /min cmd /c %SystemRoot%\System32\probe-sync.cmd "%PROBE_LOCAL%"
 
 rem --- pecmd markers ---------------------------------------------------------
 rem Diagnostic, run 44267918861: PECMD.INI and startnet.cmd write
@@ -89,7 +112,7 @@ rem mark_<section> keys are parsed by Read-ProbeFile and shown in the CI log
 rem printout, but no stage table asserts them, so they cannot mask a failure.
 rem %TIME: =0% zero-pads the hour; the line is top-level, not inside a (...)
 rem block, so %TIME% is read when the line runs instead of at block parse.
-echo mark_shell_ready=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_shell_ready=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_shell_ready=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer=0 >> "%PROBE_OUT%") else (echo explorer=1 >> "%PROBE_OUT%")
 
@@ -102,15 +125,15 @@ rem Settle markers (run 44249181100): runs 31/32 stopped between
 rem mark_shell_ready and shell_ready, and the gap holds only the ping below
 rem and one more tasklist call. These three markers say which of the two it
 rem was; they are mark_ keys, parsed but never asserted (see Assert-Probe).
-echo mark_shell_ping_before=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_shell_ping_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_shell_ping_before=%TIME: =0% >> "%PROBE_OUT%"
 ping -n 16 127.0.0.1 >nul 2>&1
-echo mark_shell_ping_after=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_shell_ping_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_shell_ping_after=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
-echo mark_shell_check_after=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_shell_check_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_shell_check_after=%TIME: =0% >> "%PROBE_OUT%"
 if errorlevel 1 (echo shell_ready=0 >> "%PROBE_OUT%") else (echo shell_ready=1 >> "%PROBE_OUT%")
 
 rem --- network ---------------------------------------------------------------
-echo mark_network=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_network=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_network=%TIME: =0% >> "%PROBE_OUT%"
 set "IPV4="
 for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
     if not defined IPV4 set "IPV4=%%A"
@@ -118,7 +141,7 @@ for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
 if defined IPV4 (echo network=!IPV4: =! >> "%PROBE_OUT%") else (echo network=pending >> "%PROBE_OUT%")
 
 rem --- input method ----------------------------------------------------------
-echo mark_ime=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_ime=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_ime=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Keyboard Layout\Preload" 2>nul | find /i "0804" >nul
 if errorlevel 1 (echo ime=0 >> "%PROBE_OUT%") else (echo ime=1 >> "%PROBE_OUT%")
 
@@ -162,7 +185,7 @@ rem     waits in 5-second ticks; this section does not touch it.
 rem The full tasklist dump goes to micpe-tasklist.txt next to the probe
 rem file (build.yml collects it into the verify artifact); the probe file
 rem itself only carries the short presence/state keys below.
-echo mark_uwp_diag=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_diag=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_diag=%TIME: =0% >> "%PROBE_OUT%"
 if defined PROBE_DIR (
     set "TASKLIST_OUT=%PROBE_DIR%micpe-tasklist.txt"
 ) else (
@@ -183,7 +206,7 @@ rem Explorer-as-process opens a folder window (plan §14), so if no window
 rem appears at all, explorer cannot create any window — a deeper break
 rem than "no desktop". Start one, wait, and dump tasklist again: the two
 rem snapshots say whether a window appeared and what its title is.
-echo mark_folder_window=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_folder_window=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_folder_window=%TIME: =0% >> "%PROBE_OUT%"
 start "" explorer.exe "%SystemDrive%\"
 choice /c Y /d Y /t 3 >nul
 echo --- tasklist after folder-window test --- >> "%TASKLIST_OUT%"
@@ -195,7 +218,7 @@ rem which DLLs are in it; it goes into the same tasklist file so the
 rem artifact upload needs no change.
 echo --- tasklist /m explorer.exe --- >> "%TASKLIST_OUT%"
 tasklist /m /fi "imagename eq explorer.exe" >> "%TASKLIST_OUT%" 2>nul
-echo mark_uwp_svc=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_svc=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_svc=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_svc AppXSVC appxsvc
 call :probe_svc StateRepository staterepo
 call :probe_svc AppReadiness appreadiness
@@ -205,7 +228,17 @@ rem service's last exit code instead: run 39 showed sc start returning
 rem 0 while the service stayed STOPPED, which means it started and
 rem died at once or SCM accepted a request it could not honour — the
 rem exit code says which.
-echo mark_uwp_svc_exitcode=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_svc_exitcode=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_svc_exitcode=%TIME: =0% >> "%PROBE_OUT%"
+rem Run 44386689307: both parses came back missing — the WIN32_EXIT_CODE
+rem line never appeared, so the exit codes of the two STOPPED services
+rem are still unknown. Dump the raw queryex output into the tasklist
+rem file first; if queryex prints a different layout in PE (or nothing
+rem at all) the raw text says so, instead of the parse silently
+rem swallowing it.
+echo --- sc queryex AppXSVC --- >> "%TASKLIST_OUT%"
+sc queryex AppXSVC >> "%TASKLIST_OUT%" 2>&1
+echo --- sc queryex StateRepository --- >> "%TASKLIST_OUT%"
+sc queryex StateRepository >> "%TASKLIST_OUT%" 2>&1
 set "APPXSVC_EXIT="
 for /f "tokens=3" %%A in ('sc queryex AppXSVC 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "APPXSVC_EXIT=%%A"
 if defined APPXSVC_EXIT (echo appxsvc_exitcode=%APPXSVC_EXIT% >> "%PROBE_OUT%") else (echo appxsvc_exitcode=missing >> "%PROBE_OUT%")
@@ -233,24 +266,24 @@ rem right after it returns (the errorlevel is captured first, because
 rem the marker echo would clobber it). Last line _query with no _after
 rem means the query itself hung; last line _after with no result means
 rem the append write hung.
-echo mark_appxstore_calc_query=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_appxstore_calc_query=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_calc_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.WindowsCalculator" >nul
 set "APPXSTORE_CALC=%ERRORLEVEL%"
-echo mark_appxstore_calc_after=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_appxstore_calc_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_calc_after=%TIME: =0% >> "%PROBE_OUT%"
 if "%APPXSTORE_CALC%"=="0" (echo appxstore_calc=1 >> "%PROBE_OUT%") else (echo appxstore_calc=0 >> "%PROBE_OUT%")
-echo mark_appxstore_photos_query=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_appxstore_photos_query=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_photos_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.Photos" >nul
 set "APPXSTORE_PHOTOS=%ERRORLEVEL%"
-echo mark_appxstore_photos_after=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_appxstore_photos_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_photos_after=%TIME: =0% >> "%PROBE_OUT%"
 if "%APPXSTORE_PHOTOS%"=="0" (echo appxstore_photos=1 >> "%PROBE_OUT%") else (echo appxstore_photos=0 >> "%PROBE_OUT%")
-echo mark_appxstore_media_query=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_appxstore_media_query=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_media_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.ZuneMusic" >nul
 set "APPXSTORE_MEDIA=%ERRORLEVEL%"
-echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_OUT%"
 if "%APPXSTORE_MEDIA%"=="0" (echo appxstore_media=1 >> "%PROBE_OUT%") else (echo appxstore_media=0 >> "%PROBE_OUT%")
 
 rem --- uwp -------------------------------------------------------------------
-echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_appx=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"
 if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
     echo uwp_appx=1 >> "%PROBE_OUT%"
 ) else (
@@ -278,21 +311,21 @@ rem 44178703900 U3: the Calculator target arrived with the bang dropped,
 rem so the launch could never resolve. It is switched off around the
 rem three calls below; nothing in this section needs delayed expansion.
 setlocal DisableDelayedExpansion
-echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
 
-echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")
 
-echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
 if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
 endlocal
 
 rem --- payload ---------------------------------------------------------------
-echo mark_payload=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_payload=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_payload=%TIME: =0% >> "%PROBE_OUT%"
 set "PAYLOAD=1"
 for %%F in (
     "X:\Program Files\MICPE\PENetwork\PENetwork.exe"
@@ -305,7 +338,7 @@ for %%F in (
 echo payload=%PAYLOAD% >> "%PROBE_OUT%"
 
 rem --- brand ----------------------------------------------------------------
-echo mark_brand=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_brand=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_brand=%TIME: =0% >> "%PROBE_OUT%"
 set "BRAND=1"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation" /v Manufacturer 2>nul | find /i "MICPE" >nul
 if errorlevel 1 set "BRAND=0"
@@ -315,7 +348,7 @@ if not exist "%SystemRoot%\System32\oemlogo.bmp" set "BRAND=0"
 echo brand=%BRAND% >> "%PROBE_OUT%"
 
 rem --- installer -------------------------------------------------------------
-echo mark_installer=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_installer=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer=%TIME: =0% >> "%PROBE_OUT%"
 rem M6: run the installer in -cli -discoveronly mode so it writes
 rem installer_scan / installer_source / installer_name / installer_path
 rem into the same probe file (design §6). M7: when a source was found and
@@ -324,15 +357,23 @@ rem calls -cli -deploy, which writes installer_deploy after a successful
 rem apply + boot repair.
 rem The .wcs path is checked first so a missing installer fails loudly
 rem (installer_scan=0) instead of silently leaving the key out.
+rem Run 44386689307: the probe stopped after brand=1 and never wrote
+rem mark_installer, so the next partial probe cannot say whether it
+rem died entering this section or inside the .wcs call. The
+rem before/after pair below brackets the call the same way the reg
+rem query markers do.
+echo mark_installer_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer_before=%TIME: =0% >> "%PROBE_OUT%"
 set "MICPE_PROBE_FILE=%PROBE_OUT%"
 if exist "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" (
     pecmd.exe "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" -cli -discoveronly
 ) else (
     echo installer_scan=0 >> "%PROBE_OUT%"
 )
+echo mark_installer_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer_after=%TIME: =0% >> "%PROBE_OUT%"
 
 rem --- installer deploy (M7 harness, plan Task 17 Step 6) --------------------
-echo mark_installer_deploy=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_installer_deploy=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer_deploy=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_installer_deploy_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer_deploy_before=%TIME: =0% >> "%PROBE_OUT%"
 rem The probe is past the hang-prone UWP section and is about to hand
 rem control to the installer .wcs, which can legitimately take a long
 rem time on a real deploy; tell the watchdog to stop watching so it
@@ -357,7 +398,20 @@ pecmd.exe "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" -cli -
 if exist "%DEPLOY_TARGET%:\EFI\Microsoft\Boot\BCD" echo installer_boot=1 >> "%PROBE_OUT%"
 :skip_deploy
 
-echo probe_done=1 >> "%PROBE_OUT%"
+rem Run 44386689307: the deploy section is bracketed the same way as the
+rem scan above, so a probe that dies inside the .wcs deploy call leaves
+rem before without after. The end snapshot below is the last thing the
+rem probe writes before probe_done: explorer was already Not Responding
+rem before the UWP diagnostics in run 39, and its module list is
+rem complete, so a second dump says whether it ever built a window or
+rem changed state during the run.
+echo mark_installer_deploy_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer_deploy_after=%TIME: =0% >> "%PROBE_OUT%"
+echo --- tasklist at probe end --- >> "%TASKLIST_OUT%"
+tasklist /v >> "%TASKLIST_OUT%" 2>nul
+echo --- tasklist /m explorer.exe at probe end --- >> "%TASKLIST_OUT%"
+tasklist /m /fi "imagename eq explorer.exe" >> "%TASKLIST_OUT%" 2>nul
+
+echo probe_done=1 >> "%PROBE_LOCAL%" & echo probe_done=1 >> "%PROBE_OUT%"
 
 if "%MICPE_HOLD%"=="1" (
     echo.
@@ -390,7 +444,7 @@ rem (subroutine reached), start_before / start_after (the start line
 rem itself). The caller's uwp_launch_<app> line is the poll-finished
 rem witness. Marker values are %TIME% like the section markers; the
 rem preceding mark_uwp_launch_<app> line says which app was in flight.
-echo mark_uwp_enter=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_enter=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_enter=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 exit /b 1
 
@@ -421,9 +475,9 @@ rem in the run 27 boot.wim). The marker key carries the process name
 rem and round number, so the next partial probe names the exact step.
 rem choice /c Y /d Y /t 1 waits one second then takes the default; its
 rem errorlevel is ignored on purpose, only the timing matters.
-echo mark_uwp_start_before=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_start_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_start_before=%TIME: =0% >> "%PROBE_OUT%"
 start "" explorer.exe "%UWP_TARGET%"
-echo mark_uwp_start_after=%TIME: =0% >> "%PROBE_OUT%"
+echo mark_uwp_start_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_start_after=%TIME: =0% >> "%PROBE_OUT%"
 set "UWP_WAIT=0"
 :probe_uwp_poll
 echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_before=%TIME: =0% >> "%PROBE_OUT%"

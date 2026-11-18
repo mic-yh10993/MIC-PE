@@ -468,6 +468,40 @@ Describe 'Test-ProbeComplete' {
     }
 }
 
+Describe 'Test-ScreenshotFrozen' {
+    It 'is false when there is no probe file yet (still booting)' {
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 0 -CurrentProbeLength 0 -ProbeExists $false -ProbeContent '' | Should -BeFalse
+    }
+
+    It 'is false on the first screenshot (no previous hash)' {
+        Test-ScreenshotFrozen -PreviousHash '' -CurrentHash 'aaa' -PreviousProbeLength -1 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`n" | Should -BeFalse
+    }
+
+    It 'is false when the screenshots differ' {
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'bbb' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nexplorer=1`r`n" | Should -BeFalse
+    }
+
+    It 'is false when the probe grew between screenshots' {
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 150 -ProbeExists $true -ProbeContent "boot=1`r`nexplorer=1`r`n" | Should -BeFalse
+    }
+
+    It 'is true when the screen is frozen and the probe is silent' {
+        # Run 44386689307: the guest froze with the screen and the probe
+        # both silent, and the harness still waited out the full 45
+        # minutes. Two identical shots plus an ungrown probe is a
+        # frozen guest, not a slow one.
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nexplorer=1`r`n" | Should -BeTrue
+    }
+
+    It 'is false during the installer deploy (a long quiet deploy is legitimate)' {
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nmark_installer_deploy=20:31:02.39`r`n" | Should -BeFalse
+    }
+
+    It 'is false when the probe already completed' {
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nprobe_done=1`r`n" | Should -BeFalse
+    }
+}
+
 Describe 'dot-sourcing the helper' {
     It 'binds the helper param block in the caller scope, resetting same-named variables' {
         # This is the trap that killed runs 43884981629 and 43891758991:

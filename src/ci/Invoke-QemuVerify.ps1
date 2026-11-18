@@ -535,6 +535,36 @@ function Test-ProbeComplete {
     return ($Content -match '(?m)^probe_done=1\s*$')
 }
 
+function Test-ScreenshotFrozen {
+    [CmdletBinding()]
+    param(
+        [string] $PreviousHash,
+        [string] $CurrentHash,
+        [int] $PreviousProbeLength,
+        [int] $CurrentProbeLength,
+        [bool] $ProbeExists,
+        [string] $ProbeContent
+    )
+
+    # The guest is frozen only when three things are true at once:
+    # two consecutive screenshots are byte-identical, the probe file
+    # exists but has not grown since the last screenshot, and the
+    # probe is not in the long installer deploy (mark_installer_deploy
+    # means a deploy may legitimately take a long time with a static
+    # screen and a quiet probe). Any one of them alone is not enough:
+    # a healthy PE shows a static screen for minutes at a time (the
+    # probe's waits are silent), and a slow probe can be quiet between
+    # sections. Run 44386689307 wasted 45 of 72 minutes waiting out a
+    # freeze this would have caught at the second screenshot.
+    if (-not $ProbeExists) { return $false }
+    if (-not $PreviousHash -or -not $CurrentHash) { return $false }
+    if ($PreviousHash -ne $CurrentHash) { return $false }
+    if ($CurrentProbeLength -ne $PreviousProbeLength) { return $false }
+    if ($ProbeContent -match '(?m)^mark_installer_deploy=') { return $false }
+    if (Test-ProbeComplete -Content $ProbeContent) { return $false }
+    return $true
+}
+
 function Invoke-QemuVerify {
     [CmdletBinding()]
     param(
@@ -661,6 +691,8 @@ function Invoke-QemuVerify {
     $process = Start-Process -FilePath $QemuPath -ArgumentList $qemuArgString -PassThru -NoNewWindow
     $deadline = (Get-Date).AddMinutes($TimeoutMin)
     $shotIndex = 0
+    $prevShotHash = $null
+    $prevProbeLength = -1
     $nextShotAt = (Get-Date).AddMinutes(10)
     $bootKeyAt = (Get-Date).AddSeconds($BootKeyDelaySec)
     $bootKeysSent = 0
@@ -709,6 +741,29 @@ function Invoke-QemuVerify {
                 $shotIndex++
                 Save-QemuScreenshot -Port $MonitorPort -ScreenshotDir $ScreenshotDir -ShotIndex $shotIndex
                 $nextShotAt = (Get-Date).AddMinutes(10)
+
+                # Freeze detection (run 44386689307): the guest froze
+                # with the screen and the probe both silent, and the
+                # harness still waited out the full 45 minutes. Two
+                # consecutive byte-identical screenshots plus a probe
+                # file that has not grown since the last shot is a
+                # frozen guest — fail early instead of waiting.
+                # $probe is a hashtable until the first read, so only
+                # a string counts as probe text here.
+                $shotPath = Join-Path $ScreenshotDir ("shot-{0:d2}.ppm" -f $shotIndex)
+                if (Test-Path -LiteralPath $shotPath) {
+                    $probeText = if ($probe -is [string]) { $probe } else { '' }
+                    $probeLength = if ($probe -is [string]) { $probe.Length } else { 0 }
+                    $shotHash = (Get-FileHash -LiteralPath $shotPath -Algorithm MD5).Hash
+                    if (Test-ScreenshotFrozen -PreviousHash $prevShotHash -CurrentHash $shotHash `
+                            -PreviousProbeLength $prevProbeLength -CurrentProbeLength $probeLength `
+                            -ProbeExists (Test-Path -LiteralPath $probePath) -ProbeContent $probeText) {
+                        Write-Host '!!! screenshot frozen and probe silent: the guest appears wedged, failing early instead of waiting out the timeout'
+                        break
+                    }
+                    $prevShotHash = $shotHash
+                    $prevProbeLength = $probeLength
+                }
             }
 
             Start-Sleep -Seconds 10
