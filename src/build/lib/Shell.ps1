@@ -192,10 +192,11 @@ function Set-BootShell {
     Write-SubStep 'Fix-DriveLetters.cmd installed to System32\MICPE'
 
     # PECMD.EXE is third-party freeware and deliberately not in git. Until a
-    # step supplies it (payload asset or CI download, M5/M6), startnet.cmd
-    # falls back to the command shell; say so loudly in the build log.
+    # step supplies it (payload asset or CI download, M5/M6), this M2 step
+    # leaves the cmd fallback in place; a later step supplies the binary,
+    # so this warning is about the M2 step only, not the finished image.
     if (-not (Test-Path -LiteralPath (Join-Path $shellSrc 'PECMD.EXE'))) {
-        Write-Warn 'PECMD.EXE is not in src/shell; the image will boot to the cmd fallback until a PECMD binary is supplied'
+        Write-Warn 'PECMD.EXE is not in src/shell; this M2 step leaves the cmd fallback in place until a later step supplies the PECMD binary'
     }
 }
 

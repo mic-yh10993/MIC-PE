@@ -48,6 +48,18 @@ if not defined PROBE_DIR (
 >> "%PROBE_OUT%" echo share=%SHARE%
 if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
+rem --- pecmd markers ---------------------------------------------------------
+rem Diagnostic, run 44267918861: PECMD.INI and startnet.cmd write
+rem mark_pecmd_* and mark_startnet_* lines to
+rem %SystemDrive%\micpe-pecmd-marks.txt. Copy them into the probe file so the
+rem CI harness can see how far the PECMD chain got, even when this probe run
+rem is the startnet control call. mark_ keys are parsed but never asserted,
+rem see Assert-Probe. The type-in sits this early so the marks survive even
+rem if the probe dies in a later section.
+if exist "%SystemDrive%\micpe-pecmd-marks.txt" (
+    type "%SystemDrive%\micpe-pecmd-marks.txt" >> "%PROBE_OUT%"
+)
+
 rem --- drive letters ---------------------------------------------------------
 rem Fix-DriveLetters.cmd (startnet.cmd, user decision 2026-11-17 23:43) wrote
 rem pe_drive / win_drive / drive_fixed (and drive_fix_error on failure) to
