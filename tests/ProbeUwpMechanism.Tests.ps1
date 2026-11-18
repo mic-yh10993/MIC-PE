@@ -503,21 +503,65 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text | Should -Match 'StartMenuExperienceHost\.exe' -Because 'the check looks for the Start menu host by image name'
     }
 
-    It 'attempts to start the AppX services before launching (run 44349189039)' {
-        # If the services were only stopped, activation may work after
-        # this; if they are missing or refuse to start, the start
-        # errorlevel and the after-state say so. AppReadiness is only
-        # queried, never started: one variable at a time.
+    It 'does NOT start the AppX services this round, and records their last exit codes (run 44365018616)' {
+        # Control for run 39: the probe and the watchdog both stopped
+        # within ~15 seconds of the two sc start calls, so sc start is
+        # the prime suspect for the freeze — but explorer was already
+        # Not Responding before any sc start, so it cannot be convicted
+        # yet. This round the services are not started at all: one
+        # variable at a time. If the probe now runs through, sc start
+        # was the trigger; if it still stops at the same place, sc
+        # start is exonerated. The last exit codes are recorded
+        # instead: run 39 showed sc start returning 0 while the
+        # service stayed STOPPED.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Match 'sc start AppXSVC' -Because 'the deployment service is started before the launches'
-        $text | Should -Match 'sc start StateRepository' -Because 'the repository service is started before the launches'
-        $text | Should -Match 'appxsvc_start=' -Because 'the AppXSVC start outcome is recorded'
-        $text | Should -Match 'staterepo_start=' -Because 'the StateRepository start outcome is recorded'
-        $text | Should -Match 'appxsvc_after' -Because 'the AppXSVC state is re-checked after the start attempt'
-        $text | Should -Match 'staterepo_after' -Because 'the StateRepository state is re-checked after the start attempt'
+        $text | Should -Not -Match 'sc start AppXSVC' -Because 'the control run must not start AppXSVC'
+        $text | Should -Not -Match 'sc start StateRepository' -Because 'the control run must not start StateRepository'
         $text | Should -Not -Match 'sc start AppReadiness' -Because 'AppReadiness is only queried, not started'
-        $text.IndexOf('sc start AppXSVC') | Should -BeLessThan $text.IndexOf('call :probe_uwp CalculatorApp') -Because 'the services must be started before the first launch'
-        $text.IndexOf('sc start AppXSVC') | Should -BeGreaterThan $text.IndexOf('call :probe_svc AppXSVC appxsvc') -Because 'the before-state is recorded before the start attempt'
+        $text | Should -Not -Match 'appxsvc_start=' -Because 'no start attempt means no start outcome to record'
+        $text | Should -Not -Match 'staterepo_start=' -Because 'no start attempt means no start outcome to record'
+        $text | Should -Match 'sc queryex AppXSVC' -Because 'the stopped service exit code is read, not assumed'
+        $text | Should -Match 'sc queryex StateRepository' -Because 'the stopped service exit code is read, not assumed'
+        $text | Should -Match 'WIN32_EXIT_CODE' -Because 'queryex reports the service last exit code under that name'
+        $text | Should -Match 'appxsvc_exitcode=' -Because 'the AppXSVC last exit code is recorded'
+        $text | Should -Match 'staterepo_exitcode=' -Because 'the StateRepository last exit code is recorded'
+        $text.IndexOf('sc queryex AppXSVC') | Should -BeLessThan $text.IndexOf('call :probe_uwp CalculatorApp') -Because 'the exit codes are recorded before the first launch'
+        $text.IndexOf('sc queryex AppXSVC') | Should -BeGreaterThan $text.IndexOf('call :probe_svc AppXSVC appxsvc') -Because 'the before-state is recorded before the exit-code query'
+    }
+
+    It 'brackets each AppxAllUserStore query with before/after markers (run 44365018616)' {
+        # Run 39 stopped after appxstore_photos=1, in the third
+        # identical reg query or in the append write after it — the
+        # two look the same in the probe file. The _query marker is
+        # written before the query runs, the _after marker right after
+        # it returns, so the next partial probe says which it was.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        foreach ($app in @('calc', 'photos', 'media')) {
+            $text | Should -Match "mark_appxstore_${app}_query=" -Because "the $app query start is marked"
+            $text | Should -Match "mark_appxstore_${app}_after=" -Because "the $app query return is marked"
+        }
+        $text.IndexOf('mark_appxstore_calc_query') | Should -BeLessThan $text.IndexOf('find /i "Microsoft.WindowsCalculator"') -Because 'the calc query marker precedes its query'
+        $text.IndexOf('mark_appxstore_calc_after') | Should -BeLessThan $text.IndexOf('appxstore_calc=1') -Because 'the calc after-marker precedes its result echo'
+        $text.IndexOf('mark_appxstore_photos_query') | Should -BeLessThan $text.IndexOf('find /i "Microsoft.Windows.Photos"') -Because 'the photos query marker precedes its query'
+        $text.IndexOf('mark_appxstore_photos_after') | Should -BeLessThan $text.IndexOf('appxstore_photos=1') -Because 'the photos after-marker precedes its result echo'
+        $text.IndexOf('mark_appxstore_media_query') | Should -BeLessThan $text.IndexOf('find /i "Microsoft.ZuneMusic"') -Because 'the media query marker precedes its query'
+        $text.IndexOf('mark_appxstore_media_after') | Should -BeLessThan $text.IndexOf('appxstore_media=1') -Because 'the media after-marker precedes its result echo'
+        # The after-marker must not clobber the query errorlevel: the
+        # result echo reads a captured variable, not errorlevel.
+        $text | Should -Match 'APPXSTORE_CALC=%ERRORLEVEL%' -Because 'the calc query outcome is captured before the after-marker echo'
+        $text | Should -Match 'APPXSTORE_PHOTOS=%ERRORLEVEL%' -Because 'the photos query outcome is captured before the after-marker echo'
+        $text | Should -Match 'APPXSTORE_MEDIA=%ERRORLEVEL%' -Because 'the media query outcome is captured before the after-marker echo'
+    }
+
+    It 'dumps the modules loaded by the hung explorer (run 44365018616)' {
+        # Explorer is alive but Not Responding with no window; the
+        # module list says what it has loaded. It goes into the same
+        # tasklist file the build already collects.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'tasklist /m /fi "imagename eq explorer.exe"' -Because 'the module dump is scoped to explorer'
+        $text | Should -Match 'tasklist /m explorer.exe' -Because 'the dump is labelled in the tasklist file'
+        $text.IndexOf('tasklist /m') | Should -BeGreaterThan $text.IndexOf('folder_window_test=1') -Because 'the module dump runs after the folder-window test'
+        $text.IndexOf('tasklist /m') | Should -BeLessThan $text.IndexOf('mark_uwp_appx') -Because 'the module dump runs in the diagnostics section, before the launches'
     }
 
     It 'the folder-window test says whether explorer can create any window (run 44349189039)' {

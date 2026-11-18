@@ -124,9 +124,16 @@ if errorlevel 1 (echo ime=0 >> "%PROBE_OUT%") else (echo ime=1 >> "%PROBE_OUT%")
 
 rem --- uwp diagnostics -------------------------------------------------------
 rem Run 44349189039: three open questions from run 38, answered with
-rem read-only evidence except the two sc start attempts below, which
-rem are themselves the experiment (their outcomes are recorded either
-rem way, and the watchdog now bounds any stall they cause):
+rem read-only evidence. Run 44365018616 control: the probe and the
+rem watchdog both stopped within ~15 seconds of the two sc start calls
+rem in run 39 (probe after the Photos result line, watchdog after tick 8/12),
+rem so sc start is the prime suspect for the freeze — but explorer was
+rem already Not Responding before any sc start, so it cannot be
+rem convicted yet. This round the services are NOT started: one
+rem variable at a time. Their last exit codes are recorded instead
+rem (sc queryex WIN32_EXIT_CODE), and each AppxAllUserStore query is
+rem bracketed with before/after markers so the next partial probe says
+rem whether it died inside a reg query or in the append write after it.
 rem  1. UWP apps never appear in tasklist although the start lines return
 rem     at once. Online research (eval card §25) gives three stacked
 rem     candidates: the AppX deployment service never runs in PE so the
@@ -182,20 +189,29 @@ choice /c Y /d Y /t 3 >nul
 echo --- tasklist after folder-window test --- >> "%TASKLIST_OUT%"
 tasklist /v >> "%TASKLIST_OUT%" 2>nul
 echo folder_window_test=1 >> "%PROBE_OUT%"
+rem What explorer has loaded: a hung explorer with no window may be stuck
+rem in a shell extension or a missing shell host. The module list says
+rem which DLLs are in it; it goes into the same tasklist file so the
+rem artifact upload needs no change.
+echo --- tasklist /m explorer.exe --- >> "%TASKLIST_OUT%"
+tasklist /m /fi "imagename eq explorer.exe" >> "%TASKLIST_OUT%" 2>nul
 echo mark_uwp_svc=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_svc AppXSVC appxsvc
 call :probe_svc StateRepository staterepo
 call :probe_svc AppReadiness appreadiness
-rem Start the two deployment services and re-check: if they were only
-rem stopped, activation may work after this; if they are missing or
-rem refuse to start, the start errorlevel and the after-state say so.
-echo mark_uwp_svc_start=%TIME: =0% >> "%PROBE_OUT%"
-sc start AppXSVC >nul 2>&1
-echo appxsvc_start=%ERRORLEVEL% >> "%PROBE_OUT%"
-sc start StateRepository >nul 2>&1
-echo staterepo_start=%ERRORLEVEL% >> "%PROBE_OUT%"
-call :probe_svc AppXSVC appxsvc_after
-call :probe_svc StateRepository staterepo_after
+rem The two deployment services are NOT started this round (control
+rem for run 44365018616 — see the section header). Record each stopped
+rem service's last exit code instead: run 39 showed sc start returning
+rem 0 while the service stayed STOPPED, which means it started and
+rem died at once or SCM accepted a request it could not honour — the
+rem exit code says which.
+echo mark_uwp_svc_exitcode=%TIME: =0% >> "%PROBE_OUT%"
+set "APPXSVC_EXIT="
+for /f "tokens=3" %%A in ('sc queryex AppXSVC 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "APPXSVC_EXIT=%%A"
+if defined APPXSVC_EXIT (echo appxsvc_exitcode=%APPXSVC_EXIT% >> "%PROBE_OUT%") else (echo appxsvc_exitcode=missing >> "%PROBE_OUT%")
+set "STATEREPO_EXIT="
+for /f "tokens=3" %%A in ('sc queryex StateRepository 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "STATEREPO_EXIT=%%A"
+if defined STATEREPO_EXIT (echo staterepo_exitcode=%STATEREPO_EXIT% >> "%PROBE_OUT%") else (echo staterepo_exitcode=missing >> "%PROBE_OUT%")
 if exist "%ProgramData%\Microsoft\Windows\AppRepository\StateRepository-Machine.srd" (
     echo staterepo_db=1 >> "%PROBE_OUT%"
 ) else (
@@ -209,12 +225,29 @@ if exist "%SystemRoot%\System32\config\systemprofile\AppData\Local\Packages" (
 set "ENABLELUA="
 for /f "tokens=3" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLUA 2^>nul ^| find /i "EnableLUA"') do set "ENABLELUA=%%A"
 if defined ENABLELUA (echo enablelua=%ENABLELUA% >> "%PROBE_OUT%") else (echo enablelua=missing >> "%PROBE_OUT%")
+rem Run 44365018616: the probe stopped after the Photos result line, in the
+rem third identical reg query or in the append write after it — the two
+rem look the same in the probe file. Each query below is bracketed:
+rem the _query marker is written before it runs, the _after marker
+rem right after it returns (the errorlevel is captured first, because
+rem the marker echo would clobber it). Last line _query with no _after
+rem means the query itself hung; last line _after with no result means
+rem the append write hung.
+echo mark_appxstore_calc_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.WindowsCalculator" >nul
-if errorlevel 1 (echo appxstore_calc=0 >> "%PROBE_OUT%") else (echo appxstore_calc=1 >> "%PROBE_OUT%")
+set "APPXSTORE_CALC=%ERRORLEVEL%"
+echo mark_appxstore_calc_after=%TIME: =0% >> "%PROBE_OUT%"
+if "%APPXSTORE_CALC%"=="0" (echo appxstore_calc=1 >> "%PROBE_OUT%") else (echo appxstore_calc=0 >> "%PROBE_OUT%")
+echo mark_appxstore_photos_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.Photos" >nul
-if errorlevel 1 (echo appxstore_photos=0 >> "%PROBE_OUT%") else (echo appxstore_photos=1 >> "%PROBE_OUT%")
+set "APPXSTORE_PHOTOS=%ERRORLEVEL%"
+echo mark_appxstore_photos_after=%TIME: =0% >> "%PROBE_OUT%"
+if "%APPXSTORE_PHOTOS%"=="0" (echo appxstore_photos=1 >> "%PROBE_OUT%") else (echo appxstore_photos=0 >> "%PROBE_OUT%")
+echo mark_appxstore_media_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.ZuneMusic" >nul
-if errorlevel 1 (echo appxstore_media=0 >> "%PROBE_OUT%") else (echo appxstore_media=1 >> "%PROBE_OUT%")
+set "APPXSTORE_MEDIA=%ERRORLEVEL%"
+echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_OUT%"
+if "%APPXSTORE_MEDIA%"=="0" (echo appxstore_media=1 >> "%PROBE_OUT%") else (echo appxstore_media=0 >> "%PROBE_OUT%")
 
 rem --- uwp -------------------------------------------------------------------
 echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"

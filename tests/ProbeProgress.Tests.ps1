@@ -30,7 +30,19 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
             @{ Mark = 'mark_uwp_diag'; Work = 'set "TASKLIST_OUT=' }
             @{ Mark = 'mark_folder_window'; Work = 'start "" explorer.exe "%SystemDrive%\"' }
             @{ Mark = 'mark_uwp_svc'; Work = 'call :probe_svc AppXSVC appxsvc' }
-            @{ Mark = 'mark_uwp_svc_start'; Work = 'sc start AppXSVC' }
+            # Control markers (run 44365018616): the services are no
+            # longer started — the freeze followed the two sc start
+            # calls, so this round only records their last exit codes.
+            # Each AppxAllUserStore query is bracketed so a partial
+            # probe says whether it died inside the query or in the
+            # append write after it.
+            @{ Mark = 'mark_uwp_svc_exitcode'; Work = 'sc queryex AppXSVC' }
+            @{ Mark = 'mark_appxstore_calc_query'; Work = 'find /i "Microsoft.WindowsCalculator"' }
+            @{ Mark = 'mark_appxstore_calc_after'; Work = 'echo appxstore_calc=' }
+            @{ Mark = 'mark_appxstore_photos_query'; Work = 'find /i "Microsoft.Windows.Photos"' }
+            @{ Mark = 'mark_appxstore_photos_after'; Work = 'echo appxstore_photos=' }
+            @{ Mark = 'mark_appxstore_media_query'; Work = 'find /i "Microsoft.ZuneMusic"' }
+            @{ Mark = 'mark_appxstore_media_after'; Work = 'echo appxstore_media=' }
             @{ Mark = 'mark_uwp_appx'; Work = 'AppXDeploymentClient.dll' }
             @{ Mark = 'mark_uwp_launch_calculator'; Work = 'call :probe_uwp CalculatorApp' }
             @{ Mark = 'mark_uwp_launch_photos'; Work = 'call :probe_uwp Microsoft.Lightbox' }
