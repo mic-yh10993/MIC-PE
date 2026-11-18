@@ -205,18 +205,23 @@ Describe 'probe sync mechanism (run 44386689307)' {
         # probe.cmd tests it with `echo sync_test > COM1` and records
         # com1=1/0 from the redirect's errorlevel. This test proves the
         # errorlevel logic on real cmd.exe: a redirect to an existing
-        # device succeeds, a redirect to a device that does not exist
-        # fails.
+        # device succeeds, a redirect to a target that cannot be opened
+        # fails. The failing side is a path under a directory that does
+        # not exist, not a high COM number: CI run 44423069424 proved
+        # `> COM99` succeeds on Windows because cmd creates a plain
+        # file named COM99 (only COM1-COM9 are reserved device names),
+        # so a high COM number is not a missing-device sentinel at all.
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'com1-test.txt'
         $deviceFile = Join-Path $workDir 'serial-device.log'
+        $missingFile = Join-Path $workDir 'no-such-dir\device.log'
         $bat = Join-Path $workDir 'com1-test.bat'
         try {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 ('echo sync_test > "{0}" 2>nul' -f $deviceFile),
                 ('if errorlevel 1 (echo com1=0 >> "{0}") else (echo com1=1 >> "{0}")' -f $outFile),
-                'echo sync_test > COM99 2>nul',
+                ('echo sync_test > "{0}" 2>nul' -f $missingFile),
                 ('if errorlevel 1 (echo com1_missing=0 >> "{0}") else (echo com1_missing=1 >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
@@ -225,7 +230,7 @@ Describe 'probe sync mechanism (run 44386689307)' {
             $text = Get-Content -LiteralPath $outFile -Raw
             Write-Host "com1 test: [$text]"
             $text | Should -Match 'com1=1' -Because 'a redirect to an existing device succeeds'
-            $text | Should -Match 'com1_missing=0' -Because 'a redirect to a device that does not exist fails'
+            $text | Should -Match 'com1_missing=0' -Because 'a redirect to a target that cannot be opened fails'
             (Get-Content -LiteralPath $deviceFile -Raw) | Should -Match 'sync_test' -Because 'the successful write lands in the device file'
         }
         finally {
@@ -282,6 +287,12 @@ Describe 'probe local mirror (static)' {
         $text | Should -Match 'serial\.sys' -Because 'a missing driver is the first suspect when COM1 cannot be opened'
         $text | Should -Match 'SERIALCOMM' -Because 'the enumeration is read from the SERIALCOMM device map'
         $text | Should -Match 'echo serialcomm=0 >> "%PROBE_LOCAL%"'
+        # The enumeration reads the value directly with /v, not through
+        # a find pipeline: a command missing from PATH inside a pipeline
+        # kills the batch silently (run 44135105700), and reg.exe is not
+        # on the restricted PATH of the mechanism test.
+        $text | Should -Match 'reg query "HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM" /v \\Device\\Serial0 >nul 2>&1' -Because 'the /v form needs no pipeline'
+        $text | Should -Not -Match 'reg query "HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM" 2>nul \| find' -Because 'the piped form died in CI run 44423069424'
     }
 
     It 'probe-sync.cmd echoes the local file last line to the serial device' {

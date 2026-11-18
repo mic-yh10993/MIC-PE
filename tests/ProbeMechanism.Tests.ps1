@@ -187,6 +187,8 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
             $text | Should -Match 'boot=1'
             $text | Should -Match 'share=1'
             $text | Should -Match 'share_drive=C:\\'
+            $text | Should -Match 'com1=1' -Because 'the runner has a COM1 port, so the open test must succeed'
+            $text | Should -Match 'serialcomm=1' -Because 'the runner has COM1, so the /v form of the enumeration must read it (run 44410311576)'
             $text | Should -Match 'explorer=[01]'
             $text | Should -Match 'dwm=[01]'
             $text | Should -Match 'shell_ready=[01]'

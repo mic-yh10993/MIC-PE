@@ -75,7 +75,14 @@ rem mirror then needs a different retrieval path than the serial log.
 echo sync_test=%TIME: =0% > COM1 2>nul
 if errorlevel 1 (echo com1=0 >> "%PROBE_LOCAL%" & echo com1=0 >> "%PROBE_OUT%") else (echo com1=1 >> "%PROBE_LOCAL%" & echo com1=1 >> "%PROBE_OUT%")
 if exist "%SystemRoot%\System32\drivers\serial.sys" (echo serial_sys=1 >> "%PROBE_LOCAL%" & echo serial_sys=1 >> "%PROBE_OUT%") else (echo serial_sys=0 >> "%PROBE_LOCAL%" & echo serial_sys=0 >> "%PROBE_OUT%")
-reg query "HKLM\HARDWARE\DEVICEMAP\SERIALCOMM" 2>nul | find /i "\Device\Serial0" >nul
+rem No pipeline here on purpose (run 44135105700): a command missing
+rem from PATH inside a pipeline kills the batch silently, and reg.exe
+rem is not on the restricted PATH of the mechanism test. A bare
+rem reg query only sets errorlevel when it fails, so the batch
+rem continues and records serialcomm=0 either way. The /v form reads
+rem the \Device\Serial0 value directly instead of piping the whole
+rem key through find.
+reg query "HKLM\HARDWARE\DEVICEMAP\SERIALCOMM" /v \Device\Serial0 >nul 2>&1
 if errorlevel 1 (echo serialcomm=0 >> "%PROBE_LOCAL%" & echo serialcomm=0 >> "%PROBE_OUT%") else (echo serialcomm=1 >> "%PROBE_LOCAL%" & echo serialcomm=1 >> "%PROBE_OUT%")
 
 rem Watchdog (run 44285721257): if this probe stalls or dies mid-run, no
