@@ -338,11 +338,16 @@ function Invoke-UwpStep {
         Install-UwpApps -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot `
             -PackageNames (Get-UwpDefaults)
         Install-FrameHost -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
-        $regFiles = @('40-uwp.reg') |
+        $regFiles = @('40-uwp.reg', '60-werdumps.reg') |
             ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
         # 40-uwp.reg goes in as SYSTEM: its Appx sideload-policy key gives
         # Administrators only KEY_READ (CI run 44040699722). User decision
         # 2026-11-17 23:43: every registry import happens at CI build time.
+        # 60-werdumps.reg rides the same mount (its WER LocalDumps key is
+        # admin-writable, so it stays on the plain path): it makes WerFault
+        # write explorer's minidump to X:\CrashDumps when it crashes, so
+        # the probe can copy the dump to the share and locate the run 48
+        # BEX64 offset 0x1181ea's call stack.
         Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg')
         Assert-AppxPolicy -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)

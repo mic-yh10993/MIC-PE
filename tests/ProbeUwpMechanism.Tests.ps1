@@ -1825,3 +1825,132 @@ Describe 'probe.cmd run 48 harness liveness and activation diagnostics (run 48)'
         $text.IndexOf('appready_exitcode=') | Should -BeGreaterThan $text.IndexOf('staterepo_exitcode=') -Because 'the AppReadiness read follows the StateRepository read'
     }
 }
+
+Describe 'probe.cmd run 49 BEX64 breakpoint control and minidump capture (run 49)' {
+    BeforeAll {
+        # Same subroutine extractor as the run 47/48 Describes: extract
+        # by content (label to the next label), so the tests run
+        # against the real code, not a hand copy that can drift.
+        $script:ExtractProbeSub49 = {
+            param([string] $Label, [string] $StopLabel)
+            $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+            $start = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match "^$Label") { $start = $i; break }
+            }
+            if ($start -lt 0) { throw "subroutine $Label not found in probe.cmd" }
+            $end = $lines.Count - 1
+            for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+                if ($StopLabel -and ($lines[$i] -match "^$StopLabel")) { $end = $i - 1; break }
+            }
+            return ,@($lines[$start..$end])
+        }
+    }
+
+    It 'skips the folder-window creation this round (BEX64 breakpoint control)' {
+        # Run 48 died at 14:27, one minute after the folder-window test
+        # at 14:26:39, inside the same diag/uwp-opening window — the
+        # creation itself is the prime suspect for the c0000409
+        # failfast (CTray::Init, tray.cpp:595). If explorer still dies
+        # in the same window without it, the trigger is shell
+        # self-init; if it lives past diag, the trigger is the
+        # creation. The flag defaults to 0 (skipped); set it to 1 to
+        # restore the test. The tasklist snapshots stay: they say what
+        # explorer loaded (or that it is already gone).
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'set "FOLDER_WINDOW_TEST=0"' -Because 'the control is off by default this round'
+        $text | Should -Match 'if "%FOLDER_WINDOW_TEST%"=="1"' -Because 'the creation is conditional on the flag'
+        $text | Should -Match 'echo folder_window_test=0' -Because 'the skipped run records 0, not 1'
+        $text | Should -Match 'echo folder_window_skipped=1 >> "%PROBE_LOCAL%"' -Because 'the skip is dual-written like the other verdict keys'
+        $text | Should -Match 'echo folder_window_skipped=1 >> "%PROBE_OUT%"' -Because 'the skip is recorded on the share file too'
+        $flag = $text.IndexOf('set "FOLDER_WINDOW_TEST=0"')
+        $flag | Should -BeGreaterThan -1
+        $text.IndexOf('if "%FOLDER_WINDOW_TEST%"=="1"') | Should -BeGreaterThan $flag -Because 'the flag is set before it is read'
+        $text.IndexOf('start "" explorer.exe "%SystemDrive%\"') | Should -BeGreaterThan $text.IndexOf('if "%FOLDER_WINDOW_TEST%"=="1"') -Because 'the creation sits inside the flag branch'
+        $text.IndexOf('folder_window_test=1') | Should -BeGreaterThan $text.IndexOf('if "%FOLDER_WINDOW_TEST%"=="1"') -Because 'the 1 verdict is written only inside the flag branch'
+        $text.IndexOf('folder_window_test=1') | Should -BeLessThan $text.IndexOf('mark_uwp_appx') -Because 'the test still runs in the diagnostics section, before the launches'
+    }
+
+    It 'reads the deployment services Start value straight from the registry' {
+        # Run 48: sc queryex and sc qc print NOTHING in this PE, so
+        # svc_*_start stayed missing — a probe limitation, not a
+        # service fact. The Start DWORD is read from the service key
+        # itself, with the same for /f tokens=3 shape run 42/43
+        # already proved for Serial/Serenum. The sc qc reads stay:
+        # on a fuller image they may print again, and the two sources
+        # cross-check each other.
+        $reg = & $script:ExtractProbeSub49 ':probe_svc_reg' $null
+        $regBody = $reg -join "`n"
+        $regBody | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\%1" /v Start' -Because 'the Start value comes from the service key'
+        $regBody | Should -Match 'svc_%2_regstart=' -Because 'the registry Start value is recorded under the service prefix'
+        $regBody | Should -Match 'sc qc %1' -Because 'the sc qc reads stay for the cross-check'
+        $regBody | Should -Match 'svc_%2_start=' -Because 'the sc qc Start type is still recorded too'
+        $regBody | Should -Match 'SVC_REG_START_REG=missing' -Because 'a missing key leaves missing, like the other fields'
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        foreach ($svc in @('AppXSVC', 'StateRepository', 'AppReadiness')) {
+            $text | Should -Match "call :probe_svc_reg $svc" -Because "the $svc Start value is read in the activation block"
+        }
+    }
+
+    It 'copies every minidump to the share at each snapshot and at the end' {
+        # Report.wer alone cannot locate the 0x1181ea call stack — only
+        # a minidump can. WER LocalDumps (60-werdumps.reg, CI-time
+        # import) writes explorer's dump to X:\CrashDumps; the queue
+        # entry itself may also hold a .dmp/.hdmp. Each snapshot copies
+        # what exists right then, so a wedge in a later section cannot
+        # take the dump with it.
+        $dump = & $script:ExtractProbeSub49 ':probe_dump_copy' ':probe_poll_check'
+        $dumpBody = $dump -join "`n"
+        $dumpBody | Should -Match 'micpe-minidump-%~1-' -Because 'the copy name carries the section suffix'
+        $dumpBody | Should -Match 'WER\\ReportQueue' -Because 'the queue dumps are copied'
+        $dumpBody | Should -Match '"%%D\\\*\.dmp"' -Because 'the queue .dmp files are copied'
+        $dumpBody | Should -Match '"%%D\\\*\.hdmp"' -Because 'the queue .hdmp files are copied too'
+        $dumpBody | Should -Match 'CrashDumps\\\*\.dmp' -Because 'the LocalDumps folder is copied'
+        $dumpBody | Should -Match 'systemprofile\\AppData\\Local\\CrashDumps' -Because 'the system-profile dumps are copied'
+        $dumpBody | Should -Match 'dump_%~1_wer_dmp=' -Because 'the queue dump presence is recorded with its suffix'
+        $dumpBody | Should -Match 'dump_%~1_wer_dmp_copy=' -Because 'the queue copy landing is recorded with its suffix'
+        $dumpBody | Should -Match 'dump_%~1_localdumps=' -Because 'the LocalDumps presence is recorded with its suffix'
+        $dumpBody | Should -Match 'dump_%~1_localdumps_copy=' -Because 'the LocalDumps copy landing is recorded with its suffix'
+        $dumpBody | Should -Match 'dump_%~1_profile=' -Because 'the system-profile dump presence is recorded with its suffix'
+        $dumpBody | Should -Match 'dump_%~1_profile_copy=' -Because 'the system-profile copy landing is recorded with its suffix'
+        $dumpBody | Should -Match 'copy /y "%%F" "%PROBE_DIR%micpe-minidump-%~1-%%~nxF"' -Because 'the copy is a whole-file copy under the crashing PID name'
+        $dumpBody | Should -Match 'exit /b 0' -Because 'the subroutine returns cleanly'
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $calls = @([regex]::Matches($text, 'call :probe_dump_copy'))
+        $calls.Count | Should -Be 2 -Because 'one call site inside :probe_wer_snapshot (runs at diag, uwp, xcheck) plus one at the end snapshot'
+        $text | Should -Match 'call :probe_dump_copy end' -Because 'the end snapshot copies the dumps too'
+        $snap = & $script:ExtractProbeSub49 ':probe_wer_snapshot' ':probe_poll_check'
+        ($snap -join "`n") | Should -Match 'call :probe_dump_copy %~1' -Because 'each mid-run snapshot copies the dumps before returning'
+    }
+
+    It 're-scans the mirror late, at the end of the run' {
+        # Run 48: mirror=0 was NOT a scan miss — the scan already
+        # covered A: — the volume simply had not enumerated when the
+        # probe started. The end-of-run re-scan catches a
+        # late-enumerating volume; the mountvol dump goes into the
+        # tasklist file for a human cross-check.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'mirror_late=' -Because 'the late mirror verdict is recorded'
+        $text | Should -Match 'mirror_drive_late=' -Because 'the late mirror drive is recorded when one is found'
+        $text | Should -Match 'drives_late=' -Because 'the late drive list is recorded'
+        $text | Should -Match 'mountvol_end=1' -Because 'the end mountvol dump is recorded'
+        $text | Should -Match '--- mountvol \(end\) ---' -Because 'the end mountvol dump is labelled in the tasklist file'
+        $text | Should -Match 'for %%D in \(A B C D E F G H I J K L M N O P Q R S T U V W Y Z\)' -Because 'the late mirror scan covers A: (the run 47 miss)'
+        $text.IndexOf('mirror_late=') | Should -BeGreaterThan $text.IndexOf('echo dump_memory=') -Because 'the late scan runs in the end snapshot'
+        $text.IndexOf('mirror_late=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the late scan runs before probe_done'
+        $text.IndexOf('mountvol_end=1') | Should -BeGreaterThan $text.IndexOf('mirror_late=') -Because 'the mountvol dump follows the late scan'
+    }
+
+    It 'still does NOT start the AppX services (run 39 control stays in force)' {
+        # The run 39 control: the probe and the watchdog both stopped
+        # within ~15 seconds of two sc start calls. The start attempt
+        # is a separate experiment (after probe_done, where a wedge
+        # costs nothing), not this round.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Not -Match 'sc start AppXSVC' -Because 'the control run must not start AppXSVC'
+        $text | Should -Not -Match 'sc start StateRepository' -Because 'the control run must not start StateRepository'
+        $text | Should -Not -Match 'sc start AppReadiness' -Because 'AppReadiness is only queried, not started'
+        $text | Should -Not -Match 'appxsvc_start=' -Because 'no start attempt means no start outcome to record'
+        $text | Should -Not -Match 'staterepo_start=' -Because 'no start attempt means no start outcome to record'
+    }
+}

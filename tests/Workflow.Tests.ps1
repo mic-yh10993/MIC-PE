@@ -93,6 +93,25 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'verify-out/share/micpe-wer-explorer\*\.wer'
     }
 
+    It 'uploads the minidump copies with the verify artifacts (run 49)' {
+        # Run 48: Report.wer alone cannot locate the 0x1181ea call
+        # stack — only a minidump can. The probe copies every dump
+        # to the share under micpe-minidump-<section>-<name>, and
+        # the glob must pick them up.
+        $script:buildYml | Should -Match 'verify-out/share/micpe-minidump\*'
+    }
+
+    It 'wires 60-werdumps.reg into the UWP step as an admin import (run 49)' {
+        # The WER LocalDumps key is admin-writable, so it rides the
+        # plain $regFiles path with 40-uwp.reg — not the SYSTEM path,
+        # which is reserved for the Appx sideload-policy key
+        # (Administrators have only KEY_READ there, CI run
+        # 44040699722). CI-time import only (user decision
+        # 2026-11-17 23:43).
+        $script:buildScript | Should -Match "'40-uwp\.reg', '60-werdumps\.reg'" -Because 'the WER dumps patch is imported with the UWP patch'
+        $script:buildScript.Contains("-SystemRegFiles @('40-uwp.reg')") | Should -BeTrue -Because 'only 40-uwp.reg goes through the SYSTEM import'
+    }
+
     It 'derives the mirror dir from the work dir in Test-Stage.ps1 (run 44428428849)' {
         $script:testStage | Should -Match 'Join-Path \$WorkDir ''mirror'''
         $script:testStage | Should -Match '-MirrorDir \$mirrorDir'

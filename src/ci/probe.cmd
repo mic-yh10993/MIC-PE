@@ -356,12 +356,27 @@ rem Explorer-as-process opens a folder window (plan §14), so if no window
 rem appears at all, explorer cannot create any window — a deeper break
 rem than "no desktop". Start one, wait, and dump tasklist again: the two
 rem snapshots say whether a window appeared and what its title is.
+rem Run 49 (BEX64 breakpoint control): the folder-window creation is
+rem SKIPPED this round — run 48 died at 14:27, one minute after the
+rem folder-window test at 14:26:39, inside the same diag/uwp-opening
+rem window, so the creation itself is the prime suspect for the
+rem c0000409 stack overrun. If explorer still dies in the same window
+rem without it, the trigger is shell self-init; if it lives past diag,
+rem the trigger is the folder-window creation. Set the flag to 1 to
+rem restore the test. The tasklist snapshots below are read-only and
+rem stay: they say what explorer loaded (or that it is already gone).
+set "FOLDER_WINDOW_TEST=0"
 echo mark_folder_window=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_folder_window=%TIME: =0% >> "%PROBE_OUT%"
-start "" explorer.exe "%SystemDrive%\"
-choice /c Y /d Y /t 3 >nul
+if "%FOLDER_WINDOW_TEST%"=="1" (
+    start "" explorer.exe "%SystemDrive%\"
+    choice /c Y /d Y /t 3 >nul
+    echo folder_window_test=1 >> "%PROBE_OUT%"
+) else (
+    echo folder_window_test=0 >> "%PROBE_OUT%"
+    echo folder_window_skipped=1 >> "%PROBE_LOCAL%" & echo folder_window_skipped=1 >> "%PROBE_OUT%"
+)
 echo --- tasklist after folder-window test --- >> "%TASKLIST_OUT%"
 tasklist /v >> "%TASKLIST_OUT%" 2>nul
-echo folder_window_test=1 >> "%PROBE_OUT%"
 rem What explorer has loaded: a hung explorer with no window may be stuck
 rem in a shell extension or a missing shell host. The module list says
 rem which DLLs are in it; it goes into the same tasklist file so the
@@ -830,6 +845,9 @@ for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*") d
 echo wer_reports=%WER_REPORTS% >> "%PROBE_LOCAL%" & echo wer_reports=%WER_REPORTS% >> "%PROBE_OUT%"
 if defined PROBE_DIR if exist "%PROBE_DIR%micpe-wer-explorer.wer" (echo wer_wer_copy=1 >> "%PROBE_LOCAL%" & echo wer_wer_copy=1 >> "%PROBE_OUT%") else (echo wer_wer_copy=0 >> "%PROBE_LOCAL%" & echo wer_wer_copy=0 >> "%PROBE_OUT%")
 echo wer_explorer=%WER_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_explorer=%WER_EXPLORER% >> "%PROBE_OUT%"
+rem Run 49: the end snapshot's dump files, same copy as the mid-run
+rem snapshots — a wedge after this point must not take them.
+call :probe_dump_copy end
 
 rem Run 46 (explorer breakpoint): a silent exit writes no Event
 rem 1000/1001, but the log files themselves say whether the event-log
@@ -866,6 +884,26 @@ echo dump_crashdumps=%DUMP_CRASHDUMPS% >> "%PROBE_OUT%"
 set "DUMP_MEMORY=0"
 if exist "%SystemRoot%\MEMORY.dmp" set "DUMP_MEMORY=1"
 echo dump_memory=%DUMP_MEMORY% >> "%PROBE_OUT%"
+
+rem Run 49 (mirror late enumeration): run 48's mirror=0 was NOT a scan
+rem miss — the scan already covered A: — the volume simply had not
+rem enumerated when the probe started. Re-scan here, at the end of the
+rem run, so a late-enumerating volume is caught; the _late keys say
+rem what the guest sees when the probe finishes. The mountvol dump
+rem goes into the same tasklist file for a human cross-check.
+echo mark_mirror_late=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_mirror_late=%TIME: =0% >> "%PROBE_OUT%"
+set "MIRROR_LATE="
+for %%D in (A B C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+    if exist "%%D:\micpe-mirror.txt" set "MIRROR_LATE=%%D:\"
+)
+if defined MIRROR_LATE (echo mirror_late=1 >> "%PROBE_LOCAL%" & echo mirror_late=1 >> "%PROBE_OUT%") else (echo mirror_late=0 >> "%PROBE_LOCAL%" & echo mirror_late=0 >> "%PROBE_OUT%")
+if defined MIRROR_LATE (echo mirror_drive_late=%MIRROR_LATE% >> "%PROBE_LOCAL%" & echo mirror_drive_late=%MIRROR_LATE% >> "%PROBE_OUT%")
+set "DRIVES_LATE="
+for %%D in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist "%%D:\" set "DRIVES_LATE=!DRIVES_LATE!%%D"
+echo drives_late=%DRIVES_LATE% >> "%PROBE_LOCAL%" & echo drives_late=%DRIVES_LATE% >> "%PROBE_OUT%"
+echo --- mountvol (end) --- >> "%TASKLIST_OUT%"
+mountvol >> "%TASKLIST_OUT%" 2>nul
+echo mountvol_end=1 >> "%PROBE_LOCAL%" & echo mountvol_end=1 >> "%PROBE_OUT%"
 
 rem Run 48: probe_done goes to the local file FIRST, then the share
 rem copy is refreshed by a detached copy — never by a share append.
@@ -1156,6 +1194,63 @@ if exist "%SystemRoot%\System32\winevt\Logs\Application.evtx" (
 )
 if exist "%SystemRoot%\Minidump\*.dmp" (echo dump_%~1_minidump=1 >> "%PROBE_LOCAL%" & echo dump_%~1_minidump=1 >> "%PROBE_OUT%") else (echo dump_%~1_minidump=0 >> "%PROBE_LOCAL%" & echo dump_%~1_minidump=0 >> "%PROBE_OUT%")
 if exist "%SystemRoot%\MEMORY.DMP" (echo dump_%~1_memory=1 >> "%PROBE_LOCAL%" & echo dump_%~1_memory=1 >> "%PROBE_OUT%") else (echo dump_%~1_memory=0 >> "%PROBE_LOCAL%" & echo dump_%~1_memory=0 >> "%PROBE_OUT%")
+rem Run 49: the same section's dump files, copied to the share now so a
+rem wedge in a later section cannot take them with it.
+call :probe_dump_copy %~1
+exit /b 0
+
+:probe_dump_copy
+rem %1 = suffix: diag, uwp, xcheck or end. Run 49: Report.wer alone
+rem cannot locate the 0x1181ea call stack — only a minidump can. WER
+rem LocalDumps (60-werdumps.reg, CI-time import) writes explorer's dump
+rem to X:\CrashDumps when it crashes; the queue entry itself may also
+rem hold a .dmp/.hdmp. Copy every dump file to the share (a fresh
+rem create+write+close is the channel that survived run 47/48) and
+rem record whether one existed and whether a copy landed. Reads and
+rem copies only; a missing folder or a locked file leaves 0, never
+rem stalls the probe. The per-file loop keeps the original dump name
+rem (it carries the crashing PID); the if exist guards skip the
+rem no-match case, because an unmatched for pattern runs once literally.
+set "DUMP_WER_DMP=0"
+set "DUMP_WER_DMP_COPY=0"
+set "DUMP_LOCALDUMPS=0"
+set "DUMP_LOCALDUMPS_COPY=0"
+set "DUMP_PROFILE=0"
+set "DUMP_PROFILE_COPY=0"
+if defined PROBE_DIR if exist "%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*" (
+    for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*") do (
+        if exist "%%D\*.dmp" for %%F in ("%%D\*.dmp") do (
+            set "DUMP_WER_DMP=1"
+            copy /y "%%F" "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" >nul 2>&1
+            if exist "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" set "DUMP_WER_DMP_COPY=1"
+        )
+        if exist "%%D\*.hdmp" for %%F in ("%%D\*.hdmp") do (
+            set "DUMP_WER_DMP=1"
+            copy /y "%%F" "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" >nul 2>&1
+            if exist "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" set "DUMP_WER_DMP_COPY=1"
+        )
+    )
+)
+if defined PROBE_DIR if exist "%SystemDrive%\CrashDumps\*.dmp" (
+    for %%F in ("%SystemDrive%\CrashDumps\*.dmp") do (
+        set "DUMP_LOCALDUMPS=1"
+        copy /y "%%F" "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" >nul 2>&1
+        if exist "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" set "DUMP_LOCALDUMPS_COPY=1"
+    )
+)
+if defined PROBE_DIR if exist "%SystemRoot%\System32\config\systemprofile\AppData\Local\CrashDumps\*.dmp" (
+    for %%F in ("%SystemRoot%\System32\config\systemprofile\AppData\Local\CrashDumps\*.dmp") do (
+        set "DUMP_PROFILE=1"
+        copy /y "%%F" "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" >nul 2>&1
+        if exist "%PROBE_DIR%micpe-minidump-%~1-%%~nxF" set "DUMP_PROFILE_COPY=1"
+    )
+)
+echo dump_%~1_wer_dmp=%DUMP_WER_DMP% >> "%PROBE_LOCAL%" & echo dump_%~1_wer_dmp=%DUMP_WER_DMP% >> "%PROBE_OUT%"
+echo dump_%~1_wer_dmp_copy=%DUMP_WER_DMP_COPY% >> "%PROBE_LOCAL%" & echo dump_%~1_wer_dmp_copy=%DUMP_WER_DMP_COPY% >> "%PROBE_OUT%"
+echo dump_%~1_localdumps=%DUMP_LOCALDUMPS% >> "%PROBE_LOCAL%" & echo dump_%~1_localdumps=%DUMP_LOCALDUMPS% >> "%PROBE_OUT%"
+echo dump_%~1_localdumps_copy=%DUMP_LOCALDUMPS_COPY% >> "%PROBE_LOCAL%" & echo dump_%~1_localdumps_copy=%DUMP_LOCALDUMPS_COPY% >> "%PROBE_OUT%"
+echo dump_%~1_profile=%DUMP_PROFILE% >> "%PROBE_LOCAL%" & echo dump_%~1_profile=%DUMP_PROFILE% >> "%PROBE_OUT%"
+echo dump_%~1_profile_copy=%DUMP_PROFILE_COPY% >> "%PROBE_LOCAL%" & echo dump_%~1_profile_copy=%DUMP_PROFILE_COPY% >> "%PROBE_OUT%"
 exit /b 0
 
 :probe_poll_check
@@ -1232,12 +1327,22 @@ rem Reads only; never starts anything — the run 39 control (no
 rem sc start in this probe) stays in force. The goto avoids a
 rem parenthesised block: %SVC_REG_DLL_X% would expand at block-parse
 rem time, before the call set line runs.
+rem Run 49: sc qc prints NOTHING in this PE (run 48 proved it — the two
+rem queryex title lines sit adjacent in the tasklist file with no output
+rem between), so svc_*_start stayed missing. Read the Start value
+rem straight from the service key instead — the same for /f tokens=3
+rem shape run 42/43 already proved for Serial/Serenum. A missing key
+rem leaves missing; a present value is the hex DWORD (0x2 auto, 0x3
+rem manual, 0x4 disabled). The sc qc reads stay: on a fuller image
+rem they may print again, and the two sources cross-check each other.
 set "SVC_REG_START=missing"
+set "SVC_REG_START_REG=missing"
 set "SVC_REG_DLL=missing"
 set "SVC_REG_DLL_EXISTS=0"
 set "SVC_REG_OBJ=missing"
 set "SVC_REG_DLL_X="
 for /f "tokens=3" %%A in ('sc qc %1 2^>nul ^| find /i "START_TYPE"') do set "SVC_REG_START=%%A"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\%1" /v Start 2^>nul ^| find /i "Start"') do set "SVC_REG_START_REG=%%A"
 for /f "tokens=2,*" %%A in ('sc qc %1 2^>nul ^| find /i "SERVICE_START_NAME"') do set "SVC_REG_OBJ=%%B"
 for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\%1\Parameters" /v ServiceDll 2^>nul ^| find /i "ServiceDll"') do set "SVC_REG_DLL=%%B"
 if "%SVC_REG_DLL%"=="missing" goto :svc_reg_write
@@ -1245,6 +1350,7 @@ call set "SVC_REG_DLL_X=%SVC_REG_DLL%"
 if exist "%SVC_REG_DLL_X%" set "SVC_REG_DLL_EXISTS=1"
 :svc_reg_write
 echo svc_%2_start=%SVC_REG_START% >> "%PROBE_LOCAL%" & echo svc_%2_start=%SVC_REG_START% >> "%PROBE_OUT%"
+echo svc_%2_regstart=%SVC_REG_START_REG% >> "%PROBE_LOCAL%" & echo svc_%2_regstart=%SVC_REG_START_REG% >> "%PROBE_OUT%"
 echo svc_%2_dll=%SVC_REG_DLL% >> "%PROBE_LOCAL%" & echo svc_%2_dll=%SVC_REG_DLL% >> "%PROBE_OUT%"
 echo svc_%2_dll_exists=%SVC_REG_DLL_EXISTS% >> "%PROBE_LOCAL%" & echo svc_%2_dll_exists=%SVC_REG_DLL_EXISTS% >> "%PROBE_OUT%"
 echo svc_%2_obj=%SVC_REG_OBJ% >> "%PROBE_LOCAL%" & echo svc_%2_obj=%SVC_REG_OBJ% >> "%PROBE_OUT%"

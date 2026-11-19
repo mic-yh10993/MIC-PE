@@ -334,6 +334,7 @@ jobs:
             verify-out/share/micpe-system-xcheck.evtx
             verify-out/share/micpe-application-xcheck.evtx
             verify-out/share/micpe-wer-explorer*.wer
+            verify-out/share/micpe-minidump*
             verify-out/mirror/micpe-probe-local.txt
             verify-out/shots/*.ppm
             verify-out/qemu.log
