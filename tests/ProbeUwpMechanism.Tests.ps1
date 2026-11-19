@@ -865,6 +865,35 @@ Describe 'explorer CPU time (run 44428428849)' {
         }
     }
 
+    It 'C1diag: dump raw tasklist /v /fo list output for the C1 failure (run 44450473618)' -Skip:(-not $IsWindows) {
+        # Diagnostic only: C1 yields missing on the runner even with a
+        # cmd.exe filter, although the same for /f shape parses reg
+        # query output fine (serial_start=0x3 in the head test). Dump
+        # what tasklist actually produces here, so the next fix is
+        # evidence-led. Always passes when the dump exists; C1 stays
+        # strict next to it.
+        $workDir = & $script:NewWorkDir
+        $rawFile = Join-Path $workDir 'tasklist-raw.txt'
+        $bat = Join-Path $workDir 'tasklist-dump.bat'
+        try {
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                ('tasklist /v /fo list /fi "imagename eq cmd.exe" > "{0}" 2>&1' -f $rawFile),
+                ('tasklist /fi "imagename eq cmd.exe" /nh >> "{0}" 2>&1' -f $rawFile),
+                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do echo PARSED=%%C >> "{0}"' -f $rawFile
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $rawFile -Raw -ErrorAction SilentlyContinue
+            Write-Host "tasklist raw dump: [$text]"
+            $text | Should -Not -BeNullOrEmpty -Because 'the dump file must exist for the diagnosis'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'C1b: the same snippet WITH /nh yields missing on real cmd.exe (run 44441708839)' -Skip:(-not $IsWindows) {
         # Reverse control for C1: the exact pre-fix snippet, /nh and
         # all, must produce missing on the same runner where C1
