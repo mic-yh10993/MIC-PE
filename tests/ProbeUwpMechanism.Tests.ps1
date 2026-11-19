@@ -737,6 +737,163 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text.IndexOf('wer_explorer=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the WER check runs before probe_done'
     }
 
+    It 'checks explorer liveness mid-diagnosis to split the death window (run 46)' {
+        # Run 45: explorer died during the diagnostics — last alive
+        # evidence the second tasklist snapshot, first dead evidence the
+        # Calculator guard — so the death window spans the whole
+        # appxstore/host-query stretch. One liveness check (plus a CPU
+        # sample) mid-diagnosis splits that window at the queries.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'explorer_mid_diag=' -Because 'the mid-diagnosis liveness check is recorded'
+        $text | Should -Match 'call :probe_explorer_cpu diag' -Because 'the mid-diagnosis CPU sample brackets the queries'
+        $text.IndexOf('explorer_mid_diag=') | Should -BeGreaterThan $text.IndexOf('appxstore_startmenuexperiencehost=') -Because 'the check runs after the host queries'
+        $text.IndexOf('explorer_mid_diag=') | Should -BeLessThan $text.IndexOf('mark_uwp_appx') -Because 'the check runs before the UWP launches'
+    }
+
+    It 'dumps tasklist /svc so a busy svchost can be identified (run 46)' {
+        # Run 45: svchost PID 1072 burned ~1:45 of CPU in the UWP
+        # section. tasklist /v shows the CPU time but not the hosted
+        # services; the /svc dump names them.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'tasklist /svc' -Because 'the service dump names the hosted services per process'
+        $text | Should -Match 'svc_dump=1' -Because 'the dump is recorded'
+        $text.IndexOf('tasklist /svc') | Should -BeGreaterThan $text.IndexOf('tasklist_dump=1') -Because 'the dump goes into the tasklist file'
+    }
+
+    It 'dumps the mirror volume root and counts its files (run 46)' {
+        # Run 44/45: mirror=0 with drives=CDX — the volume is visible
+        # but the sentinel is not. The root listing says whether the
+        # volume is empty (vvfat delivered nothing) or holds files
+        # under a different name.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        # The echo prefix matters: a bare 'mirror_root_files=' also
+        # matches the `set "MIRROR_ROOT_FILES="` assignment (-Match
+        # is case-insensitive), so without it this test would pass
+        # even with the echo deleted (reverse control, run 46).
+        $text | Should -Match 'echo mirror_root_files=' -Because 'the file count on the mirror volume is recorded'
+        $text | Should -Match 'mirror_root_drive=' -Because 'which drive was listed is recorded'
+        $text | Should -Match 'dir "%MIRROR_ROOT%"' -Because 'the root listing is dumped into the tasklist file'
+        $text | Should -Match 'if defined MIRROR_DIR set "MIRROR_ROOT=%MIRROR_DIR%"' -Because 'the sentinel-found drive is preferred'
+        $text | Should -Match 'if not defined MIRROR_ROOT if exist "D:\\" set "MIRROR_ROOT=D:\\"' -Because 'D: is the fallback on the CI layout'
+    }
+
+    It 'copies each explorer WER Report.wer into the tasklist file (run 46)' {
+        # The queue name/time only says "an explorer crash happened at
+        # 06:35". The faulting module, exception code and offset live in
+        # the Report.wer text file inside each entry; the probe copies
+        # them into the already-collected tasklist file.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'Report\.wer' -Because 'the report text is copied, not just the entry name'
+        $text | Should -Match 'wer_reports=' -Because 'how many reports were found is recorded'
+        $text | Should -Match 'ReportQueue\\\*explorer\*' -Because 'only explorer entries are copied from the queue'
+        $text | Should -Match 'ReportArchive\\\*explorer\*' -Because 'only explorer entries are copied from the archive'
+        $text.IndexOf('wer_reports=') | Should -BeGreaterThan $text.IndexOf('wer_explorer=') -Because 'the report dump runs with the WER check'
+        $text.IndexOf('wer_reports=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the report dump runs before probe_done'
+    }
+
+    It 'records event-log existence and copies the logs for host-side parsing, without querying wevtutil (run 46)' {
+        # A silent exit writes no Event 1000/1001, but the log files
+        # themselves say whether the event-log service ran at all in
+        # this PE. wevtutil against a stopped log service is a stall
+        # risk one line before probe_done, so it is never queried.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'evtx_system=' -Because 'the System log existence is recorded'
+        $text | Should -Match 'evtx_system_size=' -Because 'the System log size is recorded'
+        $text | Should -Match 'evtx_system_copy=' -Because 'whether the copy landed is recorded'
+        $text | Should -Match 'evtx_app=' -Because 'the Application log existence is recorded'
+        $text | Should -Match 'micpe-system\.evtx' -Because 'the System log is copied to the share for host-side parsing'
+        $text | Should -Match 'micpe-application\.evtx' -Because 'the Application log is copied too'
+        # wevtutil appears only in rem comments (the decision not to
+        # query it is documented there); no command line may invoke it.
+        $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $wevtLines = @($probeLines | Where-Object { $_ -match 'wevtutil' })
+        $wevtLines.Count | Should -BeGreaterThan 0 -Because 'the no-wevtutil decision is documented in the probe'
+        foreach ($line in $wevtLines) {
+            $line.Trim() | Should -Match '^rem' -Because "wevtutil must only appear in a comment, never as a command: $line"
+        }
+        $text.IndexOf('evtx_system=') | Should -BeGreaterThan $text.IndexOf('wer_explorer=') -Because 'the log check runs with the WER check'
+        $text.IndexOf('evtx_system=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the log check runs before probe_done'
+    }
+
+    It 'records whether any crash dump was written (run 46)' {
+        # Runs 41-45: werfault_end=0 every time, so these are expected
+        # 0 — the check is the evidence, not the expectation.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'dump_minidump=' -Because 'a minidump would be the breakpoint evidence'
+        $text | Should -Match 'dump_crashdumps=' -Because 'the SYSTEM CrashDumps directory is checked'
+        $text | Should -Match 'dump_memory=' -Because 'a full MEMORY.dmp is checked'
+        $text | Should -Match 'Minidump\\\*\.dmp' -Because 'the minidump check is a wildcard existence check'
+        $text.IndexOf('dump_minidump=') | Should -BeGreaterThan $text.IndexOf('wer_explorer=') -Because 'the dump checks run with the WER check'
+        $text.IndexOf('dump_minidump=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the dump checks run before probe_done'
+    }
+
+    It 'cross-checks UWP launches without the explorer guard (run 46)' {
+        # Run 45's three uwp_launch_*=0 are NOT a cross-validation:
+        # all three failed at the explorer guard, before any real
+        # launch attempt. The cross-check retries each app through a
+        # launch path that does not go through the explorer.exe
+        # process, so a 0 here means the activation itself failed.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text.Contains('call :probe_xcheck CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"') | Should -Be $true -Because 'Calculator is retried without the guard'
+        $text.Contains('call :probe_xcheck Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"') | Should -Be $true -Because 'Photos is retried without the guard'
+        $text.Contains('call :probe_xcheck Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"') | Should -Be $true -Because 'Media Player is retried without the guard'
+        $text | Should -Match 'xcheck_launch_calculator=' -Because 'the cross-check result is recorded per app'
+        $text | Should -Match 'xcheck_launch_photos='
+        $text | Should -Match 'xcheck_launch_media='
+        $text | Should -Match 'xcheck_explorer_before=' -Because 'the shell state at cross-check entry is recorded'
+        $text | Should -Match 'xcheck_explorer_after=' -Because 'whether the shell survived the retries is recorded'
+        $text | Should -Match 'xcheck_framehost_after=' -Because 'whether the frame host spawned is recorded'
+        $text.IndexOf('mark_xcheck=') | Should -BeGreaterThan $text.IndexOf('call :probe_svc AppXSVC appxsvc_after') -Because 'the cross-check runs after the service re-checks'
+        $text.IndexOf('mark_xcheck=') | Should -BeLessThan $text.IndexOf('mark_payload') -Because 'the cross-check runs before the payload section'
+        # The three calls run inside their own DisableDelayedExpansion
+        # block (the bang must survive, U3), separate from the guarded
+        # launches' block.
+        $xcheckCalls = @([regex]::Matches($text, 'call :probe_xcheck'))
+        $xcheckCalls.Count | Should -Be 3 -Because 'the probe cross-checks exactly three UWP apps'
+        $off = $text.IndexOf('setlocal DisableDelayedExpansion', $text.IndexOf('mark_xcheck='))
+        $off | Should -BeGreaterThan -1 -Because 'the cross-check calls must run with delayed expansion off'
+        $off | Should -BeLessThan $xcheckCalls[0].Index -Because 'the switch-off must come before the first cross-check call'
+        $on = $text.IndexOf('endlocal', $xcheckCalls[0].Index)
+        $on | Should -BeGreaterThan $xcheckCalls[2].Index -Because 'delayed expansion must stay off until after the last cross-check call'
+    }
+
+    It 'the cross-check launch does not go through explorer.exe (run 46)' {
+        # The whole point of the cross-check is a launch path that
+        # does not need a running shell. :probe_xcheck must contain
+        # no explorer guard and no explorer.exe in its start line.
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $sub = -1; $start = -1
+        for ($i = 0; $i -lt $probe.Count; $i++) {
+            if ($probe[$i] -match '^:probe_xcheck') { $sub = $i }
+            if ($sub -ge 0 -and $probe[$i] -match '^\s*start ""') { $start = $i; break }
+        }
+        $sub | Should -BeGreaterThan -1 -Because 'probe.cmd must carry the :probe_xcheck subroutine'
+        $start | Should -BeGreaterThan $sub -Because 'the subroutine must launch the app'
+        $probe[$start] | Should -Match 'start "" "%XCHECK_TARGET%"' -Because 'the launch is a plain ShellExecute of the shell:AppsFolder target'
+        $probe[$start] | Should -Not -Match 'explorer\.exe' -Because 'the launch must not go through the explorer.exe process'
+        $head = $probe[$sub..($start - 1)] -join "`n"
+        $head | Should -Not -Match 'explorer_guard=0' -Because 'there is no explorer guard in the cross-check'
+        $tail = $probe[$sub..($probe.Count - 1)] -join "`n"
+        $tail | Should -Match ':probe_xcheck_poll' -Because 'the cross-check wait is a poll loop'
+        $tail | Should -Match 'choice /c Y /d Y /t 1' -Because 'each poll step waits about one second'
+        $tail | Should -Match 'if %XCHECK_WAIT% lss 10 goto :probe_xcheck_poll' -Because 'the poll gives up after ten steps instead of hanging'
+    }
+
+    It 'the cross-check poll marks every round (run 46)' {
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $sub = -1
+        for ($i = 0; $i -lt $probe.Count; $i++) {
+            if ($probe[$i] -match '^:probe_xcheck') { $sub = $i; break }
+        }
+        $sub | Should -BeGreaterThan -1 -Because 'probe.cmd must carry the :probe_xcheck subroutine'
+        $tail = $probe[$sub..($probe.Count - 1)] -join "`n"
+        $tail | Should -Match 'mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_wait_before=%TIME: =0%' -Because 'each round marks the wait start'
+        $tail | Should -Match 'mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_wait_after=%TIME: =0%' -Because 'each round marks the wait end'
+        $tail | Should -Match 'mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_check_after=%TIME: =0%' -Because 'each round marks the check end'
+        $pollLines = @($probe | Where-Object { $_ -match 'echo mark_xcheck_poll_' })
+        $pollLines.Count | Should -Be 3 -Because 'one marker per poll step: wait_before, wait_after, check_after'
+    }
+
     It 'W1: the WER capture copies an explorer entry name and time, and skips other entries (run 44441708839)' -Skip:(-not $IsWindows) {
         # The verbatim capture snippet from probe.cmd, run against a
         # fake WER tree (ProgramData redirected to the work dir, so the
@@ -837,6 +994,164 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
             $text | Should -Match 'wer_explorer=0'
             $text | Should -Not -Match 'wer_explorer_name='
             $text | Should -Not -Match 'wer_explorer_time='
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'X1: the cross-check section completes with Explorer running and records honest 0s (run 46)' -Skip:(-not $IsWindows) {
+        # The genuine uwp section (guarded launches + cross-check) run
+        # on the runner: Explorer is running, the three UWP apps are
+        # absent on Server, so every launch is an honest 0 — but the
+        # section must complete, the cross-check must attempt all three
+        # apps without the guard, and the frame host must stay 0.
+        $workDir = & $script:NewWorkDir
+        $probeOut = Join-Path $workDir 'micpe-probe.txt'
+        $bat = Join-Path $workDir 'probe-uwp.bat'
+        try {
+            & $script:BuildUwpBatch $bat $probeOut
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
+            Write-Host "probe file: [$text]"
+            $result.TimedOut | Should -Be $false -Because 'a stall must surface as a timeout, not a hang of CI'
+            $text | Should -Match 'xcheck_explorer_before=1' -Because 'Explorer is running on the runner'
+            $text | Should -Match 'xcheck_launch_calculator=0' -Because 'Calculator is absent on Server, so the cross-check honestly reports 0'
+            $text | Should -Match 'xcheck_launch_photos=0'
+            $text | Should -Match 'xcheck_launch_media=0'
+            $text | Should -Match 'xcheck_explorer_after=1' -Because 'the retries must not kill the running shell'
+            $text | Should -Match 'xcheck_framehost_after=0' -Because 'no UWP app launched, so no frame host spawned'
+            $text | Should -Match 'probe_uwp_done=1'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'W3: the WER Report.wer dump copies explorer reports and counts them (run 46)' -Skip:(-not $IsWindows) {
+        # The verbatim dump snippet from probe.cmd, run against a fake
+        # WER tree (ProgramData redirected to the work dir, so the real
+        # WER queues are never touched). The queue holds one explorer
+        # entry with a Report.wer and one notepad entry with a Report.wer;
+        # the archive holds one explorer entry with a Report.wer. Only
+        # the explorer reports may be copied, each with its entry header,
+        # and wer_reports must count exactly those two.
+        $workDir = & $script:NewWorkDir
+        $werRoot = Join-Path $workDir 'ProgramData'
+        $queue = Join-Path $werRoot 'Microsoft\\Windows\\WER\\ReportQueue'
+        $archive = Join-Path $werRoot 'Microsoft\\Windows\\WER\\ReportArchive'
+        $qDir = Join-Path $queue 'AppCrash_explorer.exe_9f2a1c'
+        $nDir = Join-Path $queue 'AppCrash_notepad.exe_9f2a1c'
+        $aDir = Join-Path $archive 'AppCrash_explorer.exe_7b3e9d'
+        New-Item -ItemType Directory -Path $qDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $nDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $aDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $qDir 'Report.wer') -Value @('Version=1', 'Sig[4].Name=Fault Module Name', 'Sig[4].Value=EXPLORERFRAME.DLL', 'Sig[7].Name=Exception Code', 'Sig[7].Value=c0000005') -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $nDir 'Report.wer') -Value @('Version=1', 'Sig[4].Value=NOTEPAD.EXE') -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $aDir 'Report.wer') -Value @('Version=1', 'Sig[4].Name=Fault Module Name', 'Sig[4].Value=SHELL32.DLL') -Encoding ascii
+        $outFile = Join-Path $workDir 'wer-out.txt'
+        $taskFile = Join-Path $workDir 'micpe-tasklist.txt'
+        $bat = Join-Path $workDir 'wer-dump.bat'
+        try {
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                ('set \"ProgramData={0}\"' -f $werRoot),
+                ('set \"PROBE_OUT={0}\"' -f $outFile),
+                ('set \"PROBE_LOCAL={0}\"' -f $outFile),
+                ('set \"TASKLIST_OUT={0}\"' -f $taskFile),
+                'set \"WER_REPORTS=0\"',
+                'for /d %%D in (\"%ProgramData%\\Microsoft\\Windows\\WER\\ReportQueue\\*explorer*\") do (',
+                '    if exist \"%%D\\Report.wer\" (',
+                '        echo --- WER ReportQueue %%~nxD --- >> \"%TASKLIST_OUT%\"',
+                '        type \"%%D\\Report.wer\" >> \"%TASKLIST_OUT%\" 2>nul',
+                '        set /a WER_REPORTS+=1',
+                '    )',
+                ')',
+                'for /d %%D in (\"%ProgramData%\\Microsoft\\Windows\\WER\\ReportArchive\\*explorer*\") do (',
+                '    if exist \"%%D\\Report.wer\" (',
+                '        echo --- WER ReportArchive %%~nxD --- >> \"%TASKLIST_OUT%\"',
+                '        type \"%%D\\Report.wer\" >> \"%TASKLIST_OUT%\" 2>nul',
+                '        set /a WER_REPORTS+=1',
+                '    )',
+                ')',
+                'echo wer_reports=%WER_REPORTS% >> \"%PROBE_LOCAL%\" & echo wer_reports=%WER_REPORTS% >> \"%PROBE_OUT%\"'
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            $task = if (Test-Path -LiteralPath $taskFile) { Get-Content -LiteralPath $taskFile -Raw } else { '' }
+            Write-Host "wer dump probe: [$text]"
+            Write-Host "wer dump tasklist: [$task]"
+            $text | Should -Match 'wer_reports=2' -Because 'one queue report plus one archive report'
+            $task | Should -Match 'WER ReportQueue AppCrash_explorer\\.exe_9f2a1c' -Because 'the queue report is headed with its entry name'
+            $task | Should -Match 'EXPLORERFRAME\\.DLL' -Because 'the queue Report.wer text is copied'
+            $task | Should -Match 'c0000005' -Because 'the exception code line is copied too'
+            $task | Should -Match 'WER ReportArchive AppCrash_explorer\\.exe_7b3e9d' -Because 'the archive report is headed the same way'
+            $task | Should -Match 'SHELL32\\.DLL' -Because 'the archive Report.wer text is copied'
+            $task | Should -Not -Match 'NOTEPAD\\.EXE' -Because 'a non-explorer entry must not be copied'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'M1: the mirror root count counts the files on the volume (run 46)' -Skip:(-not $IsWindows) {
+        # The verbatim mirror-root snippet from probe.cmd, run against
+        # a temp directory holding exactly three files: the count must
+        # be 3, the drive must be recorded, and the listing must land
+        # in the tasklist file. A second run with an empty directory
+        # must report 0, not missing.
+        $workDir = & $script:NewWorkDir
+        $mirrorDir = Join-Path $workDir 'mirror'
+        New-Item -ItemType Directory -Path $mirrorDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $mirrorDir 'micpe-mirror.txt') -Value 'sentinel' -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $mirrorDir 'a.txt') -Value 'a' -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $mirrorDir 'b.txt') -Value 'b' -Encoding ascii
+        $outFile = Join-Path $workDir 'mirror-out.txt'
+        $taskFile = Join-Path $workDir 'micpe-tasklist.txt'
+        $bat = Join-Path $workDir 'mirror-count.bat'
+        $snippet = @(
+            '@echo off',
+            'setlocal EnableDelayedExpansion',
+            ('set \"MIRROR_DIR={0}\"' -f $mirrorDir),
+            ('set \"PROBE_OUT={0}\"' -f $outFile),
+            ('set \"TASKLIST_OUT={0}\"' -f $taskFile),
+            'set \"MIRROR_ROOT=\"',
+            'if defined MIRROR_DIR set \"MIRROR_ROOT=%MIRROR_DIR%\"',
+            'if not defined MIRROR_ROOT if exist \"D:\\\" set \"MIRROR_ROOT=D:\\\"',
+            'if defined MIRROR_ROOT (',
+            '    echo --- dir %MIRROR_ROOT% --- >> \"%TASKLIST_OUT%\"',
+            '    dir \"%MIRROR_ROOT%\" >> \"%TASKLIST_OUT%\" 2>nul',
+            '    set \"MIRROR_ROOT_FILES=\"',
+            '    for /f %%F in (''dir /b \"%MIRROR_ROOT%\" 2^>nul ^| find /c /v \"\"'') do set \"MIRROR_ROOT_FILES=%%F\"',
+            '    if defined MIRROR_ROOT_FILES (echo mirror_root_files=!MIRROR_ROOT_FILES: =! >> \"%PROBE_OUT%\") else (echo mirror_root_files=missing >> \"%PROBE_OUT%\")',
+            '    echo mirror_root_drive=%MIRROR_ROOT% >> \"%PROBE_OUT%\"',
+            ') else (',
+            '    echo mirror_root_files=missing >> \"%PROBE_OUT%\"',
+            ')'
+        )
+        try {
+            & $script:WriteBatchCrlf $bat $snippet
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            $task = if (Test-Path -LiteralPath $taskFile) { Get-Content -LiteralPath $taskFile -Raw } else { '' }
+            Write-Host "mirror count probe: [$text]"
+            $text | Should -Match 'mirror_root_files=3' -Because 'the temp mirror holds exactly three files'
+            $text | Should -Match 'mirror_root_drive=' -Because 'the listed drive is recorded'
+            $task | Should -Match 'micpe-mirror\\.txt' -Because 'the root listing is dumped into the tasklist file'
+            # Empty directory: 0, not missing.
+            Remove-Item -LiteralPath (Join-Path $mirrorDir 'micpe-mirror.txt') -Force
+            Remove-Item -LiteralPath (Join-Path $mirrorDir 'a.txt') -Force
+            Remove-Item -LiteralPath (Join-Path $mirrorDir 'b.txt') -Force
+            Remove-Item -LiteralPath $outFile -Force
+            Remove-Item -LiteralPath $taskFile -Force
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $text = Get-Content -LiteralPath $outFile -Raw
+            $text | Should -Match 'mirror_root_files=0' -Because 'an empty volume reports 0 files, not missing'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
