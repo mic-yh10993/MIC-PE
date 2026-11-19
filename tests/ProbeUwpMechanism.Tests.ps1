@@ -187,12 +187,6 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
             & $script:BuildUwpBatch $bat $probeOut
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
-            # TEMP (run 47 CI diagnosis): the batch dies after
-            # appsfolder_clsid=0 with exit 255 and no stdout — the
-            # syntax error, if any, is in the stderr file, which no
-            # test prints. Remove once the death is explained.
-            $errFile = Join-Path $workDir 'cmd-err.txt'
-            if (Test-Path -LiteralPath $errFile) { Write-Host "cmd stderr: [$(Get-Content -LiteralPath $errFile -Raw)]" }
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
             $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
             Write-Host "probe file: [$text]"
@@ -222,9 +216,6 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
             & $script:BuildUwpBatch $bat $probeOut
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
-            # TEMP (run 47 CI diagnosis): same stderr print as U1.
-            $errFile = Join-Path $workDir 'cmd-err.txt'
-            if (Test-Path -LiteralPath $errFile) { Write-Host "cmd stderr: [$(Get-Content -LiteralPath $errFile -Raw)]" }
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
             $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
             Write-Host "probe file: [$text]"
@@ -1511,6 +1502,18 @@ Describe 'probe.cmd wedge and activation diagnostics (run 47)' {
         $text | Should -Match 'sc qc StateRepository'
         $text | Should -Match 'sc qc AppReadiness'
         $text | Should -Match '(?m)^mountvol' -Because 'the volume table is dumped (the mirror volume question)'
+    }
+
+    It 'never pipes a bang-carrying pattern through find' {
+        # CI run 44519361912: the batch died on the piped AUMID
+        # reg-query line with exit 255 and no stderr — the pipe
+        # child parses the bang with delayed expansion on, and the
+        # unterminated !...! swallows the rest of the batch. The
+        # AUMID lookups dump the store to a file and search the file
+        # instead; pin that shape here so the pipe never comes back.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Not -Match '\| find /i "[^"]*!' -Because 'a piped find must never carry a bang in its pattern'
+        $text | Should -Match 'micpe-aumid\.tmp' -Because 'the AUMID lookups search a dumped file instead of a pipe'
     }
 
     It 'copies the local probe file to the share at the end of every section' {

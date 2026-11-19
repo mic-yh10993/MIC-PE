@@ -480,24 +480,31 @@ rem subkey cannot resolve), the activation DLLs, the deployment
 rem services' config, and the volume table (mountvol lists volumes
 rem even without a drive letter — the mirror volume question from
 rem run 46: QEMU attached it, the guest never lettered it).
-rem The AUMID queries run with delayed expansion off (the bang in the
+rem The AUMID lookups run with delayed expansion off (the bang in the
 rem AppUserModelId would be stripped otherwise, U3); the result is
 rem echoed inside the block so endlocal cannot lose it.
 reg query "HKLM\SOFTWARE\Classes\CLSID\{4234d49b-0245-4df3-b780-3893943456e1}" >nul 2>&1
 if errorlevel 1 (echo appsfolder_clsid=0 >> "%PROBE_LOCAL%" & echo appsfolder_clsid=0 >> "%PROBE_OUT%") else (echo appsfolder_clsid=1 >> "%PROBE_LOCAL%" & echo appsfolder_clsid=1 >> "%PROBE_OUT%")
 setlocal DisableDelayedExpansion
-echo DBG_ACT_SETLOCAL=1 >> "%PROBE_OUT%"
-reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" >nul
-echo DBG_ACT_REGQUERY=1 >> "%PROBE_OUT%"
+rem Dump the store once, then search the file: the AUMID carries a
+rem bang, and a piped `find "...!App"` dies in the pipe child (CI
+rem run 44519361912: the batch died on the reg-query line with exit
+rem 255 and no stderr — the pipe child parses the bang with delayed
+rem expansion on, and the unterminated !...! swallows the rest of
+rem the batch looking for its closing bang). A file search keeps the
+rem bang in the parent, where delayed expansion is off; one dump
+rem also replaces three full-store enumerations.
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s > "%SystemDrive%\micpe-aumid.tmp" 2>nul
+find /i "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" "%SystemDrive%\micpe-aumid.tmp" >nul
 set "AUMID_CALC=%ERRORLEVEL%"
-echo DBG_ACT_SET_AUMID=1 >> "%PROBE_OUT%"
 if "%AUMID_CALC%"=="0" (echo aumid_calc=1 >> "%PROBE_LOCAL%" & echo aumid_calc=1 >> "%PROBE_OUT%") else (echo aumid_calc=0 >> "%PROBE_LOCAL%" & echo aumid_calc=0 >> "%PROBE_OUT%")
-reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.Photos_8wekyb3d8bbwe!App" >nul
+find /i "Microsoft.Windows.Photos_8wekyb3d8bbwe!App" "%SystemDrive%\micpe-aumid.tmp" >nul
 set "AUMID_PHOTOS=%ERRORLEVEL%"
 if "%AUMID_PHOTOS%"=="0" (echo aumid_photos=1 >> "%PROBE_LOCAL%" & echo aumid_photos=1 >> "%PROBE_OUT%") else (echo aumid_photos=0 >> "%PROBE_LOCAL%" & echo aumid_photos=0 >> "%PROBE_OUT%")
-reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic" >nul
+find /i "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic" "%SystemDrive%\micpe-aumid.tmp" >nul
 set "AUMID_MEDIA=%ERRORLEVEL%"
 if "%AUMID_MEDIA%"=="0" (echo aumid_media=1 >> "%PROBE_LOCAL%" & echo aumid_media=1 >> "%PROBE_OUT%") else (echo aumid_media=0 >> "%PROBE_LOCAL%" & echo aumid_media=0 >> "%PROBE_OUT%")
+del "%SystemDrive%\micpe-aumid.tmp" >nul 2>&1
 endlocal
 if exist "%SystemRoot%\System32\twinapi.appcore.dll" if exist "%SystemRoot%\System32\Windows.UI.Xaml.dll" if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" if exist "%SystemRoot%\System32\Windows.StateRepository.dll" (echo activation_files=1 >> "%PROBE_LOCAL%" & echo activation_files=1 >> "%PROBE_OUT%") else (echo activation_files=0 >> "%PROBE_LOCAL%" & echo activation_files=0 >> "%PROBE_OUT%")
 echo --- sc qc AppXSVC --- >> "%TASKLIST_OUT%"
