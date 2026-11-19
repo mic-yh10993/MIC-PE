@@ -849,7 +849,11 @@ Describe 'explorer CPU time (run 44428428849)' {
         # yield missing for the wrong reason. In PE the probe's bare
         # call resolves to the image's real System32 tasklist, which
         # accepts /fi, so the full path here is the faithful
-        # simulation. The exact line in probe.cmd (with the
+        # simulation. The path is deliberately UNQUOTED: it has no
+        # spaces, and a leading quote makes cmd /c strip the first
+        # and last quote of the for /f command (run 44458215755 —
+        # the quoted form yielded missing even with the working
+        # original). The exact line in probe.cmd (with the
         # explorer.exe filter) is pinned by the static exact-line test
         # above; C1b below proves /nh breaks the same pipeline.
         $workDir = & $script:NewWorkDir
@@ -859,7 +863,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                ('for /f "tokens=3" %%C in (''"{0}" /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
+                ('for /f "tokens=3" %%C in (''{0} /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
@@ -928,7 +932,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                ('for /f "tokens=3" %%C in (''"{0}" /v /fo list /fi "imagename eq cmd.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
+                ('for /f "tokens=3" %%C in (''{0} /v /fo list /fi "imagename eq cmd.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
