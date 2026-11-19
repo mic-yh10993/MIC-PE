@@ -524,7 +524,7 @@ call :probe_svc AppXSVC appxsvc_after
 call :probe_svc StateRepository staterepo_after
 call :probe_svc AppReadiness appreadiness_after
 
-rem --- uwp cross-check (run 46) -------------------------------------------
+rem --- cross-check (run 46) ------------------------------------------------
 rem Run 45's three uwp_launch_*=0 are NOT a cross-validation: all three
 rem failed at the explorer guard, before any real launch attempt, so
 rem "can other UWP apps open" has no evidence either way. This section
@@ -541,7 +541,10 @@ rem The calls run inside their own DisableDelayedExpansion block (the
 rem bang in the AppUserModelId must survive, U3); the after-checks sit
 rem after endlocal because they carry no bang.
 echo mark_xcheck=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck=%TIME: =0% >> "%PROBE_OUT%"
-tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+rem Truth checks use the System32 tasklist by full path (C1/C1b): a
+rem bare tasklist is shadowed by the harness copy on the runner,
+rem whose /fi is rejected, so a bare check would always read 0.
+"%SystemRoot%\System32\tasklist.exe" /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo xcheck_explorer_before=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_before=1 >> "%PROBE_OUT%")
 setlocal DisableDelayedExpansion
 echo mark_xcheck_launch_calculator=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
@@ -554,9 +557,9 @@ echo mark_xcheck_launch_media=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_l
 call :probe_xcheck Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
 if errorlevel 1 (echo xcheck_launch_media=0 >> "%PROBE_OUT%") else (echo xcheck_launch_media=1 >> "%PROBE_OUT%")
 endlocal
-tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+"%SystemRoot%\System32\tasklist.exe" /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo xcheck_explorer_after=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_after=1 >> "%PROBE_OUT%")
-tasklist /fi "imagename eq ApplicationFrameHost.exe" /nh 2>nul | find /i "ApplicationFrameHost.exe" >nul
+"%SystemRoot%\System32\tasklist.exe" /fi "imagename eq ApplicationFrameHost.exe" /nh 2>nul | find /i "ApplicationFrameHost.exe" >nul
 if errorlevel 1 (echo xcheck_framehost_after=0 >> "%PROBE_OUT%") else (echo xcheck_framehost_after=1 >> "%PROBE_OUT%")
 
 rem --- payload ---------------------------------------------------------------

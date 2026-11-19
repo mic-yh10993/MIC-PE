@@ -100,7 +100,14 @@ BeforeAll {
             $exited = $proc.WaitForExit($TimeoutSec * 1000)
             if (-not $exited) {
                 try { $proc.Kill($true) } catch { }
-                $proc.WaitForExit(10000)
+                # The return value must be swallowed: a bare
+                # WaitForExit leaks its boolean into the scriptblock
+                # output, so the caller gets an array instead of the
+                # result hashtable and every $result.* access throws
+                # PropertyNotFoundException (CI run 44497333624: five
+                # timeouts all surfaced as that error, hiding the
+                # probe file that says where the batch died).
+                $null = $proc.WaitForExit(10000)
             }
             $out = ''
             if (Test-Path -LiteralPath $stdoutFile) {
@@ -123,8 +130,14 @@ BeforeAll {
     # is observable. Found by content, not line number, so comment edits
     # above cannot shift the cut. No shutdown line, no payload/brand/
     # installer sections.
+    # WARNING (run 46): the start anchor takes the LAST line matching
+    # `^rem --- uwp` before payload — a later section header starting
+    # with those words (the cross-check header did) silently moves
+    # the cut past the guarded launches, so every section test then
+    # runs only the tail. Section headers after the uwp header must
+    # NOT start with `rem --- uwp`.
     $script:BuildUwpBatch = {
-        param([string] $Path, [string] $ProbeOut, [switch] $StubStart)
+        param([string] $Path, [string] $ProbeOut, [switch] $StubStart, [switch] $StubXcheckStart)
         $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
         $uwpStart = -1; $payloadStart = -1; $subStart = -1
         for ($i = 0; $i -lt $probeLines.Count; $i++) {
@@ -150,6 +163,20 @@ BeforeAll {
                 if ($_ -match '^\s*start "" explorer\.exe') { 'rem start stubbed for the bisection test' } else { $_ }
             })
         }
+        if ($StubXcheckStart) {
+            # Run 46: a bare `start "" "shell:AppsFolder\..."` for an
+            # app that is absent on Server blocks on activation
+            # (CI run 44497333624: every section test that ran the
+            # real start timed out at 150 s; U5, whose stubbed
+            # tasklist short-circuits before the start, took 0.18 s).
+            # The start itself is exercised by X1 (real start, 300 s
+            # timeout) and in PE, where the apps exist; the other
+            # section tests verify the poll/return/marker logic, so
+            # they stub it the same way U2 stubs the guarded start.
+            $lines = @($lines | ForEach-Object {
+                if ($_ -match '^\s*start "" "%XCHECK_TARGET%"') { 'rem xcheck start stubbed for the harness (Server has no such app)' } else { $_ }
+            })
+        }
         & $script:WriteBatchCrlf $Path $lines
     }
 
@@ -171,7 +198,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
         try {
             $explorerBefore = & $script:TestExplorerRunning
             Write-Host "explorer running before: $explorerBefore"
-            & $script:BuildUwpBatch $bat $probeOut
+            & $script:BuildUwpBatch $bat $probeOut -StubXcheckStart
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
@@ -200,7 +227,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
                 }
             }
             Write-Host "explorer running before: $(& $script:TestExplorerRunning) (was running: $explorerWasRunning)"
-            & $script:BuildUwpBatch $bat $probeOut
+            & $script:BuildUwpBatch $bat $probeOut -StubXcheckStart
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
@@ -227,7 +254,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
         $probeOut = Join-Path $workDir 'micpe-probe.txt'
         $bat = Join-Path $workDir 'probe-uwp.bat'
         try {
-            & $script:BuildUwpBatch $bat $probeOut -StubStart
+            & $script:BuildUwpBatch $bat $probeOut -StubStart -StubXcheckStart
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
@@ -321,7 +348,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
         $probeOut = Join-Path $workDir 'micpe-probe.txt'
         $bat = Join-Path $workDir 'probe-uwp.bat'
         try {
-            & $script:BuildUwpBatch $bat $probeOut
+            & $script:BuildUwpBatch $bat $probeOut -StubXcheckStart
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
             $sw.Stop()
@@ -331,10 +358,18 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
             $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
             Write-Host "probe file: [$text]"
             $result.TimedOut | Should -Be $false
-            $seconds | Should -BeLessThan 15 -Because 'with the guard all three calls return at once; without it each waits out the 10-second poll'
+            # Run 46: the guard still skips the three guarded launches
+            # at once, but the cross-check runs anyway (it has no
+            # guard) and its bounded poll is 10 rounds x 1 s x 3 apps,
+            # so the section takes ~30 s even though the guard is
+            # instant. The <15 s bound died with the cross-check.
+            $seconds | Should -BeLessThan 55 -Because 'guard instant plus the cross-check bounded poll'
             $text | Should -Match 'uwp_launch_calculator=0' -Because 'no shell means not launchable here, not a launch failure to retry'
             $text | Should -Match 'uwp_launch_photos=0'
             $text | Should -Match 'uwp_launch_media=0'
+            $text | Should -Match 'xcheck_launch_calculator=0' -Because 'the cross-check still attempts all three without the guard'
+            $text | Should -Match 'xcheck_launch_photos=0'
+            $text | Should -Match 'xcheck_launch_media=0'
             $text | Should -Match 'probe_uwp_done=1'
         }
         finally {
@@ -837,6 +872,15 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text.Contains('call :probe_xcheck CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"') | Should -Be $true -Because 'Calculator is retried without the guard'
         $text.Contains('call :probe_xcheck Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"') | Should -Be $true -Because 'Photos is retried without the guard'
         $text.Contains('call :probe_xcheck Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"') | Should -Be $true -Because 'Media Player is retried without the guard'
+        # The explorer/frame-host truth checks must use the System32
+        # tasklist by full path (C1/C1b): a bare tasklist is shadowed
+        # by the harness copy on the runner, whose /fi is rejected,
+        # so a bare check would always read 0 and X1's =1 assertions
+        # would be false. The polls stay bare on purpose: they are
+        # stubbed by the harness (U4/U5) and identical to the
+        # guarded poll's shape.
+        $text.Contains('%SystemRoot%\System32\tasklist.exe" /fi "imagename eq explorer.exe"') | Should -Be $true -Because 'the cross-check explorer checks must see the real shell'
+        $text.Contains('%SystemRoot%\System32\tasklist.exe" /fi "imagename eq ApplicationFrameHost.exe"') | Should -Be $true -Because 'the frame-host check must see the real host'
         $text | Should -Match 'xcheck_launch_calculator=' -Because 'the cross-check result is recorded per app'
         $text | Should -Match 'xcheck_launch_photos='
         $text | Should -Match 'xcheck_launch_media='
@@ -855,6 +899,25 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $off | Should -BeLessThan $xcheckCalls[0].Index -Because 'the switch-off must come before the first cross-check call'
         $on = $text.IndexOf('endlocal', $xcheckCalls[0].Index)
         $on | Should -BeGreaterThan $xcheckCalls[2].Index -Because 'delayed expansion must stay off until after the last cross-check call'
+    }
+
+    It 'no section header after the uwp header steals the slice anchor (run 46)' {
+        # BuildUwpBatch takes the LAST line matching `^rem --- uwp`
+        # before payload as the slice start. The run-46 cross-check
+        # header read `rem --- uwp cross-check`, so the slice started
+        # at the cross-check and every section test ran only the tail
+        # (CI run 44497333624: U1/U1b/U2/U4/X1 all timed out, U5 saw
+        # a probe file with no uwp_launch_* keys at all). The last
+        # such header before payload must be the section header itself.
+        $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $payloadIdx = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^rem --- payload') { $payloadIdx = $i; break }
+        }
+        $payloadIdx | Should -BeGreaterThan 0 -Because 'the payload header must exist'
+        $uwpHeaders = @($lines[0..($payloadIdx - 1)] | Where-Object { $_ -match '^rem --- uwp' })
+        $uwpHeaders.Count | Should -BeGreaterThan 0 -Because 'the uwp header must exist'
+        $uwpHeaders[-1] | Should -Match '^rem --- uwp -+ *$' -Because 'the last uwp header before payload is the section start, not a later sub-header'
     }
 
     It 'the cross-check launch does not go through explorer.exe (run 46)' {
@@ -1006,12 +1069,17 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # absent on Server, so every launch is an honest 0 — but the
         # section must complete, the cross-check must attempt all three
         # apps without the guard, and the frame host must stay 0.
+        # This is the one section test that runs the REAL cross-check
+        # start (the others stub it): a bare ShellExecute for an app
+        # that is absent on Server can block on activation, so the
+        # timeout is 300 s and the probe file, not the clock, is the
+        # evidence if it ever stalls.
         $workDir = & $script:NewWorkDir
         $probeOut = Join-Path $workDir 'micpe-probe.txt'
         $bat = Join-Path $workDir 'probe-uwp.bat'
         try {
             & $script:BuildUwpBatch $bat $probeOut
-            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 300
             $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
             Write-Host "probe file: [$text]"
             $result.TimedOut | Should -Be $false -Because 'a stall must surface as a timeout, not a hang of CI'
@@ -1038,8 +1106,8 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # and wer_reports must count exactly those two.
         $workDir = & $script:NewWorkDir
         $werRoot = Join-Path $workDir 'ProgramData'
-        $queue = Join-Path $werRoot 'Microsoft\\Windows\\WER\\ReportQueue'
-        $archive = Join-Path $werRoot 'Microsoft\\Windows\\WER\\ReportArchive'
+        $queue = Join-Path $werRoot 'Microsoft\Windows\WER\ReportQueue'
+        $archive = Join-Path $werRoot 'Microsoft\Windows\WER\ReportArchive'
         $qDir = Join-Path $queue 'AppCrash_explorer.exe_9f2a1c'
         $nDir = Join-Path $queue 'AppCrash_notepad.exe_9f2a1c'
         $aDir = Join-Path $archive 'AppCrash_explorer.exe_7b3e9d'
@@ -1055,26 +1123,26 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         try {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
-                ('set \"ProgramData={0}\"' -f $werRoot),
-                ('set \"PROBE_OUT={0}\"' -f $outFile),
-                ('set \"PROBE_LOCAL={0}\"' -f $outFile),
-                ('set \"TASKLIST_OUT={0}\"' -f $taskFile),
-                'set \"WER_REPORTS=0\"',
-                'for /d %%D in (\"%ProgramData%\\Microsoft\\Windows\\WER\\ReportQueue\\*explorer*\") do (',
-                '    if exist \"%%D\\Report.wer\" (',
-                '        echo --- WER ReportQueue %%~nxD --- >> \"%TASKLIST_OUT%\"',
-                '        type \"%%D\\Report.wer\" >> \"%TASKLIST_OUT%\" 2>nul',
+                ('set "ProgramData={0}"' -f $werRoot),
+                ('set "PROBE_OUT={0}"' -f $outFile),
+                ('set "PROBE_LOCAL={0}"' -f $outFile),
+                ('set "TASKLIST_OUT={0}"' -f $taskFile),
+                'set "WER_REPORTS=0"',
+                'for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*") do (',
+                '    if exist "%%D\Report.wer" (',
+                '        echo --- WER ReportQueue %%~nxD --- >> "%TASKLIST_OUT%"',
+                '        type "%%D\Report.wer" >> "%TASKLIST_OUT%" 2>nul',
                 '        set /a WER_REPORTS+=1',
                 '    )',
                 ')',
-                'for /d %%D in (\"%ProgramData%\\Microsoft\\Windows\\WER\\ReportArchive\\*explorer*\") do (',
-                '    if exist \"%%D\\Report.wer\" (',
-                '        echo --- WER ReportArchive %%~nxD --- >> \"%TASKLIST_OUT%\"',
-                '        type \"%%D\\Report.wer\" >> \"%TASKLIST_OUT%\" 2>nul',
+                'for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*") do (',
+                '    if exist "%%D\Report.wer" (',
+                '        echo --- WER ReportArchive %%~nxD --- >> "%TASKLIST_OUT%"',
+                '        type "%%D\Report.wer" >> "%TASKLIST_OUT%" 2>nul',
                 '        set /a WER_REPORTS+=1',
                 '    )',
                 ')',
-                'echo wer_reports=%WER_REPORTS% >> \"%PROBE_LOCAL%\" & echo wer_reports=%WER_REPORTS% >> \"%PROBE_OUT%\"'
+                'echo wer_reports=%WER_REPORTS% >> "%PROBE_LOCAL%" & echo wer_reports=%WER_REPORTS% >> "%PROBE_OUT%"'
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
             $result.TimedOut | Should -Be $false
@@ -1114,21 +1182,21 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $snippet = @(
             '@echo off',
             'setlocal EnableDelayedExpansion',
-            ('set \"MIRROR_DIR={0}\"' -f $mirrorDir),
-            ('set \"PROBE_OUT={0}\"' -f $outFile),
-            ('set \"TASKLIST_OUT={0}\"' -f $taskFile),
-            'set \"MIRROR_ROOT=\"',
-            'if defined MIRROR_DIR set \"MIRROR_ROOT=%MIRROR_DIR%\"',
-            'if not defined MIRROR_ROOT if exist \"D:\\\" set \"MIRROR_ROOT=D:\\\"',
+            ('set "MIRROR_DIR={0}"' -f $mirrorDir),
+            ('set "PROBE_OUT={0}"' -f $outFile),
+            ('set "TASKLIST_OUT={0}"' -f $taskFile),
+            'set "MIRROR_ROOT="',
+            'if defined MIRROR_DIR set "MIRROR_ROOT=%MIRROR_DIR%"',
+            'if not defined MIRROR_ROOT if exist "D:\" set "MIRROR_ROOT=D:\"',
             'if defined MIRROR_ROOT (',
-            '    echo --- dir %MIRROR_ROOT% --- >> \"%TASKLIST_OUT%\"',
-            '    dir \"%MIRROR_ROOT%\" >> \"%TASKLIST_OUT%\" 2>nul',
-            '    set \"MIRROR_ROOT_FILES=\"',
-            '    for /f %%F in (''dir /b \"%MIRROR_ROOT%\" 2^>nul ^| find /c /v \"\"'') do set \"MIRROR_ROOT_FILES=%%F\"',
-            '    if defined MIRROR_ROOT_FILES (echo mirror_root_files=!MIRROR_ROOT_FILES: =! >> \"%PROBE_OUT%\") else (echo mirror_root_files=missing >> \"%PROBE_OUT%\")',
-            '    echo mirror_root_drive=%MIRROR_ROOT% >> \"%PROBE_OUT%\"',
+            '    echo --- dir %MIRROR_ROOT% --- >> "%TASKLIST_OUT%"',
+            '    dir "%MIRROR_ROOT%" >> "%TASKLIST_OUT%" 2>nul',
+            '    set "MIRROR_ROOT_FILES="',
+            '    for /f %%F in (''dir /b "%MIRROR_ROOT%" 2^>nul ^| find /c /v ""'') do set "MIRROR_ROOT_FILES=%%F"',
+            '    if defined MIRROR_ROOT_FILES (echo mirror_root_files=!MIRROR_ROOT_FILES: =! >> "%PROBE_OUT%") else (echo mirror_root_files=missing >> "%PROBE_OUT%")',
+            '    echo mirror_root_drive=%MIRROR_ROOT% >> "%PROBE_OUT%"',
             ') else (',
-            '    echo mirror_root_files=missing >> \"%PROBE_OUT%\"',
+            '    echo mirror_root_files=missing >> "%PROBE_OUT%"',
             ')'
         )
         try {
