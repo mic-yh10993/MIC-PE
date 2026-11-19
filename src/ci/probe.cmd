@@ -565,6 +565,53 @@ rem experiment, not this round.
 call :probe_svc_reg AppXSVC appxsvc
 call :probe_svc_reg StateRepository staterepo
 call :probe_svc_reg AppReadiness appready
+rem Run 50 (feature 42537950 source investigation): the image's offline
+rem SYSTEM hive holds 330 FeatureManagement Overrides (groups 0/15/9)
+rem and none of them is 42537950 — DisableWin10Taskbar runs at its
+rem built-in default (enabled), and CTray::Init failfasts on it
+rem (run 49, tray.cpp:595, 0x1181ea). The CI build now imports an
+rem override forcing it off (70-feature-42537950.reg, EnabledState=0).
+rem Read it back here, read-only, so the stage can say whether the
+rem import landed in the running image — and whether the override is
+rem really off before any UWP launch is attempted. The three group
+rem checks say whether the feature also sits in a group override
+rem (it does not in the image; a 1 here would mean the image changed).
+rem The EnabledState line reads "EnabledState    REG_DWORD    0x0", so
+rem tokens=3 yields the hex value; a missing key leaves missing.
+rem No new mark_ marker: this section rides under mark_uwp_svc, and the
+rem marker count (39) stays put.
+set "FM_STATE=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\42537950" /v EnabledState 2^>nul ^| find /i "EnabledState"') do set "FM_STATE=%%A"
+echo fm_42537950_state=%FM_STATE% >> "%PROBE_LOCAL%" & echo fm_42537950_state=%FM_STATE% >> "%PROBE_OUT%"
+set "FM_G0=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\0\42537950" /v EnabledState 2^>nul ^| find /i "EnabledState"') do set "FM_G0=%%A"
+echo fm_42537950_group0=%FM_G0% >> "%PROBE_LOCAL%" & echo fm_42537950_group0=%FM_G0% >> "%PROBE_OUT%"
+set "FM_G15=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\15\42537950" /v EnabledState 2^>nul ^| find /i "EnabledState"') do set "FM_G15=%%A"
+echo fm_42537950_group15=%FM_G15% >> "%PROBE_LOCAL%" & echo fm_42537950_group15=%FM_G15% >> "%PROBE_OUT%"
+set "FM_G9=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\9\42537950" /v EnabledState 2^>nul ^| find /i "EnabledState"') do set "FM_G9=%%A"
+echo fm_42537950_group9=%FM_G9% >> "%PROBE_LOCAL%" & echo fm_42537950_group9=%FM_G9% >> "%PROBE_OUT%"
+rem Run 50 (minidump route re-check): 60-werdumps.reg pointed its key
+rem at HKLM\SOFTWARE, which a plain reg.exe import writes into the
+rem RUNNER's live hive — the image hives are mounted as PE-SOFT/PE-SYS,
+rem so run 49's image never got the LocalDumps key (dump_* all 0).
+rem The file now addresses PE-SOFT; read the key back here to prove it
+rem landed in the running image. A missing here means the LocalDumps
+rem route is still unproven, not that WER is broken.
+set "WER_DUMPS=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe" /v DumpFolder 2^>nul ^| find /i "DumpFolder"') do set "WER_DUMPS=%%A"
+echo wer_localdumps_folder=%WER_DUMPS% >> "%PROBE_LOCAL%" & echo wer_localdumps_folder=%WER_DUMPS% >> "%PROBE_OUT%"
+rem Run 50 (StateRepository why-not-started): its only dependency is
+rem RpcSs and its svchost group appmodel is defined in the image
+rem (SOFTWARE hive: appmodel = EntAppSvc, StateRepository, WalletService),
+rem so neither a missing group nor a missing dependency explains the
+rem STOPPED state. Record RpcSs's own state and the group definition
+rem in the running image; the sc start experiment itself stays in a
+rem later round, after probe_done (eval card §34.7).
+call :probe_svc RpcSs rpcss "%PROBE_LOCAL%"
+reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost" /v appmodel >nul 2>&1
+if errorlevel 1 (echo svchost_appmodel=0 >> "%PROBE_LOCAL%" & echo svchost_appmodel=0 >> "%PROBE_OUT%") else (echo svchost_appmodel=1 >> "%PROBE_LOCAL%" & echo svchost_appmodel=1 >> "%PROBE_OUT%")
 echo --- mountvol --- >> "%TASKLIST_OUT%"
 mountvol >> "%TASKLIST_OUT%" 2>nul
 echo mountvol_dump=1 >> "%PROBE_LOCAL%" & echo mountvol_dump=1 >> "%PROBE_OUT%"
@@ -784,6 +831,12 @@ tasklist /fi "imagename eq WerFault.exe" /nh 2>nul | find /i "WerFault.exe" >nul
 if errorlevel 1 (echo werfault_end=0 >> "%PROBE_LOCAL%" & echo werfault_end=0 >> "%PROBE_OUT%") else (echo werfault_end=1 >> "%PROBE_LOCAL%" & echo werfault_end=1 >> "%PROBE_OUT%")
 tasklist /fi "imagename eq dwm.exe" /nh 2>nul | find /i "dwm.exe" >nul
 if errorlevel 1 (echo dwm_end=0 >> "%PROBE_LOCAL%" & echo dwm_end=0 >> "%PROBE_OUT%") else (echo dwm_end=1 >> "%PROBE_LOCAL%" & echo dwm_end=1 >> "%PROBE_OUT%")
+rem Run 50 (feature 42537950 fix outcome): the m5 stage asserts
+rem explorer_end=1 — explorer must still be alive at probe end, not
+rem just at the shell check (the old explorer=1 is set while it is
+rem still starting). Same tasklist /fi shape as werfault_end/dwm_end.
+tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo explorer_end=0 >> "%PROBE_LOCAL%" & echo explorer_end=0 >> "%PROBE_OUT%") else (echo explorer_end=1 >> "%PROBE_LOCAL%" & echo explorer_end=1 >> "%PROBE_OUT%")
 call :probe_explorer_cpu end
 rem Run 44428428849: explorer exits silently (no WerFault in any snapshot),
 rem so a crash report would only exist if WerFault failed to launch at

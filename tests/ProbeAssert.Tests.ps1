@@ -91,6 +91,20 @@ Describe 'Get-StageProbeExpect' {
         $expect.Count | Should -Be 7
     }
 
+    It 'm5 and m7 assert the feature override is off and explorer survives to the end (run 50)' {
+        # Run 50: the CI build imports an override forcing
+        # DisableWin10Taskbar (42537950) off; the stage asserts the
+        # probe read it back as 0x0, and asserts explorer is still
+        # alive at probe end (the old explorer=1 is set while it is
+        # still starting, so it cannot prove the fix worked).
+        foreach ($stage in 'm5', 'm7') {
+            $expect = Get-StageProbeExpect -Stage $stage
+            $expect['fm_42537950_state'] | Should -Be '0x0'
+            $expect['explorer_end'] | Should -Be '1'
+        }
+        (Get-StageProbeExpect -Stage 'm5').Count | Should -Be 13 -Because 'm5 had 11 assertions before run 50'
+    }
+
     It 'm5, m6 and m7 carry the drive-letter keys too' {
         foreach ($stage in 'm5', 'm6', 'm7') {
             $expect = Get-StageProbeExpect -Stage $stage

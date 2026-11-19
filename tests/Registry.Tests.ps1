@@ -95,6 +95,34 @@ Describe 'WER local dumps registry patch (run 49)' {
     }
 }
 
+Describe 'feature 42537950 override registry patch (run 50)' {
+    BeforeAll {
+        $script:reg70 = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/registry/70-feature-42537950.reg') -Raw
+        $script:reg60b = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/registry/60-werdumps.reg') -Raw
+    }
+
+    It 'forces DisableWin10Taskbar (42537950) off under PE-SYS Overrides' {
+        # Run 49 root cause: CTray::Init failfasts while this feature is
+        # enabled. The image's offline SYSTEM hive holds 330 Overrides
+        # and none is 42537950, so the feature runs at its built-in
+        # default (enabled). The patch adds the override, flat under
+        # Overrides, EnabledState 0 = Disabled. PE-SYS addresses the
+        # mounted SYSTEM hive (HKLM\SYSTEM would hit the runner).
+        $script:reg70 | Should -Match 'HKEY_LOCAL_MACHINE\\PE-SYS\\ControlSet001\\Control\\FeatureManagement\\Overrides\\42537950\]' -Because 'the override lands in the mounted SYSTEM hive'
+        $script:reg70.Contains('"EnabledState"=dword:00000000') | Should -BeTrue -Because 'EnabledState 0 disables the feature'
+        $script:reg70.Contains('"EnabledStateOptions"=dword:00000000') | Should -BeTrue -Because 'no variant options are set'
+    }
+
+    It 'addresses the WER LocalDumps key at PE-SOFT, not the runner hive (run 50 correction)' {
+        # Run 49: 60-werdumps.reg said HKLM\SOFTWARE, which a plain
+        # reg.exe import writes into the RUNNER's live hive — the image
+        # never got the LocalDumps key and no dump was written. PE-SOFT
+        # addresses the mounted SOFTWARE hive.
+        $script:reg60b | Should -Match 'HKEY_LOCAL_MACHINE\\PE-SOFT\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\explorer\.exe\]' -Because 'the key must land in the mounted SOFTWARE hive'
+        $script:reg60b | Should -Not -Match 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps' -Because 'HKLM\SOFTWARE would hit the runner, not the image'
+    }
+}
+
 Describe 'registry imports happen only at CI build time (user decision 2026-11-17 23:43)' {
     BeforeAll {
         $script:RuntimeFiles = @(
