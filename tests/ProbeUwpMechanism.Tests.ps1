@@ -187,6 +187,12 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
             & $script:BuildUwpBatch $bat $probeOut
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
+            # TEMP (run 47 CI diagnosis): the batch dies after
+            # appsfolder_clsid=0 with exit 255 and no stdout — the
+            # syntax error, if any, is in the stderr file, which no
+            # test prints. Remove once the death is explained.
+            $errFile = Join-Path $workDir 'cmd-err.txt'
+            if (Test-Path -LiteralPath $errFile) { Write-Host "cmd stderr: [$(Get-Content -LiteralPath $errFile -Raw)]" }
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
             $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
             Write-Host "probe file: [$text]"
@@ -216,6 +222,9 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
             & $script:BuildUwpBatch $bat $probeOut
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
+            # TEMP (run 47 CI diagnosis): same stderr print as U1.
+            $errFile = Join-Path $workDir 'cmd-err.txt'
+            if (Test-Path -LiteralPath $errFile) { Write-Host "cmd stderr: [$(Get-Content -LiteralPath $errFile -Raw)]" }
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
             $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
             Write-Host "probe file: [$text]"
@@ -1418,6 +1427,8 @@ Describe 'probe.cmd wedge and activation diagnostics (run 47)' {
         $helper = & $script:ExtractProbeSub ':probe_poll_check' ':probe_sync_local'
         $helperBody = $helper -join "`n"
         $helperBody | Should -Match 'start "" /min cmd /c tasklist' -Because 'tasklist runs detached in a child cmd'
+        $helperBody | Should -Match 'echo DONE' -Because 'the child appends a DONE sentinel after tasklist exits'
+        $helperBody | Should -Match '%%~zF gtr 0' -Because 'the parent waits for the file to be non-empty, not merely to exist (the redirection creates it at once)'
         $helperBody | Should -Match 'tasklist_timeout_%~1=1' -Because 'a hung enumeration is recorded, not swallowed'
         $helperBody | Should -Match 'taskkill /f /im tasklist\.exe' -Because 'the helper tries to kill the hung tasklist before returning'
         $helperBody | Should -Match 'exit /b 0' -Because 'the helper returns 0 when the process is listed'

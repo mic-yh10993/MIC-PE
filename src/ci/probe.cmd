@@ -1083,25 +1083,32 @@ rem poll round's wait_after and check_after — the only step in between
 rem is the tasklist|find pipeline, so a hung tasklist enumeration
 rem kills the probe outright. Run tasklist detached in a child cmd
 rem writing to a temp file on the PE system drive, then wait for the
-rem file with a bounded spin plus two one-second choice ticks; on
-rem timeout record tasklist_timeout_<proc>=1 (dual-written), try to
-rem kill the hung tasklist, and return 1 (not found) so the poll loop
-rem continues instead of dying with the probe. The parent never pipes
-rem from tasklist directly, so a wedged enumeration cannot hang the
-rem probe. Returns errorlevel 0 when the process is listed.
+rem child to finish with a bounded spin plus two one-second choice
+rem ticks; on timeout record tasklist_timeout_<proc>=1 (dual-written),
+rem try to kill the hung tasklist, and return 1 (not found) so the
+rem poll loop continues instead of dying with the probe. The parent
+rem never pipes from tasklist directly, so a wedged enumeration cannot
+rem hang the probe. Returns errorlevel 0 when the process is listed.
 rem The temp file lives on %SystemDrive% (X: in PE, the RAM disk) so
 rem it never touches the share and never waits on the network.
+rem The child appends a DONE sentinel after tasklist exits, and the
+rem parent waits for the file to be NON-EMPTY, not merely to exist:
+rem the redirection creates the file the moment the child starts, so
+rem existence alone proves nothing — a blocked child leaves an empty
+rem file behind, and an existence check would read it as "answered"
+rem at once (CI run 44517188618 P3: the timeout key never got
+rem written because the empty file short-circuited the wait).
 set "POLL_TMP=%SystemDrive%\micpe-poll.tmp"
 del "%POLL_TMP%" >nul 2>&1
-start "" /min cmd /c tasklist /fi "imagename eq %~1.exe" /nh ^> "%POLL_TMP%" 2^>nul
+start "" /min cmd /c tasklist /fi "imagename eq %~1.exe" /nh ^> "%POLL_TMP%" 2^>nul ^& echo DONE ^>^> "%POLL_TMP%"
 set /a POLL_SPIN=0
 :poll_check_spin
-if exist "%POLL_TMP%" goto poll_check_found
+if exist "%POLL_TMP%" for %%F in ("%POLL_TMP%") do if %%~zF gtr 0 goto poll_check_found
 set /a POLL_SPIN+=1
 if %POLL_SPIN% lss 20000 goto poll_check_spin
 set /a POLL_WAIT=0
 :poll_check_wait
-if exist "%POLL_TMP%" goto poll_check_found
+if exist "%POLL_TMP%" for %%F in ("%POLL_TMP%") do if %%~zF gtr 0 goto poll_check_found
 if %POLL_WAIT% geq 2 goto poll_check_timeout
 choice /c Y /d Y /t 1 >nul
 set /a POLL_WAIT+=1
