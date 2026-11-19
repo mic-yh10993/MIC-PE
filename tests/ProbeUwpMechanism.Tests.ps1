@@ -1954,3 +1954,64 @@ Describe 'probe.cmd run 49 BEX64 breakpoint control and minidump capture (run 49
         $text | Should -Not -Match 'staterepo_start=' -Because 'no start attempt means no start outcome to record'
     }
 }
+
+Describe 'probe.cmd run 50 feature 42537950 override read-back and explorer_end (run 50)' {
+    It 'reads the feature 42537950 override back at runtime, flat and in the three groups' {
+        # Run 50: the image's offline SYSTEM hive holds 330 Overrides
+        # and none is 42537950, so the feature runs at its built-in
+        # default (enabled) and CTray::Init failfasts. The CI build now
+        # imports an override forcing it off; the probe reads it back
+        # read-only so the stage can say whether the import landed.
+        # The group checks say whether the feature also sits in a group
+        # override (it does not in the image). Same for /f tokens=3
+        # shape :probe_svc_reg already proved for service Start values.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\Overrides\\42537950" /v EnabledState' -Because 'the flat override is read back'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\Overrides\\0\\42537950" /v EnabledState' -Because 'group 0 is checked too'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\Overrides\\15\\42537950" /v EnabledState' -Because 'group 15 is checked too'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\Overrides\\9\\42537950" /v EnabledState' -Because 'group 9 is checked too'
+        $text | Should -Match 'echo fm_42537950_state=%FM_STATE% >> "%PROBE_LOCAL%"' -Because 'the state is dual-written like the other verdict keys'
+        $text | Should -Match 'echo fm_42537950_state=%FM_STATE% >> "%PROBE_OUT%"' -Because 'the state is recorded on the share file too'
+        $text | Should -Match 'echo fm_42537950_group0=%FM_G0%' -Because 'the group 0 check is recorded'
+        $text | Should -Match 'echo fm_42537950_group15=%FM_G15%' -Because 'the group 15 check is recorded'
+        $text | Should -Match 'echo fm_42537950_group9=%FM_G9%' -Because 'the group 9 check is recorded'
+        $text | Should -Match 'set "FM_STATE=missing"' -Because 'a missing key leaves missing, like the other fields'
+        $text.IndexOf('echo fm_42537950_state=') | Should -BeGreaterThan $text.IndexOf('mark_uwp_svc') -Because 'the read-back runs in the diagnostics section'
+        $text.IndexOf('echo fm_42537950_state=') | Should -BeLessThan $text.IndexOf('mark_uwp_launch_calculator') -Because 'the read-back runs before the UWP launches'
+    }
+
+    It 'reads the WER LocalDumps key, the RpcSs state and the appmodel group back (run 50 diagnostics)' {
+        # Run 50 correction: 60-werdumps.reg addressed HKLM\SOFTWARE,
+        # which a plain reg.exe import writes into the runner's live
+        # hive — run 49's image never got the LocalDumps key. The file
+        # now addresses PE-SOFT; the probe reads the key back to prove
+        # it landed. StateRepository's only dependency is RpcSs and its
+        # appmodel svchost group is defined in the image, so the probe
+        # records RpcSs's own state and the group definition in the
+        # running image. Reads only — the sc start experiment stays in
+        # a later round, after probe_done (eval card §34.7).
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\explorer\.exe" /v DumpFolder' -Because 'the LocalDumps key is read back from the running image'
+        $text | Should -Match 'echo wer_localdumps_folder=%WER_DUMPS%' -Because 'the LocalDumps read-back is recorded'
+        $text | Should -Match 'call :probe_svc RpcSs rpcss' -Because 'RpcSs state is recorded (StateRepository depends only on it)'
+        $text | Should -Match 'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost" /v appmodel' -Because 'the appmodel group definition is checked in the running image'
+        $text | Should -Match 'echo svchost_appmodel=' -Because 'the appmodel group presence is recorded'
+        $text | Should -Not -Match 'sc start RpcSs' -Because 'RpcSs is only queried, not started'
+        $text | Should -Not -Match 'reg add' -Because 'the diagnostics are read-only'
+        $text | Should -Not -Match 'reg import' -Because 'the diagnostics are read-only'
+    }
+
+    It 'records explorer alive at probe end (explorer_end)' {
+        # Run 50: the old explorer=1 is set while explorer is still
+        # starting, so it cannot prove the feature fix worked. The end
+        # snapshot now records whether explorer is still alive, with
+        # the same tasklist /fi shape as werfault_end/dwm_end, and the
+        # m5 stage asserts explorer_end=1.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'echo explorer_end=1 >> "%PROBE_LOCAL%"' -Because 'the alive verdict is dual-written'
+        $text | Should -Match 'echo explorer_end=1 >> "%PROBE_OUT%"' -Because 'the alive verdict is recorded on the share file too'
+        $text | Should -Match 'echo explorer_end=0 >> "%PROBE_LOCAL%"' -Because 'the dead verdict is dual-written too'
+        $text.IndexOf('echo explorer_end=') | Should -BeGreaterThan $text.IndexOf('echo dwm_end=') -Because 'explorer_end follows dwm_end in the end snapshot'
+        $text.IndexOf('echo explorer_end=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'explorer_end is written before probe_done'
+    }
+}

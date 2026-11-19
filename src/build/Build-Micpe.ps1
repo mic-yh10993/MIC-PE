@@ -338,7 +338,7 @@ function Invoke-UwpStep {
         Install-UwpApps -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot `
             -PackageNames (Get-UwpDefaults)
         Install-FrameHost -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
-        $regFiles = @('40-uwp.reg', '60-werdumps.reg') |
+        $regFiles = @('40-uwp.reg', '60-werdumps.reg', '70-feature-42537950.reg') |
             ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
         # 40-uwp.reg goes in as SYSTEM: its Appx sideload-policy key gives
         # Administrators only KEY_READ (CI run 44040699722). User decision
@@ -347,8 +347,16 @@ function Invoke-UwpStep {
         # admin-writable, so it stays on the plain path): it makes WerFault
         # write explorer's minidump to X:\CrashDumps when it crashes, so
         # the probe can copy the dump to the share and locate the run 48
-        # BEX64 offset 0x1181ea's call stack.
-        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg')
+        # BEX64 offset 0x1181ea's call stack. Run 50: its key path was
+        # HKLM\SOFTWARE, which a plain reg.exe import writes into the
+        # RUNNER's live hive — the image never got it (dump_* all 0 in
+        # run 49). It now addresses PE-SOFT (the mounted SOFTWARE hive).
+        # 70-feature-42537950.reg rides the SYSTEM import too: it forces
+        # the DisableWin10Taskbar feature (42537950) off — CTray::Init
+        # failfasts while it is enabled (run 49) — and the Overrides key
+        # DACL could not be verified offline, so SYSTEM is used rather
+        # than risking an access-denied on the plain path.
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '70-feature-42537950.reg')
         Assert-AppxPolicy -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
         Assert-UwpReady -MountDir $paths.Mount
