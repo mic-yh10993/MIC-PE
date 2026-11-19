@@ -1,6 +1,7 @@
 BeforeAll {
     . "$PSScriptRoot/../src/build/lib/Common.ps1"
     . "$PSScriptRoot/../src/build/lib/Registry.ps1"
+    . "$PSScriptRoot/../src/build/lib/Invoke-PrivilegedRegImport.ps1"
     $script:TempRoot = [System.IO.Path]::GetTempPath()
 }
 
@@ -294,6 +295,228 @@ Describe 'Invoke-RegImportAsSystem' {
                 $values | Should -Not -BeNullOrEmpty
                 $values['AllowAllTrustedApps'] | Should -Match '^0x0*1$'
                 $values['AllowDevelopmentWithoutDevLicense'] | Should -Match '^0x0*1$'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName $keyName
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'ConvertFrom-RegFile (privileged registry writer, run 52)' {
+    It 'parses the real 70-feature patch into three grouped overrides, all disabled' {
+        # The .reg file is the single source of truth for the privileged
+        # writer: it parses the patch instead of duplicating the values
+        # in code, so a drift between file and writer cannot land half
+        # a patch.
+        $entries = ConvertFrom-RegFile -Path (Join-Path $PSScriptRoot '../src/registry/70-feature-42537950.reg') -HiveKey 'PE-SYS'
+        $entries.Count | Should -Be 3 -Because 'one override per group (0, 15, 9)'
+        foreach ($group in '0', '15', '9') {
+            $entry = @($entries | Where-Object { $_.KeyPath -eq "PE-SYS\ControlSet001\Control\FeatureManagement\Overrides\$group\42537950" })
+            $entry.Count | Should -Be 1 -Because "group $group must carry the override"
+            $entry[0].Values['EnabledState'] | Should -Be 0 -Because 'EnabledState 0 disables the feature'
+            $entry[0].Values['EnabledStateOptions'] | Should -Be 0 -Because 'options 0 matches the stock entries'
+        }
+    }
+
+    It 'throws on a non-DWORD value instead of silently skipping it' {
+        $reg = Join-Path $script:TempRoot "micpe-privparse-$(Get-Random).reg"
+        $text = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            '[HKEY_LOCAL_MACHINE\PE-SYS\ControlSet001\Control\FeatureManagement\Overrides\0\42537950]',
+            '"EnabledState"="0"',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($reg, $text, [System.Text.Encoding]::Unicode)
+        try {
+            { ConvertFrom-RegFile -Path $reg -HiveKey 'PE-SYS' } | Should -Throw '*unsupported*'
+        }
+        finally {
+            Remove-Item -LiteralPath $reg -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws on a section outside the mounted hive (never write the runner hive)' {
+        # Run 50 lesson: 60-werdumps.reg once said HKLM\SOFTWARE and a
+        # plain import wrote into the runner's live hive instead of the
+        # image. The privileged writer refuses any section that does not
+        # address the mounted hive.
+        $reg = Join-Path $script:TempRoot "micpe-privparse-$(Get-Random).reg"
+        $text = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            '[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Control\FeatureManagement\Overrides\0\42537950]',
+            '"EnabledState"=dword:00000000',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($reg, $text, [System.Text.Encoding]::Unicode)
+        try {
+            { ConvertFrom-RegFile -Path $reg -HiveKey 'PE-SYS' } | Should -Throw '*outside the mounted hive*'
+        }
+        finally {
+            Remove-Item -LiteralPath $reg -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws when the patch file is missing' {
+        { ConvertFrom-RegFile -Path (Join-Path $script:TempRoot 'micpe-absent.reg') -HiveKey 'PE-SYS' } |
+            Should -Throw '*not found*'
+    }
+
+    It 'compiles the backup/restore P/Invoke helper (advapi32, run 52)' {
+        # The C# only declares DllImports; compiling it on Linux proves
+        # the signatures are well-formed without needing a Windows host
+        # or the privileges. The actual write is proven by the
+        # Windows-only test below and by the Build verification.
+        Initialize-PrivilegedRegistryApi
+        ([System.Management.Automation.PSTypeName]'MicpePrivilegedRegistry').Type |
+            Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Invoke-RegistryScript privileged routing' {
+    It 'routes privileged files to the privileged writer, SYSTEM files to SYSTEM, the rest to admin' {
+        # Mock the hive mount and all three import paths; the routing
+        # decision is the unit under test, not reg.exe itself.
+        Mock Mount-RegistryHive { }
+        Mock Dismount-RegistryHive { }
+        Mock Import-RegFile { }
+        Mock Invoke-RegImportAsSystem { }
+        Mock Invoke-RegImportPrivileged { }
+
+        $mount = Join-Path $script:TempRoot "regpriv-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32/config" | Out-Null
+        $regA = Join-Path $mount '10-pe-base.reg'
+        $regB = Join-Path $mount '40-uwp.reg'
+        $regC = Join-Path $mount '70-feature-42537950.reg'
+        Set-Content -LiteralPath $regA -Value 'Windows Registry Editor Version 5.00'
+        Set-Content -LiteralPath $regB -Value 'Windows Registry Editor Version 5.00'
+        Set-Content -LiteralPath $regC -Value 'Windows Registry Editor Version 5.00'
+        try {
+            Invoke-RegistryScript -MountDir $mount -RegFiles @($regA, $regB, $regC) -SystemRegFiles @('40-uwp.reg') -PrivilegedRegFiles @('70-feature-42537950.reg')
+            Should -Invoke Invoke-RegImportPrivileged -Times 1 -ParameterFilter { $RegFile -eq $regC -and $HiveKey -eq 'PE-SYS' }
+            Should -Invoke Invoke-RegImportAsSystem -Times 1 -ParameterFilter { $RegFile -eq $regB }
+            Should -Invoke Import-RegFile -Times 1 -ParameterFilter { $RegFile -eq $regA }
+        }
+        finally {
+            Remove-Item -LiteralPath $mount -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'reverse control: without the privileged flag the feature file takes the SYSTEM path' {
+        Mock Mount-RegistryHive { }
+        Mock Dismount-RegistryHive { }
+        Mock Import-RegFile { }
+        Mock Invoke-RegImportAsSystem { }
+        Mock Invoke-RegImportPrivileged { }
+
+        $mount = Join-Path $script:TempRoot "regpriv-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32/config" | Out-Null
+        $regC = Join-Path $mount '70-feature-42537950.reg'
+        Set-Content -LiteralPath $regC -Value 'Windows Registry Editor Version 5.00'
+        try {
+            Invoke-RegistryScript -MountDir $mount -RegFiles @($regC) -SystemRegFiles @('70-feature-42537950.reg')
+            Should -Invoke Invoke-RegImportPrivileged -Times 0
+            Should -Invoke Invoke-RegImportAsSystem -Times 1 -ParameterFilter { $RegFile -eq $regC }
+            Should -Invoke Import-RegFile -Times 0
+        }
+        finally {
+            Remove-Item -LiteralPath $mount -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Invoke-RegImportPrivileged' {
+    It 'throws a clear error without schtasks.exe (Linux)' -Skip:$IsWindows {
+        $reg = Join-Path $script:TempRoot "micpe-privimport-$(Get-Random).reg"
+        Set-Content -LiteralPath $reg -Value 'Windows Registry Editor Version 5.00'
+        try {
+            { Invoke-RegImportPrivileged -RegFile $reg -HiveKey 'PE-SYS' } | Should -Throw '*schtasks*'
+        }
+        finally {
+            Remove-Item -LiteralPath $reg -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'writes a key whose DACL gives SYSTEM only KEY_READ, where the SYSTEM import fails (run 51)' -Skip:(-not $IsWindows) {
+        # Mirror of the Appx SYSTEM-import test, with the run 51 DACL
+        # shape instead: the group key gives SYSTEM only ReadKey, so
+        # both the plain admin import and the SYSTEM import must fail,
+        # and only the backup/restore write lands the values. The
+        # restriction lives only inside the throwaway test hive; the
+        # temp dir is deleted after.
+        $work = Join-Path $script:TempRoot "priv-sys-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        $keyName = 'MICPE-PRIV-TEST'
+        $groupSub = 'Control\FeatureManagement\Overrides\0'
+        $testReg = Join-Path $work 'priv-test.reg'
+        $regText = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            ('[HKEY_LOCAL_MACHINE\{0}\{1}\42537950]' -f $keyName, $groupSub),
+            '"EnabledState"=dword:00000000',
+            '"EnabledStateOptions"=dword:00000000',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($testReg, $regText, [System.Text.Encoding]::Unicode)
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName $keyName
+            try {
+                $addOut = & reg.exe add "HKLM\$keyName\$groupSub" /f 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "reg add group key failed: $addOut" }
+
+                $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+                    "$keyName\$groupSub",
+                    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                    [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+                $acl = New-Object System.Security.AccessControl.RegistrySecurity
+                $acl.SetAccessRuleProtection($true, $false)
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
+                    'NT AUTHORITY\SYSTEM',
+                    [System.Security.AccessControl.RegistryRights]::ReadKey,
+                    [System.Security.AccessControl.InheritanceFlags]::None,
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow)))
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
+                    'BUILTIN\Administrators',
+                    [System.Security.AccessControl.RegistryRights]::ReadKey,
+                    [System.Security.AccessControl.InheritanceFlags]::None,
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow)))
+                $regKey.SetAccessControl($acl)
+                $regKey.Close()
+
+                # Admin import must fail on the restricted key (run 51:
+                # the group key gives nobody a write right except the
+                # Feature Management service account).
+                $null = & reg.exe import $testReg 2>&1
+                $LASTEXITCODE | Should -Not -Be 0 -Because 'the restricted DACL must block the admin import, or this test proves nothing'
+
+                # SYSTEM import must fail the same way (run 51 repro:
+                # SYSTEM has only KEY_READ on the group key).
+                { Invoke-RegImportAsSystem -RegFile $testReg } | Should -Throw '*Error accessing the registry*'
+
+                # The backup/restore write must succeed through the
+                # same DACL, without changing it.
+                { Invoke-RegImportPrivileged -RegFile $testReg -HiveKey $keyName } | Should -Not -Throw
+
+                # Diagnostic: show exactly what exists under the group
+                # key after the privileged write, so a read-back miss
+                # says whether the write went elsewhere (or nowhere).
+                $dump = & reg.exe query "HKLM\$keyName\$groupSub" /s 2>&1 | Out-String
+                Write-Host "Overrides subtree after privileged import:`n$dump"
+
+                $values = Get-RegistryKeyValues -KeyName $keyName -SubKey "$groupSub\42537950"
+                $values | Should -Not -BeNullOrEmpty
+                $values['EnabledState'] | Should -Match '^0x0*0$'
+                $values['EnabledStateOptions'] | Should -Match '^0x0*0$'
             }
             finally {
                 Dismount-RegistryHive -KeyName $keyName
