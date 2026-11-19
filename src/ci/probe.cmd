@@ -58,6 +58,11 @@ rem fire every second; the section markers bracket the freeze points
 rem runs 39/40 actually hit).
 set "PROBE_LOCAL=%SystemDrive%\micpe-probe-local.txt"
 
+> "%PROBE_LOCAL%" echo boot=1 & > "%PROBE_OUT%" echo boot=1
+>> "%PROBE_LOCAL%" echo share=%SHARE% & >> "%PROBE_OUT%" echo share=%SHARE%
+if defined PROBE_DIR >> "%PROBE_LOCAL%" echo share_drive=%PROBE_DIR%
+if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
+
 rem Mirror drive (run 44428428849): the serial channel is dead, so the
 rem local mirror needs a retrieval path that does not depend on the
 rem suspect share. The harness attaches a second vvfat volume
@@ -67,18 +72,16 @@ rem cannot misidentify it. The detached probe-mirror.cmd (started
 rem below next to the sync) copies the local file there every few
 rem seconds; the host reads it straight from the mirror directory
 rem after QEMU exits. mirror=0 means no mirror drive was attached
-rem (old harness); the probe runs on without it.
+rem (old harness); the probe runs on without it. This scan MUST sit
+rem after the boot=1 line above: that line truncates both probe files
+rem with a single >, so a mirror line written before it would be wiped
+rem (CI run 44440362261 proved it: mirror=0 never landed).
 set "MIRROR_DIR="
 for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
     if exist "%%D:\micpe-mirror.txt" set "MIRROR_DIR=%%D:\"
 )
 if defined MIRROR_DIR (echo mirror=1 >> "%PROBE_LOCAL%" & echo mirror=1 >> "%PROBE_OUT%") else (echo mirror=0 >> "%PROBE_LOCAL%" & echo mirror=0 >> "%PROBE_OUT%")
 if defined MIRROR_DIR (echo mirror_drive=%MIRROR_DIR% >> "%PROBE_LOCAL%" & echo mirror_drive=%MIRROR_DIR% >> "%PROBE_OUT%")
-
-> "%PROBE_LOCAL%" echo boot=1 & > "%PROBE_OUT%" echo boot=1
->> "%PROBE_LOCAL%" echo share=%SHARE% & >> "%PROBE_OUT%" echo share=%SHARE%
-if defined PROBE_DIR >> "%PROBE_LOCAL%" echo share_drive=%PROBE_DIR%
-if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 
 rem Serial channel test (run 44410311576): probe-sync.cmd wrote zero sync
 rem lines in run 41 although it lived until the stop flag (the detached

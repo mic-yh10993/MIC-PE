@@ -431,7 +431,11 @@ Describe 'probe local mirror (static)' {
         $text | Should -Match 'echo mirror=0 >> "%PROBE_OUT%"'
         $text | Should -Match 'echo mirror_drive=%MIRROR_DIR% >> "%PROBE_OUT%"'
         $text.IndexOf('set "PROBE_LOCAL=') | Should -BeLessThan $text.IndexOf('set "MIRROR_DIR="') -Because 'PROBE_LOCAL must be set before the mirror keys are written to it'
-        $text.IndexOf('set "MIRROR_DIR="') | Should -BeLessThan $text.IndexOf('echo boot=1') -Because 'the mirror is identified before the first marker'
+        # The scan must run AFTER the boot=1 line: that line truncates
+        # both probe files with a single >, so a mirror line written
+        # before it would be wiped (CI run 44440362261 proved it:
+        # mirror=0 never landed in the head test).
+        $text.IndexOf('set "MIRROR_DIR="') | Should -BeGreaterThan $text.IndexOf('echo boot=1') -Because 'the scan must run after the truncating boot line'
     }
 
     It 'probe.cmd starts probe-mirror.cmd right after probe-sync.cmd (run 44428428849)' {
