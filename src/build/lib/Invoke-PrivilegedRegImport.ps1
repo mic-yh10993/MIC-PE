@@ -12,15 +12,24 @@
     SYSTEM therefore dies with "Error accessing the registry" before any
     value lands.
 
-    This script writes the same patch a different way: it enables
-    SeBackupPrivilege and SeRestorePrivilege in its own token and opens the
-    keys with REG_OPTION_BACKUP_RESTORE. Under backup/restore semantics the
-    kernel skips the key DACL and checks only the privilege, so a caller
-    holding SeRestorePrivilege can create the feature subkey and write its
-    values where SYSTEM's DACL alone cannot. It is the same mechanism
-    backup software uses; it does not change any DACL in the shipped
-    image (the new subkey inherits the group key's stock read-only DACL,
-    exactly like the stock feature entries).
+    This script writes the same patch a different way, in two steps.
+    First it enables SeBackupPrivilege and SeRestorePrivilege in its own
+    token and opens the keys with REG_OPTION_BACKUP_RESTORE: under
+    backup/restore semantics the kernel skips the key DACL and checks
+    only the privilege, so a caller holding SeRestorePrivilege can
+    create the feature subkey where SYSTEM's DACL alone cannot. Second,
+    the values are written through an ordinary handle. That split is
+    forced by run 52: RegSetValueEx through a backup/restore handle
+    returns success but the values never land — the key is created,
+    empty, and a later read-back finds nothing there. So the new subkey
+    is created with an explicit DACL (SYSTEM, Administrators and the
+    Feature Management service account, all full control) instead of
+    inheriting the group key's read-only DACL, and the values go in
+    through a normal RegOpenKeyEx. It is the same mechanism backup
+    software uses for the create; it does not change any DACL of a
+    stock key (the group keys and every stock entry keep theirs) —
+    only the new subkey, which has no stock DACL to preserve, carries
+    the explicit one.
 
     It runs as SYSTEM through a one-shot scheduled task (see
     Invoke-RegImportPrivileged in Registry.ps1) while the hive is mounted,
@@ -89,13 +98,109 @@ public static class MicpePrivilegedRegistry
     public static extern int RegOpenKeyEx(UIntPtr hKey, string lpSubKey, uint ulOptions, uint samDesired, out UIntPtr phkResult);
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    public static extern int RegCreateKeyEx(UIntPtr hKey, string lpSubKey, uint Reserved, string lpClass, uint dwOptions, uint samDesired, IntPtr lpSecurityAttributes, out UIntPtr phkResult, out uint lpdwDisposition);
-
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern int RegSetValueEx(UIntPtr hKey, string lpValueName, uint Reserved, uint dwType, byte[] lpData, uint cbData);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern int RegCloseKey(UIntPtr hKey);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool ConvertStringSidToSid(string StringSid, out IntPtr Sid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint GetLengthSid(IntPtr pSid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool InitializeSecurityDescriptor(IntPtr pSecurityDescriptor, uint dwRevision);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool SetSecurityDescriptorDacl(IntPtr pSecurityDescriptor, bool bDaclPresent, IntPtr pDacl, bool bDaclDefaulted);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool InitializeAcl(IntPtr pAcl, uint nAclLength, uint dwAclRevision);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool AddAccessAllowedAce(IntPtr pAcl, uint dwAceRevision, uint AccessMask, IntPtr pSid);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SECURITY_ATTRIBUTES
+    {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        public bool bInheritHandle;
+    }
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "RegCreateKeyExW")]
+    public static extern int RegCreateKeyExWithSA(UIntPtr hKey, string lpSubKey, uint Reserved, string lpClass, uint dwOptions, uint samDesired, ref SECURITY_ATTRIBUTES lpSecurityAttributes, out UIntPtr phkResult, out uint lpdwDisposition);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr LocalFree(IntPtr hMem);
+
+    // Creates a subkey with an explicit DACL instead of inheriting its
+    // parent's. Feature override subkeys are created under group keys
+    // whose DACL gives SYSTEM only KEY_READ, so a key created the
+    // ordinary way inherits that DACL and nobody can write its values
+    // — run 52 proved it: RegSetValueEx through a backup/restore handle
+    // returned success but the values never landed (the key existed,
+    // empty, afterwards). The new key carries SYSTEM, Administrators
+    // and the Feature Management service account, all full control, so
+    // the values are written afterwards through an ordinary handle.
+    // The group keys and every stock entry keep their DACL; only this
+    // new subkey carries the explicit DACL. Throws InvalidOperationException
+    // naming the failed step; the caller turns it into a build failure.
+    public static void CreateKeyWithDacl(UIntPtr hParent, string subKey, out UIntPtr phkResult)
+    {
+        phkResult = UIntPtr.Zero;
+        IntPtr pSystemSid = IntPtr.Zero;
+        IntPtr pAdminSid = IntPtr.Zero;
+        IntPtr pServiceSid = IntPtr.Zero;
+        IntPtr pAcl = IntPtr.Zero;
+        IntPtr pSD = IntPtr.Zero;
+        try
+        {
+            if (!ConvertStringSidToSid("S-1-5-18", out pSystemSid))
+                throw new InvalidOperationException("ConvertStringSidToSid failed for S-1-5-18 with Win32 error " + Marshal.GetLastWin32Error());
+            if (!ConvertStringSidToSid("S-1-5-32-544", out pAdminSid))
+                throw new InvalidOperationException("ConvertStringSidToSid failed for S-1-5-32-544 with Win32 error " + Marshal.GetLastWin32Error());
+            // Feature Management service account (eval card §37.4: the
+            // only account with full control on the group keys). If the
+            // SID ever differs in another image, the ACE simply never
+            // matches a token; the SYSTEM and Administrators ACEs still
+            // apply.
+            if (!ConvertStringSidToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", out pServiceSid))
+                throw new InvalidOperationException("ConvertStringSidToSid failed for the Feature Management service SID with Win32 error " + Marshal.GetLastWin32Error());
+            uint aclSize = 8 + (8 + GetLengthSid(pSystemSid)) + (8 + GetLengthSid(pAdminSid)) + (8 + GetLengthSid(pServiceSid));
+            pAcl = Marshal.AllocHGlobal((int)aclSize);
+            if (!InitializeAcl(pAcl, aclSize, 2))
+                throw new InvalidOperationException("InitializeAcl failed with Win32 error " + Marshal.GetLastWin32Error());
+            if (!AddAccessAllowedAce(pAcl, 2, 0x000f003f, pSystemSid))
+                throw new InvalidOperationException("AddAccessAllowedAce failed for SYSTEM with Win32 error " + Marshal.GetLastWin32Error());
+            if (!AddAccessAllowedAce(pAcl, 2, 0x000f003f, pAdminSid))
+                throw new InvalidOperationException("AddAccessAllowedAce failed for Administrators with Win32 error " + Marshal.GetLastWin32Error());
+            if (!AddAccessAllowedAce(pAcl, 2, 0x000f003f, pServiceSid))
+                throw new InvalidOperationException("AddAccessAllowedAce failed for the Feature Management service with Win32 error " + Marshal.GetLastWin32Error());
+            pSD = Marshal.AllocHGlobal(20);
+            if (!InitializeSecurityDescriptor(pSD, 1))
+                throw new InvalidOperationException("InitializeSecurityDescriptor failed with Win32 error " + Marshal.GetLastWin32Error());
+            if (!SetSecurityDescriptorDacl(pSD, true, pAcl, false))
+                throw new InvalidOperationException("SetSecurityDescriptorDacl failed with Win32 error " + Marshal.GetLastWin32Error());
+            SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
+            sa.nLength = (uint)Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+            sa.lpSecurityDescriptor = pSD;
+            sa.bInheritHandle = false;
+            uint disposition = 0;
+            int rc = RegCreateKeyExWithSA(hParent, subKey, 0, null, REG_OPTION_BACKUP_RESTORE, 0x000f003f, ref sa, out phkResult, out disposition);
+            if (rc != 0)
+                throw new InvalidOperationException("RegCreateKeyEx failed for '" + subKey + "' with Win32 error " + rc);
+        }
+        finally
+        {
+            if (pSD != IntPtr.Zero) Marshal.FreeHGlobal(pSD);
+            if (pAcl != IntPtr.Zero) Marshal.FreeHGlobal(pAcl);
+            if (pSystemSid != IntPtr.Zero) LocalFree(pSystemSid);
+            if (pAdminSid != IntPtr.Zero) LocalFree(pAdminSid);
+            if (pServiceSid != IntPtr.Zero) LocalFree(pServiceSid);
+        }
+    }
 
     [DllImport("kernel32.dll")]
     public static extern IntPtr GetCurrentProcess();
@@ -223,7 +328,7 @@ function ConvertFrom-RegFile {
     return $entries
 }
 
-function Open-PrivilegedRegistryKey {
+function Ensure-PrivilegedRegistryKey {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -232,9 +337,15 @@ function Open-PrivilegedRegistryKey {
 
     # Walk the path one segment at a time under HKLM, opening each key
     # with REG_OPTION_BACKUP_RESTORE (the DACL is skipped; the privilege
-    # governs) and creating a segment that does not exist yet. The leaf
-    # is created the same way, so a missing feature subkey is not an
-    # error. Returns an open handle the caller must close.
+    # governs) and creating a segment that does not exist yet. A new
+    # segment is created with CreateKeyWithDacl, which gives it an
+    # explicit DACL (SYSTEM, Administrators, Feature Management service
+    # — full control) instead of inheriting the group key's read-only
+    # DACL: run 52 proved a key created the ordinary way keeps the
+    # read-only DACL and then nobody can write its values (RegSetValueEx
+    # through the backup/restore handle returned success but the values
+    # never landed). The key is left existing and closed; the caller
+    # re-opens it through an ordinary handle to write the values.
     $sam = [MicpePrivilegedRegistry]::KEY_QUERY_VALUE -bor
         [MicpePrivilegedRegistry]::KEY_SET_VALUE -bor
         [MicpePrivilegedRegistry]::KEY_CREATE_SUB_KEY -bor
@@ -251,11 +362,9 @@ function Open-PrivilegedRegistryKey {
             [MicpePrivilegedRegistry]::REG_OPTION_BACKUP_RESTORE,
             $sam, [ref]$child)
         if ($rc -eq [MicpePrivilegedRegistry]::ERROR_FILE_NOT_FOUND) {
-            $disposition = [uint32]0
-            $rc = [MicpePrivilegedRegistry]::RegCreateKeyEx(
-                $parent, $segment, 0, $null,
-                [MicpePrivilegedRegistry]::REG_OPTION_BACKUP_RESTORE,
-                $sam, [IntPtr]::Zero, [ref]$child, [ref]$disposition)
+            # CreateKeyWithDacl throws naming the failed step.
+            [MicpePrivilegedRegistry]::CreateKeyWithDacl($parent, $segment, [ref]$child)
+            $rc = 0
         }
         if ($rc -ne 0) {
             if ($parent -ne [MicpePrivilegedRegistry]::HKEY_LOCAL_MACHINE) {
@@ -269,7 +378,9 @@ function Open-PrivilegedRegistryKey {
         }
         $parent = $child
     }
-    return $parent
+    if ($parent -ne [MicpePrivilegedRegistry]::HKEY_LOCAL_MACHINE) {
+        [void][MicpePrivilegedRegistry]::RegCloseKey($parent)
+    }
 }
 
 function Set-PrivilegedRegistryValue {
@@ -318,9 +429,23 @@ if ($MyInvocation.InvocationName -ne '.') {
     Enable-BackupRestorePrivilege
     $written = 0
     foreach ($entry in $entries) {
+        # Make sure the key exists (creates it with an explicit DACL
+        # when missing), then write the values through an ordinary
+        # handle: RegSetValueEx through a backup/restore handle returns
+        # success but the values never land (run 52), so the write must
+        # go through a handle opened the ordinary way — which only works
+        # because CreateKeyWithDacl gave the new key a writable DACL.
+        Ensure-PrivilegedRegistryKey -SubKeyPath $entry.KeyPath
         $handle = [UIntPtr]::Zero
         try {
-            $handle = Open-PrivilegedRegistryKey -SubKeyPath $entry.KeyPath
+            $rc = [MicpePrivilegedRegistry]::RegOpenKeyEx(
+                [MicpePrivilegedRegistry]::HKEY_LOCAL_MACHINE, $entry.KeyPath, 0,
+                [MicpePrivilegedRegistry]::KEY_SET_VALUE -bor [MicpePrivilegedRegistry]::KEY_QUERY_VALUE,
+                [ref]$handle)
+            if ($rc -ne 0) {
+                throw [System.InvalidOperationException]::new(
+                    "cannot open '$($entry.KeyPath)' for writing after privileged create (Win32 error $rc) — the new key's DACL may still be restrictive")
+            }
             foreach ($name in $entry.Values.Keys) {
                 Set-PrivilegedRegistryValue -KeyHandle $handle -Name $name -Value $entry.Values[$name]
                 Write-Host ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $entry.KeyPath, $name, $entry.Values[$name])

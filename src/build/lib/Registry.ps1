@@ -219,12 +219,17 @@ function Invoke-RegImportPrivileged {
     # §37.4). SYSTEM does hold SeBackupPrivilege and SeRestorePrivilege,
     # so the import runs the privileged writer script
     # (Invoke-PrivilegedRegImport.ps1) instead of reg.exe: it enables
-    # both privileges and opens the keys with REG_OPTION_BACKUP_RESTORE,
-    # which skips the key DACL and checks only the privilege. The
-    # shipped image's DACLs are not changed (the new subkey inherits the
-    # group key's stock read-only DACL, like the stock feature entries),
-    # and the write still happens at CI build time while the hive is
-    # mounted (user decision 2026-11-17 23:43).
+    # both privileges and creates the subkey with REG_OPTION_BACKUP_RESTORE
+    # (which skips the key DACL and checks only the privilege), giving the
+    # new subkey an explicit DACL (SYSTEM, Administrators and the Feature
+    # Management service account, all full control) so the values can then
+    # be written through an ordinary handle — run 52 proved RegSetValueEx
+    # through a backup/restore handle returns success but the values
+    # never land. No stock key's DACL is changed (the group keys and
+    # every stock entry keep theirs); only the new subkey, which has no
+    # stock DACL to preserve, carries the explicit one. The write still
+    # happens at CI build time while the hive is mounted (user decision
+    # 2026-11-17 23:43).
     Assert-PathExists -Path $RegFile -Label 'Registry patch'
 
     if ($null -eq (Get-Command -Name 'schtasks.exe' -ErrorAction SilentlyContinue)) {
