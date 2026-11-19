@@ -865,23 +865,35 @@ Describe 'explorer CPU time (run 44428428849)' {
         }
     }
 
-    It 'C1diag: tasklist itself, run natively (no batch) (run 44450473618)' -Skip:(-not $IsWindows) {
-        # C1's batch is well-formed (local od proves 4 CRLF lines) yet
-        # the for /f parse yields missing on the runner. Isolate
-        # tasklist itself: run it from PowerShell, both the System32
-        # original and the work-dir copy the harness uses, and dump
-        # what each one prints. No batch file, so no for /f and no
-        # array-literal trap in the way.
+    It 'C1diag: tasklist copy vs original, and the C1 pipeline inside a batch (run 44453150474)' -Skip:(-not $IsWindows) {
+        # C1diag v2 (native): System32 tasklist finds no cmd.exe in the
+        # Pester session (no batch runs there), and the work-dir copy
+        # printed NOTHING — not even the INFO line. Two questions: is
+        # the copy broken, and does the C1 pipeline see the batch's
+        # own cmd.exe? All -f elements parenthesised (run 44451247674).
         $workDir = & $script:NewWorkDir
+        $outFile = Join-Path $workDir 'tasklist-batch.txt'
+        $bat = Join-Path $workDir 'tasklist-batch.bat'
         try {
-            $sys = & $script:TasklistExe /v /fo list /fi "imagename eq cmd.exe" 2>&1 | Out-String
-            Write-Host "sys tasklist /v /fo list: [$sys]"
             $copy = Join-Path $workDir 'tasklist.exe'
-            $cpy = & $copy /v /fo list /fi "imagename eq cmd.exe" 2>&1 | Out-String
-            Write-Host "copy tasklist /v /fo list: [$cpy]"
-            $plain = & $script:TasklistExe /fi "imagename eq cmd.exe" 2>&1 | Out-String
-            Write-Host "sys tasklist plain: [$plain]"
-            ($sys -match 'CPU Time') | Should -Be $true -Because 'the System32 tasklist must show a CPU Time line for cmd.exe'
+            $sysHash = (Get-FileHash -LiteralPath $script:TasklistExe -Algorithm SHA256).Hash
+            $copyHash = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash
+            Write-Host "tasklist hash sys==copy: $($sysHash -eq $copyHash)"
+            $copyAll = & $copy 2>&1 | Out-String
+            if (-not $copyAll) { $copyAll = '' }
+            Write-Host "copy tasklist no-args exit=$LASTEXITCODE lines=$(($copyAll -split "`n").Count) head=[$($copyAll.Substring(0, [Math]::Min(300, $copyAll.Length)))]"
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                ('tasklist /fi "imagename eq cmd.exe" > "{0}" 2>&1' -f $outFile),
+                ('tasklist /v /fo list /fi "imagename eq cmd.exe" >> "{0}" 2>&1' -f $outFile),
+                ('for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do echo PARSED=%%C >> "{0}"' -f $outFile)
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
+            Write-Host "batch tasklist dump: [$text]"
+            $text | Should -Not -BeNullOrEmpty -Because 'the batch dump must exist for the diagnosis'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
