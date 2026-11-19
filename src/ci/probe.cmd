@@ -73,15 +73,16 @@ rem at all; serial_sys / serialcomm say whether the driver and the port
 rem enumeration exist. A com1=0 here convicts the channel: the local
 rem mirror then needs a different retrieval path than the serial log.
 echo sync_test=%TIME: =0% > COM1 2>nul
-rem A failed output redirect does NOT set errorlevel (CI run
-rem 44425584830 proved it: a redirect to a missing directory and a
-rem redirect to a directory both printed their errors, created
-rem nothing, and left errorlevel at 0), so the redirect above can
-rem never report com1=0 — it is only the end-to-end proof, seen as a
-rem sync_test line in micpe-serial.log iff the channel works. The
-rem actual open test is copy: it fails with errorlevel 1 when the
-rem port cannot be opened. copy is a cmd.exe internal command, so it
-rem needs no exe on PATH.
+rem A failed output redirect leaves errorlevel UNCHANGED (CI runs
+rem 44425584830 and 44426492643 proved it in both directions: after
+rem a failing redirect the errorlevel was whatever the previous
+rem command left — 0 when the previous command had succeeded, 1
+rem when it had failed), so the redirect above can never report
+rem com1 — it is only the end-to-end proof, seen as a sync_test line
+rem in micpe-serial.log iff the channel works. The actual open test
+rem is copy: it fails with errorlevel 1 when the port cannot be
+rem opened. copy is a cmd.exe internal command, so it needs no exe
+rem on PATH.
 copy /y nul COM1 >nul 2>&1
 if errorlevel 1 (echo com1=0 >> "%PROBE_LOCAL%" & echo com1=0 >> "%PROBE_OUT%") else (echo com1=1 >> "%PROBE_LOCAL%" & echo com1=1 >> "%PROBE_OUT%")
 if exist "%SystemRoot%\System32\drivers\serial.sys" (echo serial_sys=1 >> "%PROBE_LOCAL%" & echo serial_sys=1 >> "%PROBE_OUT%") else (echo serial_sys=0 >> "%PROBE_LOCAL%" & echo serial_sys=0 >> "%PROBE_OUT%")

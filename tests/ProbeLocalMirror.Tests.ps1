@@ -205,45 +205,61 @@ Describe 'probe sync mechanism (run 44386689307)' {
         # probe.cmd tests it with `copy /y nul COM1` and records
         # com1=1/0 from copy's errorlevel, and separately writes
         # `echo sync_test > COM1` as the end-to-end proof in the serial
-        # log. The redirect's errorlevel must NOT be used: CI run
-        # 44425584830 proved a failed `>` redirect prints its error,
-        # creates nothing, and leaves errorlevel at 0 — the old design
-        # could never have reported com1=0. This test proves all three
-        # legs on real cmd.exe: copy to a writable target succeeds,
-        # copy to an unopenable target fails with errorlevel 1, and a
-        # failed echo redirect leaves errorlevel at 0 (the trap, pinned
-        # so nobody reintroduces the redirect-errorlevel assumption).
+        # log. The redirect's errorlevel must NOT be used: a failed `>`
+        # redirect leaves errorlevel UNCHANGED — it reports the previous
+        # command's errorlevel, not its own outcome. CI run 44425584830
+        # showed it staying 0 after a failing redirect (previous command
+        # had succeeded); run 44426492643 showed it staying 1 (previous
+        # command, a failing copy, had set it). Either way the redirect
+        # can never report com1. This test proves the copy legs on real
+        # cmd.exe (copy to a writable target succeeds, copy to an
+        # unopenable target fails with errorlevel 1, copy to NUL proves
+        # copy-to-a-device works in principle) and pins the trap in both
+        # directions. The runner's own COM1 is diagnostic only, not
+        # asserted: it is enumerated (serialcomm=1) but may be reserved
+        # by the Azure serial console, so its open can fail there while
+        # the probe's copy logic is still sound — the true-side value of
+        # com1 is verified in PE by the Build, not on the runner.
         # `> COM99` is not a missing-device sentinel either (CI run
         # 44423069424: cmd creates a plain file named COM99; only
         # COM1-COM9 are reserved device names).
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'com1-test.txt'
-        $deviceFile = Join-Path $workDir 'serial-device.log'
+        $srcFile = Join-Path $workDir 'serial-src.log'
         $copyFile = Join-Path $workDir 'copy-target.log'
         $missingFile = Join-Path $workDir 'no-such-dir\device.log'
         $bat = Join-Path $workDir 'com1-test.bat'
         try {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
-                ('echo sync_test > "{0}" 2>nul' -f $deviceFile),
-                ('if errorlevel 1 (echo redirect_ok=0 >> "{0}") else (echo redirect_ok=1 >> "{0}")' -f $outFile),
+                ('echo sync_test > "{0}" 2>nul' -f $srcFile),
+                ('copy /y "{0}" NUL >nul 2>&1' -f $srcFile),
+                ('if errorlevel 1 (echo copy_nul=0 >> "{0}") else (echo copy_nul=1 >> "{0}")' -f $outFile),
+                ('copy /y "{0}" COM1 >nul 2>&1' -f $srcFile),
+                ('if errorlevel 1 (echo copy_com1=0 >> "{0}") else (echo copy_com1=1 >> "{0}")' -f $outFile),
+                ('copy /y nul COM1 >nul 2>&1'),
+                ('if errorlevel 1 (echo copy_nul_com1=0 >> "{0}") else (echo copy_nul_com1=1 >> "{0}")' -f $outFile),
                 ('copy /y nul "{0}" >nul 2>&1' -f $copyFile),
                 ('if errorlevel 1 (echo copy_ok=0 >> "{0}") else (echo copy_ok=1 >> "{0}")' -f $outFile),
                 ('copy /y nul "{0}" >nul 2>&1' -f $missingFile),
                 ('if errorlevel 1 (echo copy_missing=0 >> "{0}") else (echo copy_missing=1 >> "{0}")' -f $outFile),
+                ('copy /y nul "{0}" >nul 2>&1' -f $missingFile),
                 ('echo sync_test > "{0}" 2>nul' -f $missingFile),
-                ('if errorlevel 1 (echo redirect_missing=0 >> "{0}") else (echo redirect_missing=1 >> "{0}")' -f $outFile)
+                ('if errorlevel 1 (echo trap_after_fail=1 >> "{0}") else (echo trap_after_fail=0 >> "{0}")' -f $outFile),
+                ('copy /y nul "{0}" >nul 2>&1' -f $copyFile),
+                ('echo sync_test > "{0}" 2>nul' -f $missingFile),
+                ('if errorlevel 1 (echo trap_after_ok=1 >> "{0}") else (echo trap_after_ok=0 >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be 0
             $text = Get-Content -LiteralPath $outFile -Raw
             Write-Host "com1 test: [$text]"
-            $text | Should -Match 'redirect_ok=1' -Because 'a redirect to an existing device succeeds'
+            $text | Should -Match 'copy_nul=1' -Because 'copy to a device works in principle'
             $text | Should -Match 'copy_ok=1' -Because 'copy to a writable target succeeds'
             $text | Should -Match 'copy_missing=0' -Because 'copy to a target that cannot be opened fails with errorlevel 1'
-            $text | Should -Match 'redirect_missing=1' -Because 'a failed redirect leaves errorlevel at 0 — the trap the probe must not rely on'
-            (Get-Content -LiteralPath $deviceFile -Raw) | Should -Match 'sync_test' -Because 'the successful redirect write lands in the device file'
+            $text | Should -Match 'trap_after_fail=1' -Because 'a failed redirect leaves a set errorlevel alone'
+            $text | Should -Match 'trap_after_ok=0' -Because 'a failed redirect leaves a clear errorlevel alone — the trap the probe must not rely on'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
