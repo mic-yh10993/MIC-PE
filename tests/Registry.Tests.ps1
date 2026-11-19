@@ -95,22 +95,28 @@ Describe 'WER local dumps registry patch (run 49)' {
     }
 }
 
-Describe 'feature 42537950 override registry patch (run 50)' {
+Describe 'feature 42537950 override registry patch (run 50, run 51)' {
     BeforeAll {
         $script:reg70 = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/registry/70-feature-42537950.reg') -Raw
         $script:reg60b = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/registry/60-werdumps.reg') -Raw
     }
 
-    It 'forces DisableWin10Taskbar (42537950) off under PE-SYS Overrides' {
+    It 'forces DisableWin10Taskbar (42537950) off in all three FeatureManagement groups' {
         # Run 49 root cause: CTray::Init failfasts while this feature is
         # enabled. The image's offline SYSTEM hive holds 330 Overrides
         # and none is 42537950, so the feature runs at its built-in
-        # default (enabled). The patch adds the override, flat under
-        # Overrides, EnabledState 0 = Disabled. PE-SYS addresses the
-        # mounted SYSTEM hive (HKLM\SYSTEM would hit the runner).
-        $script:reg70 | Should -Match 'HKEY_LOCAL_MACHINE\\PE-SYS\\ControlSet001\\Control\\FeatureManagement\\Overrides\\42537950\]' -Because 'the override lands in the mounted SYSTEM hive'
-        $script:reg70.Contains('"EnabledState"=dword:00000000') | Should -BeTrue -Because 'EnabledState 0 disables the feature'
-        $script:reg70.Contains('"EnabledStateOptions"=dword:00000000') | Should -BeTrue -Because 'no variant options are set'
+        # default (enabled). Run 50 wrote the override FLAT under
+        # Overrides and the loader ignored it (§36.5.1 — it reads
+        # grouped entries only), so run 51 writes it into all three
+        # groups (the feature's group is not known offline; writing
+        # all three is harmless). PE-SYS addresses the mounted SYSTEM
+        # hive (HKLM\SYSTEM would hit the runner).
+        foreach ($group in '0', '15', '9') {
+            $script:reg70 | Should -Match "HKEY_LOCAL_MACHINE\\PE-SYS\\ControlSet001\\Control\\FeatureManagement\\Overrides\\$group\\42537950\]" -Because "group $group must carry the override"
+        }
+        ([regex]::Matches($script:reg70, '"EnabledState"=dword:00000000')).Count | Should -Be 3 -Because 'one Disabled value per group'
+        ([regex]::Matches($script:reg70, '"EnabledStateOptions"=dword:00000000')).Count | Should -Be 3 -Because 'one options value per group, matching the stock entries'
+        $script:reg70 | Should -Not -Match 'HKEY_LOCAL_MACHINE\\PE-SYS\\ControlSet001\\Control\\FeatureManagement\\Overrides\\42537950\]' -Because 'the flat entry is gone on purpose — the loader ignores it'
     }
 
     It 'addresses the WER LocalDumps key at PE-SOFT, not the runner hive (run 50 correction)' {

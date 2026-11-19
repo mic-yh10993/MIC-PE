@@ -578,8 +578,13 @@ rem checks say whether the feature also sits in a group override
 rem (it does not in the image; a 1 here would mean the image changed).
 rem The EnabledState line reads "EnabledState    REG_DWORD    0x0", so
 rem tokens=3 yields the hex value; a missing key leaves missing.
-rem No new mark_ marker: this section rides under mark_uwp_svc, and the
-rem marker count (39) stays put.
+rem Run 51: the flat entry run 50 wrote was ignored by the loader
+rem (§36.5.1 — it reads grouped entries only), so the patch now
+rem writes all three groups and the flat entry is gone. The flat
+rem read-back below stays as a control (expect missing now); the
+rem three group keys are the asserted ones. No new mark_ marker:
+rem this section rides under mark_uwp_svc, and the marker count (39)
+rem stays put.
 set "FM_STATE=missing"
 for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\42537950" /v EnabledState 2^>nul ^| find /i "EnabledState"') do set "FM_STATE=%%A"
 echo fm_42537950_state=%FM_STATE% >> "%PROBE_LOCAL%" & echo fm_42537950_state=%FM_STATE% >> "%PROBE_OUT%"
@@ -973,6 +978,50 @@ echo probe_done=1 >> "%PROBE_LOCAL%"
 if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
 choice /c Y /d Y /t 3 >nul
 
+rem Run 51 (service start experiment, eval card §34.7): probe_done is
+rem already in the LOCAL file and the share copy is detached, so
+rem whatever happens here cannot lose a conclusion — the worst case
+rem is a delayed shutdown. RpcSs is StateRepository's only dependency
+rem and it is STOPPED in PE (run 50), so try starting it and watch
+rem whether StateRepository follows and whether AUMID becomes
+rem resolvable. The start itself runs detached with a bounded wait
+rem (run 39: two start calls stalled probe + watchdog within ~15s)
+rem — the parent never blocks on the start command, and a hung start
+rem is taskkilled. StateRepository and AppXSVC get the same treatment
+rem after RpcSs, then the AUMID store is dumped again.
+call :probe_sc_start RpcSs rpcss
+call :probe_svc RpcSs rpcss_after_start "%PROBE_LOCAL%"
+call :probe_svc StateRepository staterepo_after_rpcss "%PROBE_LOCAL%"
+call :probe_sc_start StateRepository staterepo
+call :probe_svc StateRepository staterepo_after_start "%PROBE_LOCAL%"
+call :probe_sc_start AppXSVC appxsvc
+call :probe_svc AppXSVC appxsvc_after_start "%PROBE_LOCAL%"
+rem AUMID re-dump: same store query as the cross-check section, with
+rem _after keys — if StateRepository came up, the !App subkeys may
+rem resolve now. Dump to a file and search the file (never a pipe:
+rem CI run 44519361912 — a piped find with a bang kills the batch).
+setlocal DisableDelayedExpansion
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s > "%SystemDrive%\micpe-aumid-after.tmp" 2>nul
+find /i "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" "%SystemDrive%\micpe-aumid-after.tmp" >nul
+set "AUMID_AFTER_CALC=%ERRORLEVEL%"
+if "%AUMID_AFTER_CALC%"=="0" (echo aumid_after_calc=1 >> "%PROBE_LOCAL%" & echo aumid_after_calc=1 >> "%PROBE_OUT%") else (echo aumid_after_calc=0 >> "%PROBE_LOCAL%" & echo aumid_after_calc=0 >> "%PROBE_OUT%")
+find /i "Microsoft.Windows.Photos_8wekyb3d8bbwe!App" "%SystemDrive%\micpe-aumid-after.tmp" >nul
+set "AUMID_AFTER_PHOTOS=%ERRORLEVEL%"
+if "%AUMID_AFTER_PHOTOS%"=="0" (echo aumid_after_photos=1 >> "%PROBE_LOCAL%" & echo aumid_after_photos=1 >> "%PROBE_OUT%") else (echo aumid_after_photos=0 >> "%PROBE_LOCAL%" & echo aumid_after_photos=0 >> "%PROBE_OUT%")
+find /i "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic" "%SystemDrive%\micpe-aumid-after.tmp" >nul
+set "AUMID_AFTER_MEDIA=%ERRORLEVEL%"
+if "%AUMID_AFTER_MEDIA%"=="0" (echo aumid_after_media=1 >> "%PROBE_LOCAL%" & echo aumid_after_media=1 >> "%PROBE_OUT%") else (echo aumid_after_media=0 >> "%PROBE_LOCAL%" & echo aumid_after_media=0 >> "%PROBE_OUT%")
+set "AUMID_AFTER_LINES=0"
+if exist "%SystemDrive%\micpe-aumid-after.tmp" for /f %%A in (%SystemDrive%\micpe-aumid-after.tmp) do set /a AUMID_AFTER_LINES+=1
+echo aumid_after_lines=%AUMID_AFTER_LINES% >> "%PROBE_LOCAL%" & echo aumid_after_lines=%AUMID_AFTER_LINES% >> "%PROBE_OUT%"
+del "%SystemDrive%\micpe-aumid-after.tmp" >nul 2>&1
+endlocal
+rem Fifth sync: the experiment wrote keys after the detached end copy
+rem fired, so copy the local file to the share once more — otherwise
+rem the experiment keys live only in the share probe file, whose host
+rem view stalled after xcheck in run 50.
+call :probe_sync_local
+
 if "%MICPE_HOLD%"=="1" (
     echo.
     echo MICPE probe written to %PROBE_OUT%
@@ -1305,6 +1354,53 @@ echo dump_%~1_localdumps_copy=%DUMP_LOCALDUMPS_COPY% >> "%PROBE_LOCAL%" & echo d
 echo dump_%~1_profile=%DUMP_PROFILE% >> "%PROBE_LOCAL%" & echo dump_%~1_profile=%DUMP_PROFILE% >> "%PROBE_OUT%"
 echo dump_%~1_profile_copy=%DUMP_PROFILE_COPY% >> "%PROBE_LOCAL%" & echo dump_%~1_profile_copy=%DUMP_PROFILE_COPY% >> "%PROBE_OUT%"
 exit /b 0
+
+:probe_sc_start
+rem %1 = service name, %2 = key prefix. Run 51: start a service
+rem detached with a bounded wait (run 39: two start calls stalled
+rem probe + watchdog within ~15s, so the parent never blocks on the
+rem start command). Writes scstart_<prefix>_done=1 when the child
+rem finished in time, scstart_<prefix>_timeout=1 when it did not
+rem (the start command is taskkilled). The child writes its output
+rem to a temp file on the PE system drive plus a DONE sentinel; the
+rem parent waits for DONE, not merely a non-empty file — the start
+rem command prints its first line before it finishes, so non-empty
+rem alone would read a start still in flight as done. The caller
+rem reads the service state afterwards with :probe_svc (the query
+rem command is proven safe; only the start call ever wedged).
+rem The temp file lives on %SystemDrive% (X: in PE, the RAM disk) so
+rem it never touches the share and never waits on the network.
+set "SC_TMP=%SystemDrive%\micpe-scstart.tmp"
+del "%SC_TMP%" >nul 2>&1
+start "" /min cmd /c sc start %~1 ^> "%SC_TMP%" 2^>nul ^& echo DONE ^>^> "%SC_TMP%"
+set /a SC_SPIN=0
+set /a SC_WAIT=0
+:sc_start_spin
+if exist "%SC_TMP%" for %%F in ("%SC_TMP%") do if %%~zF gtr 0 goto sc_start_check_done
+set /a SC_SPIN+=1
+if %SC_SPIN% lss 20000 goto sc_start_spin
+:sc_start_wait
+if exist "%SC_TMP%" for %%F in ("%SC_TMP%") do if %%~zF gtr 0 goto sc_start_check_done
+if %SC_WAIT% geq 15 goto sc_start_timeout
+choice /c Y /d Y /t 1 >nul
+set /a SC_WAIT+=1
+goto sc_start_wait
+:sc_start_check_done
+find /i "DONE" "%SC_TMP%" >nul 2>&1
+if not errorlevel 1 goto sc_start_found
+if %SC_WAIT% geq 15 goto sc_start_timeout
+choice /c Y /d Y /t 1 >nul
+set /a SC_WAIT+=1
+goto sc_start_check_done
+:sc_start_found
+echo scstart_%~2_done=1 >> "%PROBE_LOCAL%" & echo scstart_%~2_done=1 >> "%PROBE_OUT%"
+del "%SC_TMP%" >nul 2>&1
+exit /b 0
+:sc_start_timeout
+echo scstart_%~2_timeout=1 >> "%PROBE_LOCAL%" & echo scstart_%~2_timeout=1 >> "%PROBE_OUT%"
+taskkill /f /im sc.exe >nul 2>&1
+del "%SC_TMP%" >nul 2>&1
+exit /b 1
 
 :probe_poll_check
 rem %1 = process image name (no .exe). Run 47: run 46 died between a
