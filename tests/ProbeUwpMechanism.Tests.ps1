@@ -833,9 +833,16 @@ Describe 'explorer CPU time (run 44428428849)' {
         # the error is swallowed by 2>nul, and every key came back
         # missing. The old C1 passed anyway: it accepted "a time or an
         # explicit missing", so the missing branch hid the broken
-        # snippet. Strict now: on the runner explorer.exe is running,
-        # so the snippet must produce a real time; missing means the
-        # snippet itself is broken.
+        # snippet. Strict now — with one deliberate deviation: the
+        # filter is cmd.exe, not explorer.exe. The runner's tests run
+        # in session 0, where no explorer.exe is visible (Test run
+        # 44449769368 proved it: the head test's explorer=0 and dwm=0),
+        # so an explorer.exe filter could never yield a time there.
+        # cmd.exe is the test batch's own process, guaranteed visible,
+        # so a real time here proves the pipeline itself works — list
+        # form, tokens=3, no /nh. The exact line in probe.cmd (with the
+        # explorer.exe filter) is pinned by the static exact-line test
+        # above; C1b below proves /nh breaks the same pipeline.
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'cpu-out.txt'
         $bat = Join-Path $workDir 'cpu-parse.bat'
@@ -843,7 +850,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq explorer.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
+                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
@@ -851,7 +858,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             $result.ExitCode | Should -Be 0
             $text = Get-Content -LiteralPath $outFile -Raw
             Write-Host "cpu parse: [$text]"
-            $text | Should -Match 'explorer_cpu=[0-9]+:[0-9]{2}:[0-9]{2}' -Because 'explorer runs on the runner, so the parse must yield a real time — missing would mean the snippet is broken (run 44441708839)'
+            $text | Should -Match 'explorer_cpu=[0-9]+:[0-9]{2}:[0-9]{2}' -Because 'cmd.exe runs in the test session, so the parse must yield a real time — missing would mean the snippet is broken (run 44441708839)'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -861,9 +868,12 @@ Describe 'explorer CPU time (run 44428428849)' {
     It 'C1b: the same snippet WITH /nh yields missing on real cmd.exe (run 44441708839)' -Skip:(-not $IsWindows) {
         # Reverse control for C1: the exact pre-fix snippet, /nh and
         # all, must produce missing on the same runner where C1
-        # produces a time. This proves the /nh was the breakage — the
-        # strict C1 above would have caught it — and that the missing
-        # branch is real, not a vacuous pass.
+        # produces a time. Same cmd.exe filter as C1 — cmd.exe is
+        # running, so missing here can only mean /nh broke tasklist,
+        # not that the process is absent. (An explorer.exe filter
+        # would prove nothing on this runner: Test run 44449769368
+        # showed explorer is invisible in session 0, so missing
+        # would be the answer either way.)
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'cpu-out.txt'
         $bat = Join-Path $workDir 'cpu-parse-broken.bat'
@@ -871,7 +881,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq explorer.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
+                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir

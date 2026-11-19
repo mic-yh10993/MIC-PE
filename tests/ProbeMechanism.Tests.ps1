@@ -238,10 +238,14 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
             $text | Should -Match 'drives=[A-Z]*C' -Because 'the runner system drive C: must be in the list'
             # Explorer CPU time (run 44428428849): the shell call sits
             # before the shell_ready line, so it runs inside the head.
-            # Run 44441708839: strict — explorer runs on the runner, so
-            # the shell CPU call must produce a real time; missing would
-            # mean the parse snippet is broken (the /nh bug).
-            $text | Should -Match 'explorer_cpu_shell=[0-9]+:[0-9]{2}:[0-9]{2}' -Because 'the CPU-time parse must produce a real time on the runner'
+            # The key's presence is what is asserted here, not a real
+            # time: the runner's tests run in session 0, where no
+            # explorer.exe is visible (Test run 44449769368: the head
+            # itself records explorer=0 and dwm=0), so the shell call
+            # honestly records missing there. The parse itself is
+            # proven by C1 on cmd.exe, and the exact line is pinned by
+            # the static test.
+            $text | Should -Match 'explorer_cpu_shell=([0-9]+:[0-9]{2}:[0-9]{2}|missing)' -Because 'the CPU-time call runs in the head and records a time or an explicit missing'
             $text | Should -Match 'explorer=[01]'
             $text | Should -Match 'dwm=[01]'
             $text | Should -Match 'shell_ready=[01]'
