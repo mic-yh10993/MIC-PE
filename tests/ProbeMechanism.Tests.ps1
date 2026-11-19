@@ -55,9 +55,11 @@ BeforeAll {
         $script:TasklistExe = $null
     }
 
-    # Run a batch with only find.exe (+ optionally tasklist.exe) on PATH,
-    # so tasklist / ping / reg are all unresolvable, as in the PE image.
-    # The batch path itself is absolute, so cmd.exe can still load it.
+    # Run a batch with only what the test copies in on PATH, as in the
+    # PE image: the head needs find, tasklist, ping and reg, all shipped
+    # in boot.wim (tasklist via 10-cmdpe.txt, reg.exe via
+    # 30-runtimes.txt). The batch path itself is absolute, so cmd.exe
+    # can still load it.
     $script:InvokeRestrictedCmd = {
         param([string] $BatPath, [string] $WorkDir)
         $oldPath = $env:PATH
@@ -171,12 +173,16 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
         # explorer.exe, so only the keys' presence is asserted.
         # ping.exe is on PATH too: the PE image has PING.EXE, and the
         # head's settle line needs it (a missing ping fails silently
-        # but is not the PE behaviour).
+        # but is not the PE behaviour). reg.exe is copied in too: the
+        # head's SERIALCOMM check reads it (run 44410311576), and the
+        # PE image ships it (src/filelists/30-runtimes.txt), as the run
+        # 41 probe's enablelua=0x1 read proves.
         $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $workDir -Force | Out-Null
         Copy-Item -LiteralPath $script:FindExe -Destination (Join-Path $workDir 'find.exe')
         Copy-Item -LiteralPath $script:TasklistExe -Destination (Join-Path $workDir 'tasklist.exe')
         Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination (Join-Path $workDir 'ping.exe')
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\reg.exe') -Destination (Join-Path $workDir 'reg.exe')
         $bat = Join-Path $workDir 'probe-head.bat'
         try {
             & $script:BuildProbeHeadBatch $bat

@@ -206,15 +206,21 @@ Describe 'probe sync mechanism (run 44386689307)' {
         # com1=1/0 from the redirect's errorlevel. This test proves the
         # errorlevel logic on real cmd.exe: a redirect to an existing
         # device succeeds, a redirect to a target that cannot be opened
-        # fails. The failing side is a path under a directory that does
-        # not exist, not a high COM number: CI run 44423069424 proved
-        # `> COM99` succeeds on Windows because cmd creates a plain
-        # file named COM99 (only COM1-COM9 are reserved device names),
-        # so a high COM number is not a missing-device sentinel at all.
+        # fails. Two failing sides: a path under a directory that does
+        # not exist, and the SystemRoot directory itself (the existing
+        # 'Access is denied' test proves that open fails). CI run
+        # 44423069424 proved `> COM99` succeeds on Windows because cmd
+        # creates a plain file named COM99 (only COM1-COM9 are reserved
+        # device names), so a high COM number is not a missing-device
+        # sentinel at all. The Test-Path lines are diagnostics: if the
+        # missing-dir redirect reports success, they say whether the
+        # file (and its directory) were really created or the errorlevel
+        # simply never moved.
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'com1-test.txt'
         $deviceFile = Join-Path $workDir 'serial-device.log'
         $missingFile = Join-Path $workDir 'no-such-dir\device.log'
+        $errFile = Join-Path $workDir 'cmd-err.txt'
         $bat = Join-Path $workDir 'com1-test.bat'
         try {
             & $script:WriteBatchCrlf $bat @(
@@ -222,15 +228,21 @@ Describe 'probe sync mechanism (run 44386689307)' {
                 ('echo sync_test > "{0}" 2>nul' -f $deviceFile),
                 ('if errorlevel 1 (echo com1=0 >> "{0}") else (echo com1=1 >> "{0}")' -f $outFile),
                 ('echo sync_test > "{0}" 2>nul' -f $missingFile),
-                ('if errorlevel 1 (echo com1_missing=0 >> "{0}") else (echo com1_missing=1 >> "{0}")' -f $outFile)
+                ('if errorlevel 1 (echo com1_missing=0 >> "{0}") else (echo com1_missing=1 >> "{0}")' -f $outFile),
+                ('echo sync_test > "{0}" 2>nul' -f $env:SystemRoot),
+                ('if errorlevel 1 (echo com1_dir=0 >> "{0}") else (echo com1_dir=1 >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be 0
             $text = Get-Content -LiteralPath $outFile -Raw
             Write-Host "com1 test: [$text]"
+            Write-Host "missing file created: $(Test-Path -LiteralPath $missingFile); missing dir created: $(Test-Path -LiteralPath (Split-Path -Parent $missingFile))"
+            $err = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
+            Write-Host "cmd stderr: [$err]"
             $text | Should -Match 'com1=1' -Because 'a redirect to an existing device succeeds'
             $text | Should -Match 'com1_missing=0' -Because 'a redirect to a target that cannot be opened fails'
+            $text | Should -Match 'com1_dir=0' -Because 'a redirect to a directory fails'
             (Get-Content -LiteralPath $deviceFile -Raw) | Should -Match 'sync_test' -Because 'the successful write lands in the device file'
         }
         finally {
