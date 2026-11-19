@@ -486,8 +486,11 @@ rem echoed inside the block so endlocal cannot lose it.
 reg query "HKLM\SOFTWARE\Classes\CLSID\{4234d49b-0245-4df3-b780-3893943456e1}" >nul 2>&1
 if errorlevel 1 (echo appsfolder_clsid=0 >> "%PROBE_LOCAL%" & echo appsfolder_clsid=0 >> "%PROBE_OUT%") else (echo appsfolder_clsid=1 >> "%PROBE_LOCAL%" & echo appsfolder_clsid=1 >> "%PROBE_OUT%")
 setlocal DisableDelayedExpansion
+echo DBG_ACT_SETLOCAL=1 >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" >nul
+echo DBG_ACT_REGQUERY=1 >> "%PROBE_OUT%"
 set "AUMID_CALC=%ERRORLEVEL%"
+echo DBG_ACT_SET_AUMID=1 >> "%PROBE_OUT%"
 if "%AUMID_CALC%"=="0" (echo aumid_calc=1 >> "%PROBE_LOCAL%" & echo aumid_calc=1 >> "%PROBE_OUT%") else (echo aumid_calc=0 >> "%PROBE_LOCAL%" & echo aumid_calc=0 >> "%PROBE_OUT%")
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.Photos_8wekyb3d8bbwe!App" >nul
 set "AUMID_PHOTOS=%ERRORLEVEL%"
