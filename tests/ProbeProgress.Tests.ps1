@@ -83,6 +83,11 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
             @{ Mark = 'mark_installer_deploy'; Work = 'set "DEPLOY_SRC="' }
             @{ Mark = 'mark_installer_deploy_before'; Work = 'echo stop > "%SystemDrive%\micpe-watchdog-stop.txt"' }
             @{ Mark = 'mark_installer_deploy_after'; Work = 'echo probe_done=1' }
+            # Run 49: the mirror is re-scanned at the end of the run —
+            # run 48's mirror=0 was a late enumeration, not a scan
+            # miss — so the end snapshot marks the late scan the same
+            # way the other sections are marked.
+            @{ Mark = 'mark_mirror_late'; Work = 'set "MIRROR_LATE="' }
         )
     }
 

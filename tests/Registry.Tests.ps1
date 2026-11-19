@@ -75,6 +75,26 @@ Describe 'Registry patch files' {
     }
 }
 
+Describe 'WER local dumps registry patch (run 49)' {
+    BeforeAll {
+        $script:reg60 = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/registry/60-werdumps.reg') -Raw
+    }
+
+    It 'writes a WER LocalDumps entry for explorer.exe (mini dump, three kept)' {
+        # Run 48: Report.wer alone cannot locate the 0x1181ea call
+        # stack — only a minidump can. The LocalDumps key makes
+        # WerFault write explorer's dump to X:\CrashDumps when it
+        # crashes, so the probe can copy it to the share. CI-time
+        # import only (user decision 2026-11-17 23:43); nothing is
+        # written to the registry inside PE.
+        $script:reg60 | Should -Match 'Windows Error Reporting\\LocalDumps\\explorer\.exe\]' -Because 'the entry is scoped to explorer.exe'
+        $script:reg60.Contains('"DumpFolder"="X:\CrashDumps"') | Should -BeTrue -Because 'the dump folder is the PE system drive'
+        $script:reg60.Contains('"DumpFolder"="X:\\CrashDumps"') | Should -BeFalse -Because 'a doubled backslash would point at a literal backslash folder'
+        $script:reg60.Contains('"DumpType"=dword:00000001') | Should -BeTrue -Because 'DumpType 1 is a mini dump'
+        $script:reg60.Contains('"DumpCount"=dword:00000003') | Should -BeTrue -Because 'DumpCount 3 keeps at most three dumps on the RAM disk'
+    }
+}
+
 Describe 'registry imports happen only at CI build time (user decision 2026-11-17 23:43)' {
     BeforeAll {
         $script:RuntimeFiles = @(

@@ -405,10 +405,12 @@ Describe 'probe local mirror (static)' {
         # parameterized line inside :probe_wer_snapshot (%~1 is the
         # segment), so it cannot be pinned as a fixed marker here and
         # is left out of the count; it is pinned by pattern in
-        # ProbeUwpMechanism.Tests.ps1 instead.
+        # ProbeUwpMechanism.Tests.ps1 instead. Run 49 adds the
+        # mirror-late marker (mark_mirror_late): the end snapshot
+        # re-scans the mirror, and the marker brackets that scan.
         $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
         $markers = @($lines | Where-Object { $_ -match '^echo mark_' -and $_ -notmatch 'mark_uwp_poll_' -and $_ -notmatch 'mark_xcheck_poll_' -and $_ -notmatch 'mark_wer_' })
-        $markers.Count | Should -Be 38 -Because '27 section markers plus the 4 installer before/after markers plus the 7 run-46 cross-check markers'
+        $markers.Count | Should -Be 39 -Because '27 section markers plus the 4 installer before/after markers plus the 7 run-46 cross-check markers plus the run-49 mirror-late marker'
         foreach ($line in $markers) {
             $line | Should -Match '^echo mark_\w+=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_\w+=%TIME: =0% >> "%PROBE_OUT%"$'
         }
