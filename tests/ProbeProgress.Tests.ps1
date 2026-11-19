@@ -55,6 +55,18 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
             @{ Mark = 'mark_uwp_enter'; Work = 'set "UWP_PROC=%~1"' }
             @{ Mark = 'mark_uwp_start_before'; Work = 'start "" explorer.exe "%UWP_TARGET%"' }
             @{ Mark = 'mark_uwp_start_after'; Work = 'set "UWP_WAIT=0"' }
+            # Cross-check markers (run 46): the guarded launches all
+            # failed at the explorer guard in run 45, so the cross-check
+            # retries each app without the guard, through a plain
+            # ShellExecute. The enter/start markers bracket the
+            # :probe_xcheck launch the same way :probe_uwp brackets its.
+            @{ Mark = 'mark_xcheck'; Work = 'echo xcheck_explorer_before=' }
+            @{ Mark = 'mark_xcheck_launch_calculator'; Work = 'call :probe_xcheck CalculatorApp' }
+            @{ Mark = 'mark_xcheck_launch_photos'; Work = 'call :probe_xcheck Microsoft.Lightbox' }
+            @{ Mark = 'mark_xcheck_launch_media'; Work = 'call :probe_xcheck Microsoft.Media.Player' }
+            @{ Mark = 'mark_xcheck_enter'; Work = 'set "XCHECK_PROC=%~1"' }
+            @{ Mark = 'mark_xcheck_start_before'; Work = 'start "" "%XCHECK_TARGET%"' }
+            @{ Mark = 'mark_xcheck_start_after'; Work = 'set "XCHECK_WAIT=0"' }
             @{ Mark = 'mark_payload'; Work = 'set "PAYLOAD=1"' }
             @{ Mark = 'mark_brand'; Work = 'set "BRAND=1"' }
             @{ Mark = 'mark_installer'; Work = 'MICPE_PROBE_FILE=%PROBE_OUT%' }
@@ -101,8 +113,10 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
         # so they cannot be pinned as fixed lines in the list above
         # and are left out of the count; they are pinned by pattern in
         # ProbeUwpMechanism.Tests.ps1 instead. They are column-0 lines
-        # too, so they are checked the same way right below.
-        $markerLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_' -and $_ -notmatch 'mark_uwp_poll_' })
+        # too, so they are checked the same way right below. Run 46
+        # adds the cross-check poll markers (mark_xcheck_poll_): same
+        # rule, same treatment.
+        $markerLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_' -and $_ -notmatch 'mark_uwp_poll_' -and $_ -notmatch 'mark_xcheck_poll_' })
         $markerLines.Count | Should -Be $script:markers.Count
         foreach ($line in $markerLines) {
             $line | Should -Match '^echo mark_' -Because "marker must be a top-level line, not block content: $line"
@@ -111,6 +125,11 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
         $pollLines.Count | Should -BeGreaterThan 0 -Because 'the poll loop must write per-round markers'
         foreach ($line in $pollLines) {
             $line | Should -Match '^echo mark_uwp_poll_' -Because "poll marker must be a top-level line, not block content: $line"
+        }
+        $xcheckPollLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_xcheck_poll_' })
+        $xcheckPollLines.Count | Should -Be 3 -Because 'one marker per poll step: wait_before, wait_after, check_after'
+        foreach ($line in $xcheckPollLines) {
+            $line | Should -Match '^echo mark_xcheck_poll_' -Because "poll marker must be a top-level line, not block content: $line"
         }
     }
 

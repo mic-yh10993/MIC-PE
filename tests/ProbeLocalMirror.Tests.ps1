@@ -399,9 +399,11 @@ Describe 'probe local mirror (static)' {
     It 'every non-poll section marker is written to the local file first, then the share' {
         # The poll markers fire every second and are deliberately
         # share-only; the section markers bracket the freeze points.
+        # Run 46 adds the cross-check poll markers (mark_xcheck_poll_):
+        # same rule as the uwp poll markers, share-only by design.
         $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
-        $markers = @($lines | Where-Object { $_ -match '^echo mark_' -and $_ -notmatch 'mark_uwp_poll_' })
-        $markers.Count | Should -Be 31 -Because '27 section markers plus the 4 installer before/after markers'
+        $markers = @($lines | Where-Object { $_ -match '^echo mark_' -and $_ -notmatch 'mark_uwp_poll_' -and $_ -notmatch 'mark_xcheck_poll_' })
+        $markers.Count | Should -Be 38 -Because '27 section markers plus the 4 installer before/after markers plus the 7 run-46 cross-check markers'
         foreach ($line in $markers) {
             $line | Should -Match '^echo mark_\w+=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_\w+=%TIME: =0% >> "%PROBE_OUT%"$'
         }

@@ -312,6 +312,32 @@ call :probe_explorer_cpu preuwp
 echo --- tasklist before UWP section --- > "%TASKLIST_OUT%"
 tasklist /v >> "%TASKLIST_OUT%" 2>nul
 echo tasklist_dump=1 >> "%PROBE_OUT%"
+rem Run 46 (explorer breakpoint): which services live in the svchost
+rem that burned ~1:45 of CPU in run 45 (PID 1072)? tasklist /v only
+rem shows the CPU time, not the hosted services. The /svc dump names
+rem them; the coordinator reads PID 1072 out of the artifact.
+echo --- tasklist /svc --- >> "%TASKLIST_OUT%"
+tasklist /svc >> "%TASKLIST_OUT%" 2>nul
+echo svc_dump=1 >> "%PROBE_OUT%"
+rem Run 46 (mirror, §30.5.2): mirror=0 with drives=CDX — the volume is
+rem visible but the sentinel is not. Dump the mirror volume's root so
+rem the next run can say whether the volume is empty (vvfat delivered
+rem nothing) or holds files under a different name. MIRROR_DIR is the
+rem sentinel-found drive; with no sentinel, fall back to D: (the
+rem second vvfat volume on the CI layout) when it exists.
+set "MIRROR_ROOT="
+if defined MIRROR_DIR set "MIRROR_ROOT=%MIRROR_DIR%"
+if not defined MIRROR_ROOT if exist "D:\" set "MIRROR_ROOT=D:\"
+if defined MIRROR_ROOT (
+    echo --- dir %MIRROR_ROOT% --- >> "%TASKLIST_OUT%"
+    dir "%MIRROR_ROOT%" >> "%TASKLIST_OUT%" 2>nul
+    set "MIRROR_ROOT_FILES="
+    for /f %%F in ('dir /b "%MIRROR_ROOT%" 2^>nul ^| find /c /v ""') do set "MIRROR_ROOT_FILES=%%F"
+    if defined MIRROR_ROOT_FILES (echo mirror_root_files=!MIRROR_ROOT_FILES: =! >> "%PROBE_OUT%") else (echo mirror_root_files=missing >> "%PROBE_OUT%")
+    echo mirror_root_drive=%MIRROR_ROOT% >> "%PROBE_OUT%"
+) else (
+    echo mirror_root_files=missing >> "%PROBE_OUT%"
+)
 tasklist /fi "imagename eq ApplicationFrameHost.exe" /nh 2>nul | find /i "ApplicationFrameHost.exe" >nul
 if errorlevel 1 (echo appframehost=0 >> "%PROBE_OUT%") else (echo appframehost=1 >> "%PROBE_OUT%")
 tasklist /fi "imagename eq ShellExperienceHost.exe" /nh 2>nul | find /i "ShellExperienceHost.exe" >nul
@@ -410,6 +436,15 @@ if "%APPXSTORE_SEH%"=="0" (echo appxstore_shellexperiencehost=1 >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.StartMenuExperienceHost" >nul
 set "APPXSTORE_SMEH=%ERRORLEVEL%"
 if "%APPXSTORE_SMEH%"=="0" (echo appxstore_startmenuexperiencehost=1 >> "%PROBE_OUT%") else (echo appxstore_startmenuexperiencehost=0 >> "%PROBE_OUT%")
+rem Run 46 (explorer breakpoint, §31.9 #3): in run 45 explorer died
+rem during the diagnostics — last alive evidence the second tasklist
+rem snapshot, first dead evidence the Calculator guard — so the death
+rem window spans the whole appxstore/host-query stretch. Check liveness
+rem once mid-diagnosis (plus a CPU sample) to split that window at the
+rem queries instead of spanning the section.
+tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo explorer_mid_diag=0 >> "%PROBE_OUT%") else (echo explorer_mid_diag=1 >> "%PROBE_OUT%")
+call :probe_explorer_cpu diag
 
 rem --- uwp -------------------------------------------------------------------
 echo mark_uwp_appx=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"
@@ -488,6 +523,44 @@ rem keys are diagnostic only — no stage table asserts them.
 call :probe_svc AppXSVC appxsvc_after
 call :probe_svc StateRepository staterepo_after
 call :probe_svc AppReadiness appreadiness_after
+
+rem --- cross-check (run 46) ------------------------------------------------
+rem Run 45's three uwp_launch_*=0 are NOT a cross-validation: all three
+rem failed at the explorer guard, before any real launch attempt, so
+rem "can other UWP apps open" has no evidence either way. This section
+rem retries each app WITHOUT the guard, through a launch path that does
+rem not go through the explorer.exe process: a plain ShellExecute of the
+rem shell:AppsFolder target (start "" "shell:AppsFolder\..."), whose
+rem parsing and activation run in-process via shell32/twinapi instead
+rem of being handed to the shell process. If an app process appears,
+rem the UWP chain works and the break is explorer-side (config/files);
+rem if none appears, the UWP chain stays suspect — with the caveat that
+rem the start path itself may still need the shell, so a 0 here is read
+rem together with the module diff (eval card §32.3), not alone.
+rem The calls run inside their own DisableDelayedExpansion block (the
+rem bang in the AppUserModelId must survive, U3); the after-checks sit
+rem after endlocal because they carry no bang.
+echo mark_xcheck=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck=%TIME: =0% >> "%PROBE_OUT%"
+rem Truth checks use the System32 tasklist by full path (C1/C1b): a
+rem bare tasklist is shadowed by the harness copy on the runner,
+rem whose /fi is rejected, so a bare check would always read 0.
+"%SystemRoot%\System32\tasklist.exe" /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo xcheck_explorer_before=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_before=1 >> "%PROBE_OUT%")
+setlocal DisableDelayedExpansion
+echo mark_xcheck_launch_calculator=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
+call :probe_xcheck CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+if errorlevel 1 (echo xcheck_launch_calculator=0 >> "%PROBE_OUT%") else (echo xcheck_launch_calculator=1 >> "%PROBE_OUT%")
+echo mark_xcheck_launch_photos=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
+call :probe_xcheck Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
+if errorlevel 1 (echo xcheck_launch_photos=0 >> "%PROBE_OUT%") else (echo xcheck_launch_photos=1 >> "%PROBE_OUT%")
+echo mark_xcheck_launch_media=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_launch_media=%TIME: =0% >> "%PROBE_OUT%"
+call :probe_xcheck Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
+if errorlevel 1 (echo xcheck_launch_media=0 >> "%PROBE_OUT%") else (echo xcheck_launch_media=1 >> "%PROBE_OUT%")
+endlocal
+"%SystemRoot%\System32\tasklist.exe" /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo xcheck_explorer_after=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_after=1 >> "%PROBE_OUT%")
+"%SystemRoot%\System32\tasklist.exe" /fi "imagename eq ApplicationFrameHost.exe" /nh 2>nul | find /i "ApplicationFrameHost.exe" >nul
+if errorlevel 1 (echo xcheck_framehost_after=0 >> "%PROBE_OUT%") else (echo xcheck_framehost_after=1 >> "%PROBE_OUT%")
 
 rem --- payload ---------------------------------------------------------------
 echo mark_payload=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_payload=%TIME: =0% >> "%PROBE_OUT%"
@@ -614,7 +687,68 @@ if exist "%ProgramData%\Microsoft\Windows\WER\ReportArchive" (
         for %%T in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\%%N") do echo wer_explorer_archive_time=%%~tT >> "%PROBE_LOCAL%" & echo wer_explorer_archive_time=%%~tT >> "%PROBE_OUT%"
     )
 )
+rem Run 46 (explorer breakpoint): the queue name/time only says "an
+rem explorer crash happened at 06:35". The faulting module, exception
+rem code and offset live in the Report.wer text file inside each entry.
+rem Copy every explorer entry's Report.wer into the tasklist file
+rem (already collected) so the host can read the breakpoint without a
+rem second artifact; the count key says how many reports were found.
+rem Pure file reads, no service call, so they cannot stall the probe.
+rem A for /d pattern with no match runs once with the literal pattern,
+rem so the if exist guard is what skips the no-entry case.
+set "WER_REPORTS=0"
+for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*") do (
+    if exist "%%D\Report.wer" (
+        echo --- WER ReportQueue %%~nxD --- >> "%TASKLIST_OUT%"
+        type "%%D\Report.wer" >> "%TASKLIST_OUT%" 2>nul
+        set /a WER_REPORTS+=1
+    )
+)
+for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*") do (
+    if exist "%%D\Report.wer" (
+        echo --- WER ReportArchive %%~nxD --- >> "%TASKLIST_OUT%"
+        type "%%D\Report.wer" >> "%TASKLIST_OUT%" 2>nul
+        set /a WER_REPORTS+=1
+    )
+)
+echo wer_reports=%WER_REPORTS% >> "%PROBE_LOCAL%" & echo wer_reports=%WER_REPORTS% >> "%PROBE_OUT%"
 echo wer_explorer=%WER_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_explorer=%WER_EXPLORER% >> "%PROBE_OUT%"
+
+rem Run 46 (explorer breakpoint): a silent exit writes no Event
+rem 1000/1001, but the log files themselves say whether the event-log
+rem service ran at all in this PE. wevtutil is NOT queried: against a
+rem stopped log service it is a stall risk one line before probe_done
+rem (see the note above). Record existence + size, copy the files to
+rem the share for host-side parsing, and let the host read explorer
+rem entries from the copy. A locked file fails the copy silently; the
+rem _copy key says whether it landed.
+set "EVTX_SYSTEM=0"
+if exist "%SystemRoot%\System32\winevt\Logs\System.evtx" (
+    set "EVTX_SYSTEM=1"
+    for %%F in ("%SystemRoot%\System32\winevt\Logs\System.evtx") do echo evtx_system_size=%%~zF >> "%PROBE_OUT%"
+    if defined PROBE_DIR copy /y "%SystemRoot%\System32\winevt\Logs\System.evtx" "%PROBE_DIR%micpe-system.evtx" >nul 2>&1
+)
+echo evtx_system=%EVTX_SYSTEM% >> "%PROBE_OUT%"
+if exist "%PROBE_DIR%micpe-system.evtx" (echo evtx_system_copy=1 >> "%PROBE_OUT%") else (echo evtx_system_copy=0 >> "%PROBE_OUT%")
+set "EVTX_APP=0"
+if exist "%SystemRoot%\System32\winevt\Logs\Application.evtx" (
+    set "EVTX_APP=1"
+    for %%F in ("%SystemRoot%\System32\winevt\Logs\Application.evtx") do echo evtx_app_size=%%~zF >> "%PROBE_OUT%"
+    if defined PROBE_DIR copy /y "%SystemRoot%\System32\winevt\Logs\Application.evtx" "%PROBE_DIR%micpe-application.evtx" >nul 2>&1
+)
+echo evtx_app=%EVTX_APP% >> "%PROBE_OUT%"
+if exist "%PROBE_DIR%micpe-application.evtx" (echo evtx_app_copy=1 >> "%PROBE_OUT%") else (echo evtx_app_copy=0 >> "%PROBE_OUT%")
+rem Crash dumps, if WerFault ever wrote one (run 41-45: werfault_end=0
+rem every time, so these are expected 0 — the check is the evidence).
+set "DUMP_MINIDUMP=0"
+if exist "%SystemRoot%\Minidump\*.dmp" set "DUMP_MINIDUMP=1"
+echo dump_minidump=%DUMP_MINIDUMP% >> "%PROBE_OUT%"
+set "DUMP_CRASHDUMPS=0"
+if exist "%SystemRoot%\System32\config\systemprofile\AppData\Local\CrashDumps\*.dmp" set "DUMP_CRASHDUMPS=1"
+echo dump_crashdumps=%DUMP_CRASHDUMPS% >> "%PROBE_OUT%"
+set "DUMP_MEMORY=0"
+if exist "%SystemRoot%\MEMORY.dmp" set "DUMP_MEMORY=1"
+echo dump_memory=%DUMP_MEMORY% >> "%PROBE_OUT%"
 
 echo probe_done=1 >> "%PROBE_LOCAL%" & echo probe_done=1 >> "%PROBE_OUT%"
 
@@ -720,6 +854,52 @@ if %UWP_WAIT%==5 (
 )
 set /a UWP_WAIT+=1
 if %UWP_WAIT% lss 10 goto :probe_uwp_poll
+exit /b 1
+
+:probe_xcheck
+rem %1 = process image name, %2 = shell target. No explorer guard: this
+rem is the cross-validation — the launch is attempted whether or not a
+rem shell is alive. Returns errorlevel 0 when the process is running
+rem after the attempt. The launch is a ShellExecute of the
+rem shell:AppsFolder target (no explorer.exe in the command): on full
+rem Windows this opens the app from cmd, and the parsing/activation
+rem runs in-process. In PE with a dead shell it may fail outright; the
+rem poll result (0/1) plus the frame-host check in the caller is the
+rem evidence either way. Bounded poll, same shape as :probe_uwp
+rem (choice, not ping; ten rounds, markers per round). The caller runs
+rem the three calls inside DisableDelayedExpansion so the bang in the
+rem AppUserModelId survives (U3); this subroutine itself uses %~2, so
+rem it must be called with delayed expansion off.
+echo mark_xcheck_enter=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_enter=%TIME: =0% >> "%PROBE_OUT%"
+set "XCHECK_PROC=%~1"
+set "XCHECK_TARGET=%~2"
+tasklist /fi "imagename eq %XCHECK_PROC%.exe" /nh 2>nul | find /i "%XCHECK_PROC%.exe" >nul
+if not errorlevel 1 exit /b 0
+echo mark_xcheck_start_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_start_before=%TIME: =0% >> "%PROBE_OUT%"
+rem Detached start (run 46 fix): a bare `start "" "shell:..."` for
+rem an app that cannot activate BLOCKS the caller indefinitely —
+rem CI run 44502105340 X1 sat in this start for 300 s with no
+rem start_after (Server has no such app; the activation never
+rem returns in a non-interactive session). So the ShellExecute
+rem runs inside a child cmd: the outer start returns at once (cmd
+rem is a real process), the child absorbs the block, and the probe
+rem keeps polling — if the app ever appears the poll finds it, if
+rem not the poll gives up after ten rounds and the probe completes.
+rem The child cmd lingers while blocked; it is harmless in PE and
+rem the runner is discarded after the job. The launch still does
+rem not go through explorer.exe.
+start "" cmd /c start "" "%XCHECK_TARGET%"
+echo mark_xcheck_start_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_start_after=%TIME: =0% >> "%PROBE_OUT%"
+set "XCHECK_WAIT=0"
+:probe_xcheck_poll
+echo mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_wait_before=%TIME: =0% >> "%PROBE_OUT%"
+choice /c Y /d Y /t 1 >nul
+echo mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_wait_after=%TIME: =0% >> "%PROBE_OUT%"
+tasklist /fi "imagename eq %XCHECK_PROC%.exe" /nh 2>nul | find /i "%XCHECK_PROC%.exe" >nul
+if not errorlevel 1 exit /b 0
+echo mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_check_after=%TIME: =0% >> "%PROBE_OUT%"
+set /a XCHECK_WAIT+=1
+if %XCHECK_WAIT% lss 10 goto :probe_xcheck_poll
 exit /b 1
 
 :probe_explorer_cpu
