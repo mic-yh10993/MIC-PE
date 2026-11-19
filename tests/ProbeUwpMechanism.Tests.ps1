@@ -840,7 +840,16 @@ Describe 'explorer CPU time (run 44428428849)' {
         # so an explorer.exe filter could never yield a time there.
         # cmd.exe is the test batch's own process, guaranteed visible,
         # so a real time here proves the pipeline itself works — list
-        # form, tokens=3, no /nh. The exact line in probe.cmd (with the
+        # form, tokens=3, no /nh. One deviation from probe.cmd: the
+        # batch calls tasklist by its System32 full path, not bare.
+        # The work-dir COPY of tasklist.exe rejects /fi ("The search
+        # filter cannot be recognized.", exit 1) although it is
+        # byte-identical to the original (C1diag, run 44457204773) —
+        # a bare call here would resolve to that copy via PATH and
+        # yield missing for the wrong reason. In PE the probe's bare
+        # call resolves to the image's real System32 tasklist, which
+        # accepts /fi, so the full path here is the faithful
+        # simulation. The exact line in probe.cmd (with the
         # explorer.exe filter) is pinned by the static exact-line test
         # above; C1b below proves /nh breaks the same pipeline.
         $workDir = & $script:NewWorkDir
@@ -850,7 +859,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
+                ('for /f "tokens=3" %%C in (''"{0}" /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
@@ -865,17 +874,21 @@ Describe 'explorer CPU time (run 44428428849)' {
         }
     }
 
-    It 'C1diag: copy vs original with /fi, natively (run 44456380675)' -Skip:(-not $IsWindows) {
-        # C1diag v5 proved: the System32 original accepts /fi natively
-        # (finds pwsh.exe, exit 0), but in the batch the work-dir copy
-        # rejects it (SEC2: 'The search filter cannot be recognized.',
-        # SEC3 /v /fo list: silence). The copy is byte-identical
-        # (hash proven in v3) and works with no args (841 lines), so
-        # the one untested cell is COPY + /fi. Test all four cells
-        # natively against pwsh.exe (known to exist), plus the copy
-        # against a held cmd.exe verified alive.
+    It 'the work-dir tasklist copy rejects /fi; the System32 original accepts it (run 44457204773)' -Skip:(-not $IsWindows) {
+        # Harness trap, proven by C1diag v3-v6: NewWorkDir copies
+        # tasklist.exe out of System32 so the restricted PATH can
+        # resolve it, but the copy rejects /fi ("The search filter
+        # cannot be recognized.", exit 1) although it is
+        # byte-identical to the original (SHA256 proven in v3) and
+        # works with no args (841 lines). The original accepts /fi
+        # and finds pwsh.exe; the copy fails the same filter. Any
+        # test that needs /fi must call the System32 original by
+        # full path (C1/C1b do); a bare call resolves to the copy
+        # and yields missing for the wrong reason. If this test ever
+        # turns green the other way round (the copy accepts /fi),
+        # the harness limitation is gone — re-check C1/C1b, which
+        # can then go back to a bare call.
         $workDir = & $script:NewWorkDir
-        $heldCmd = $null
         try {
             $copy = Join-Path $workDir 'tasklist.exe'
             $oFi = & $script:TasklistExe /fi "imagename eq pwsh.exe" 2>&1 | Out-String
@@ -886,15 +899,12 @@ Describe 'explorer CPU time (run 44428428849)' {
             Write-Host "orig /v /fo list /fi pwsh exit $($LASTEXITCODE) [$oV]"
             $cV = & $copy /v /fo list /fi "imagename eq pwsh.exe" 2>&1 | Out-String
             Write-Host "copy /v /fo list /fi pwsh exit $($LASTEXITCODE) [$cV]"
-            $heldCmd = Start-Process -FilePath $script:CmdExe -ArgumentList '/k', 'title held-for-c1diag' -PassThru -NoNewWindow
-            Start-Sleep -Seconds 2
-            Write-Host "held cmd id $($heldCmd.Id) exited $($heldCmd.HasExited)"
-            $cCmd = & $copy /fi "imagename eq cmd.exe" 2>&1 | Out-String
-            Write-Host "copy /fi cmd exit $($LASTEXITCODE) [$cCmd]"
             ($oFi -match 'pwsh.exe') | Should -Be $true -Because 'the control cell must find pwsh.exe'
+            ($oV -match 'CPU Time:') | Should -Be $true -Because 'the original must show a CPU Time line in list form'
+            ($cFi -match 'The search filter cannot be recognized') | Should -Be $true -Because 'the copy must reject /fi'
+            ($cV -match 'pwsh.exe') | Should -Be $false -Because 'the copy must not find anything with /v /fo list /fi'
         }
         finally {
-            if ($heldCmd -and -not $heldCmd.HasExited) { Stop-Process -Id $heldCmd.Id -Force -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
@@ -907,7 +917,10 @@ Describe 'explorer CPU time (run 44428428849)' {
         # not that the process is absent. (An explorer.exe filter
         # would prove nothing on this runner: Test run 44449769368
         # showed explorer is invisible in session 0, so missing
-        # would be the answer either way.)
+        # would be the answer either way.) Same System32 full path
+        # as C1: the work-dir copy rejects /fi (run 44457204773),
+        # so a bare call would yield missing for the wrong reason
+        # and this reverse control would prove nothing.
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'cpu-out.txt'
         $bat = Join-Path $workDir 'cpu-parse-broken.bat'
@@ -915,7 +928,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
+                ('for /f "tokens=3" %%C in (''"{0}" /v /fo list /fi "imagename eq cmd.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
