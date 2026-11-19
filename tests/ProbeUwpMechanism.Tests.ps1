@@ -865,29 +865,23 @@ Describe 'explorer CPU time (run 44428428849)' {
         }
     }
 
-    It 'C1diag: dump raw tasklist /v /fo list output for the C1 failure (run 44450473618)' -Skip:(-not $IsWindows) {
-        # Diagnostic only: C1 yields missing on the runner even with a
-        # cmd.exe filter, although the same for /f shape parses reg
-        # query output fine (serial_start=0x3 in the head test). Dump
-        # what tasklist actually produces here, so the next fix is
-        # evidence-led. Always passes when the dump exists; C1 stays
-        # strict next to it.
+    It 'C1diag: tasklist itself, run natively (no batch) (run 44450473618)' -Skip:(-not $IsWindows) {
+        # C1's batch is well-formed (local od proves 4 CRLF lines) yet
+        # the for /f parse yields missing on the runner. Isolate
+        # tasklist itself: run it from PowerShell, both the System32
+        # original and the work-dir copy the harness uses, and dump
+        # what each one prints. No batch file, so no for /f and no
+        # array-literal trap in the way.
         $workDir = & $script:NewWorkDir
-        $rawFile = Join-Path $workDir 'tasklist-raw.txt'
-        $bat = Join-Path $workDir 'tasklist-dump.bat'
         try {
-            & $script:WriteBatchCrlf $bat @(
-                '@echo off',
-                ('tasklist /v /fo list /fi "imagename eq cmd.exe" > "{0}" 2>&1' -f $rawFile),
-                ('tasklist /fi "imagename eq cmd.exe" /nh >> "{0}" 2>&1' -f $rawFile),
-                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do echo PARSED=%%C >> "{0}"' -f $rawFile
-            )
-            $result = & $script:InvokeCmdTimed $bat $workDir
-            $result.TimedOut | Should -Be $false
-            $result.ExitCode | Should -Be 0
-            $text = Get-Content -LiteralPath $rawFile -Raw -ErrorAction SilentlyContinue
-            Write-Host "tasklist raw dump: [$text]"
-            $text | Should -Not -BeNullOrEmpty -Because 'the dump file must exist for the diagnosis'
+            $sys = & $script:TasklistExe /v /fo list /fi "imagename eq cmd.exe" 2>&1 | Out-String
+            Write-Host "sys tasklist /v /fo list: [$sys]"
+            $copy = Join-Path $workDir 'tasklist.exe'
+            $cpy = & $copy /v /fo list /fi "imagename eq cmd.exe" 2>&1 | Out-String
+            Write-Host "copy tasklist /v /fo list: [$cpy]"
+            $plain = & $script:TasklistExe /fi "imagename eq cmd.exe" 2>&1 | Out-String
+            Write-Host "sys tasklist plain: [$plain]"
+            ($sys -match 'CPU Time') | Should -Be $true -Because 'the System32 tasklist must show a CPU Time line for cmd.exe'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue

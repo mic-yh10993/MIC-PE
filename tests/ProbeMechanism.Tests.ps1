@@ -163,7 +163,7 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
                 '@echo off',
                 ('> "{0}" echo boot=1' -f $marker),
                 'tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul',
-                'if errorlevel 1 (echo explorer=0 >> "{0}") else (echo explorer=1 >> "{0}")' -f $marker,
+                ('if errorlevel 1 (echo explorer=0 >> "{0}") else (echo explorer=1 >> "{0}")' -f $marker),
                 ('echo after=1 >> "{0}"' -f $marker)
             )
             & $script:WriteBatchCrlf $bat $lines
