@@ -83,6 +83,17 @@ for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
 if defined MIRROR_DIR (echo mirror=1 >> "%PROBE_LOCAL%" & echo mirror=1 >> "%PROBE_OUT%") else (echo mirror=0 >> "%PROBE_LOCAL%" & echo mirror=0 >> "%PROBE_OUT%")
 if defined MIRROR_DIR (echo mirror_drive=%MIRROR_DIR% >> "%PROBE_LOCAL%" & echo mirror_drive=%MIRROR_DIR% >> "%PROBE_OUT%")
 
+rem Drive-letter enumeration (run 44441708839): mirror=0 alone cannot say
+rem whether the mirror volume never mounted or mounted without its
+rem sentinel. List every drive letter the guest can see, so the two
+rem cases split: a mirror letter present with mirror=0 means the volume
+rem mounted but the sentinel is invisible (vvfat quirk); a letter absent
+rem means the volume never enumerated. Written right after the mirror
+rem scan, so it lands in both probe files even if the probe dies later.
+set "DRIVES="
+for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist "%%D:\" set "DRIVES=!DRIVES!%%D"
+echo drives=%DRIVES% >> "%PROBE_LOCAL%" & echo drives=%DRIVES% >> "%PROBE_OUT%"
+
 rem Serial channel test (run 44410311576): probe-sync.cmd wrote zero sync
 rem lines in run 41 although it lived until the stop flag (the detached
 rem cmd 1724 only disappears from the end snapshot, after the flag was
@@ -292,6 +303,12 @@ if defined PROBE_DIR (
 ) else (
     set "TASKLIST_OUT=%SystemDrive%\micpe-tasklist.txt"
 )
+rem Run 44441708839: explorer was already CPU-frozen in the first
+rem tasklist snapshot, so the snapshots alone cannot say when it stopped
+rem working. The shell CPU call runs before shell_ready; this one runs
+rem right before the first snapshot, so the two bracket the
+rem network/ime/diagnostics gap.
+call :probe_explorer_cpu preuwp
 echo --- tasklist before UWP section --- > "%TASKLIST_OUT%"
 tasklist /v >> "%TASKLIST_OUT%" 2>nul
 echo tasklist_dump=1 >> "%PROBE_OUT%"
@@ -546,10 +563,23 @@ set "WER_EXPLORER=0"
 if exist "%ProgramData%\Microsoft\Windows\WER\ReportQueue" (
     dir /b "%ProgramData%\Microsoft\Windows\WER\ReportQueue" 2>nul | find /i "explorer" >nul
     if not errorlevel 1 set "WER_EXPLORER=1"
+    rem Run 44441708839: wer_explorer=1 alone cannot say whether the entry
+    rem is this run's death or an old one. Copy each matching entry's
+    rem name and last-write time too: the name carries the faulting
+    rem binary and the report kind, the time is compared against the
+    rem death window.
+    for /f "delims=" %%N in ('dir /b "%ProgramData%\Microsoft\Windows\WER\ReportQueue" 2^>nul ^| find /i "explorer"') do (
+        echo wer_explorer_name=%%N >> "%PROBE_LOCAL%" & echo wer_explorer_name=%%N >> "%PROBE_OUT%"
+        for %%T in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\%%N") do echo wer_explorer_time=%%~tT >> "%PROBE_LOCAL%" & echo wer_explorer_time=%%~tT >> "%PROBE_OUT%"
+    )
 )
 if exist "%ProgramData%\Microsoft\Windows\WER\ReportArchive" (
     dir /b "%ProgramData%\Microsoft\Windows\WER\ReportArchive" 2>nul | find /i "explorer" >nul
     if not errorlevel 1 set "WER_EXPLORER=1"
+    for /f "delims=" %%N in ('dir /b "%ProgramData%\Microsoft\Windows\WER\ReportArchive" 2^>nul ^| find /i "explorer"') do (
+        echo wer_explorer_archive_name=%%N >> "%PROBE_LOCAL%" & echo wer_explorer_archive_name=%%N >> "%PROBE_OUT%"
+        for %%T in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\%%N") do echo wer_explorer_archive_time=%%~tT >> "%PROBE_LOCAL%" & echo wer_explorer_archive_time=%%~tT >> "%PROBE_OUT%"
+    )
 )
 echo wer_explorer=%WER_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_explorer=%WER_EXPLORER% >> "%PROBE_OUT%"
 
@@ -660,18 +690,22 @@ if %UWP_WAIT% lss 10 goto :probe_uwp_poll
 exit /b 1
 
 :probe_explorer_cpu
-rem %1 = key suffix: shell, calculator, photos, media, end
+rem %1 = key suffix: shell, preuwp, calculator, photos, media, end
 rem (run 44428428849). Records explorer's CPU time at this point in the
 rem run, so the segments can be compared: a time that never advances
 rem means the process stopped doing work. tasklist /v /fo list prints
 rem one "CPU Time:  0:00:13" line per process; tokens=3 is the time
 rem itself (the table form cannot be parsed — its memory column holds
-rem "31,048 K", whose comma breaks token counting). Missing when the
-rem process is gone or the line never appears. The for /f runs in a
-rem child cmd, so a missing tasklist there cannot kill this batch;
-rem in the image tasklist is shipped (10-cmdpe.txt).
+rem "31,048 K", whose comma breaks token counting). No /nh: it is only
+rem valid with /fo table or csv (Microsoft docs), and with /fo list it
+rem makes tasklist fail — the error was swallowed by 2>nul, so every
+rem key came back missing in run 44441708839. The list form has no
+rem column headers to suppress. Missing when the process is gone or the
+rem line never appears. The for /f runs in a child cmd, so a missing
+rem tasklist there cannot kill this batch; in the image tasklist is
+rem shipped (10-cmdpe.txt).
 set "EXPLORER_CPU="
-for /f "tokens=3" %%C in ('tasklist /v /fo list /fi "imagename eq explorer.exe" /nh 2^>nul ^| find /i "CPU Time"') do set "EXPLORER_CPU=%%C"
+for /f "tokens=3" %%C in ('tasklist /v /fo list /fi "imagename eq explorer.exe" 2^>nul ^| find /i "CPU Time"') do set "EXPLORER_CPU=%%C"
 if defined EXPLORER_CPU (echo explorer_cpu_%~1=%EXPLORER_CPU% >> "%PROBE_LOCAL%" & echo explorer_cpu_%~1=%EXPLORER_CPU% >> "%PROBE_OUT%") else (echo explorer_cpu_%~1=missing >> "%PROBE_LOCAL%" & echo explorer_cpu_%~1=missing >> "%PROBE_OUT%")
 exit /b 0
 

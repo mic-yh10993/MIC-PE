@@ -232,10 +232,16 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
             # it, and the mirror companion is never started.
             $text | Should -Match 'mirror=0' -Because 'no micpe-mirror.txt sentinel exists on the runner'
             $text | Should -Not -Match 'mirror_drive=' -Because 'no mirror drive was found, so no drive is recorded'
+            # Drive-letter enumeration (run 44441708839): the guest-visible
+            # letters; the runner sees at least its system drive C:.
+            $text | Should -Match 'drives=[A-Z]+' -Because 'the enumeration must list the letters the guest can see'
+            $text | Should -Match 'drives=[A-Z]*C' -Because 'the runner system drive C: must be in the list'
             # Explorer CPU time (run 44428428849): the shell call sits
             # before the shell_ready line, so it runs inside the head.
-            # A time when explorer is running, missing when it is not.
-            $text | Should -Match 'explorer_cpu_shell=([0-9]+:[0-9]{2}:[0-9]{2}|missing)' -Because 'the CPU-time parse must produce a time or an explicit missing'
+            # Run 44441708839: strict — explorer runs on the runner, so
+            # the shell CPU call must produce a real time; missing would
+            # mean the parse snippet is broken (the /nh bug).
+            $text | Should -Match 'explorer_cpu_shell=[0-9]+:[0-9]{2}:[0-9]{2}' -Because 'the CPU-time parse must produce a real time on the runner'
             $text | Should -Match 'explorer=[01]'
             $text | Should -Match 'dwm=[01]'
             $text | Should -Match 'shell_ready=[01]'

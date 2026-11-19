@@ -634,12 +634,18 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # the first tasklist snapshot, so the snapshots alone cannot say
         # when it stopped working — at startup, or later. The CPU time
         # at each liveness check gives the freeze profile.
+        # Run 44441708839: the parse itself was broken — /nh is only
+        # valid with /fo table or csv, so with /fo list tasklist failed
+        # and every key came back missing. The exact line below pins
+        # the fix: no /nh, the list form's CPU Time line read with
+        # tokens=3. The preuwp call brackets the network/ime/diagnostics
+        # gap between the shell call and the first snapshot.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Match 'tasklist /v /fo list /fi "imagename eq explorer.exe"' -Because 'the list form prints one CPU Time line per process'
-        $text | Should -Match 'find /i "CPU Time"' -Because 'only the CPU Time line is read'
+        $text | Should -Match 'tasklist /v /fo list /fi "imagename eq explorer\.exe" 2\^>nul \^\| find /i "CPU Time"' -Because 'the list form prints one CPU Time line per process, and /nh must not be there (run 44441708839)'
         $text | Should -Match 'echo explorer_cpu_%~1=%EXPLORER_CPU%' -Because 'the time is recorded under the segment key'
         $text | Should -Match 'echo explorer_cpu_%~1=missing' -Because 'a missing process is recorded, not skipped'
         $text | Should -Match 'call :probe_explorer_cpu shell' -Because 'the shell check records the first CPU time'
+        $text | Should -Match 'call :probe_explorer_cpu preuwp' -Because 'the pre-UWP check brackets the network/ime/diagnostics gap'
         $text | Should -Match 'call :probe_explorer_cpu calculator'
         $text | Should -Match 'call :probe_explorer_cpu photos'
         $text | Should -Match 'call :probe_explorer_cpu media'
@@ -648,8 +654,18 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # mechanism test covers it; the after-check calls sit between
         # the launches.
         $text.IndexOf('call :probe_explorer_cpu shell') | Should -BeLessThan $text.IndexOf('echo shell_ready=1')
+        $text.IndexOf('call :probe_explorer_cpu shell') | Should -BeLessThan $text.IndexOf('call :probe_explorer_cpu preuwp')
+        $text.IndexOf('call :probe_explorer_cpu preuwp') | Should -BeLessThan $text.IndexOf('--- tasklist before UWP section ---') -Because 'the pre-UWP check runs right before the first snapshot'
         $text.IndexOf('call :probe_explorer_cpu calculator') | Should -BeLessThan $text.IndexOf('mark_uwp_launch_photos')
         $text.IndexOf('call :probe_explorer_cpu media') | Should -BeLessThan $text.IndexOf('mark_payload')
+    }
+
+    It 'reverse control: with /nh back in the CPU-time line the exact-line test fails' {
+        # The exact-line assertion above must actually depend on the
+        # /nh absence, not pass vacuously.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $mutated = $text.Replace('tasklist /v /fo list /fi "imagename eq explorer.exe" 2^>nul', 'tasklist /v /fo list /fi "imagename eq explorer.exe" /nh 2>nul')
+        $mutated | Should -Not -Match 'tasklist /v /fo list /fi "imagename eq explorer\.exe" 2\^>nul \^\| find /i "CPU Time"'
     }
 
     It 'checks explorer liveness mid-poll to split the death window (run 44428428849)' {
@@ -675,12 +691,127 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # all. The queue check is pure file existence, so it cannot
         # stall the probe one line before probe_done. No event-log
         # query: a silent exit writes no Event 1000/1001.
+        # Run 44441708839: wer_explorer=1 alone cannot say whether the
+        # entry is this run's death or an old one, so each matching
+        # entry's name and last-write time are copied too — the name
+        # carries the faulting binary and the report kind, the time is
+        # compared against the death window.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $text | Should -Match 'Microsoft\\Windows\\WER\\ReportQueue' -Because 'a crash report would queue here even if WerFault never ran'
         $text | Should -Match 'Microsoft\\Windows\\WER\\ReportArchive'
         $text | Should -Match 'echo wer_explorer=%WER_EXPLORER%' -Because 'the queue check result is recorded'
+        $text | Should -Match 'echo wer_explorer_name=%%N' -Because 'each matching queue entry name is copied'
+        $text | Should -Match 'echo wer_explorer_time=%%~tT' -Because 'each matching queue entry last-write time is copied too'
+        $text | Should -Match 'echo wer_explorer_archive_name=%%N' -Because 'the archive entries are copied the same way'
+        $text | Should -Match 'echo wer_explorer_archive_time=%%~tT'
         $text.IndexOf('wer_explorer=') | Should -BeGreaterThan $text.IndexOf('dwm_end=') -Because 'the WER check runs after the end keys'
         $text.IndexOf('wer_explorer=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the WER check runs before probe_done'
+    }
+
+    It 'W1: the WER capture copies an explorer entry name and time, and skips other entries (run 44441708839)' -Skip:(-not $IsWindows) {
+        # The verbatim capture snippet from probe.cmd, run against a
+        # fake WER tree (ProgramData redirected to the work dir, so the
+        # real WER queues are never touched). The queue holds one
+        # explorer-named entry and one notepad entry; the archive holds
+        # one explorer-named entry. Only the explorer entries may be
+        # copied, each with its last-write time.
+        $workDir = & $script:NewWorkDir
+        $werRoot = Join-Path $workDir 'ProgramData'
+        $queue = Join-Path $werRoot 'Microsoft\Windows\WER\ReportQueue'
+        $archive = Join-Path $werRoot 'Microsoft\Windows\WER\ReportArchive'
+        New-Item -ItemType Directory -Path (Join-Path $queue 'AppCrash_explorer.exe_9f2a1c') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $queue 'AppCrash_notepad.exe_9f2a1c') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $archive 'AppHang_explorer.exe_7b3e9d') -Force | Out-Null
+        $outFile = Join-Path $workDir 'wer-out.txt'
+        $bat = Join-Path $workDir 'wer-capture.bat'
+        try {
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                ('set "ProgramData={0}"' -f $werRoot),
+                ('set "PROBE_OUT={0}"' -f $outFile),
+                ('set "PROBE_LOCAL={0}"' -f $outFile),
+                'set "WER_EXPLORER=0"',
+                'if exist "%ProgramData%\Microsoft\Windows\WER\ReportQueue" (',
+                '    dir /b "%ProgramData%\Microsoft\Windows\WER\ReportQueue" 2>nul | find /i "explorer" >nul',
+                '    if not errorlevel 1 set "WER_EXPLORER=1"',
+                '    for /f "delims=" %%N in (''dir /b "%ProgramData%\Microsoft\Windows\WER\ReportQueue" 2^>nul ^| find /i "explorer"'') do (',
+                '        echo wer_explorer_name=%%N >> "%PROBE_LOCAL%" & echo wer_explorer_name=%%N >> "%PROBE_OUT%"',
+                '        for %%T in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\%%N") do echo wer_explorer_time=%%~tT >> "%PROBE_LOCAL%" & echo wer_explorer_time=%%~tT >> "%PROBE_OUT%"',
+                '    )',
+                ')',
+                'if exist "%ProgramData%\Microsoft\Windows\WER\ReportArchive" (',
+                '    dir /b "%ProgramData%\Microsoft\Windows\WER\ReportArchive" 2>nul | find /i "explorer" >nul',
+                '    if not errorlevel 1 set "WER_EXPLORER=1"',
+                '    for /f "delims=" %%N in (''dir /b "%ProgramData%\Microsoft\Windows\WER\ReportArchive" 2^>nul ^| find /i "explorer"'') do (',
+                '        echo wer_explorer_archive_name=%%N >> "%PROBE_LOCAL%" & echo wer_explorer_archive_name=%%N >> "%PROBE_OUT%"',
+                '        for %%T in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\%%N") do echo wer_explorer_archive_time=%%~tT >> "%PROBE_LOCAL%" & echo wer_explorer_archive_time=%%~tT >> "%PROBE_OUT%"',
+                '    )',
+                ')',
+                'echo wer_explorer=%WER_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_explorer=%WER_EXPLORER% >> "%PROBE_OUT%"'
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "wer capture: [$text]"
+            $text | Should -Match 'wer_explorer=1' -Because 'an explorer entry exists in the queue'
+            $text | Should -Match 'wer_explorer_name=AppCrash_explorer\.exe_9f2a1c' -Because 'the queue entry name is copied'
+            $text | Should -Match 'wer_explorer_time=[0-9]' -Because 'the queue entry last-write time is copied too'
+            $text | Should -Match 'wer_explorer_archive_name=AppHang_explorer\.exe_7b3e9d' -Because 'the archive entry name is copied the same way'
+            $text | Should -Match 'wer_explorer_archive_time=[0-9]'
+            $text | Should -Not -Match 'notepad' -Because 'a non-explorer entry must not be copied'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'W2: the WER capture writes nothing when no explorer entry exists (run 44441708839)' -Skip:(-not $IsWindows) {
+        # Same verbatim snippet, empty WER tree: the result must be an
+        # honest 0 with no fabricated name or time lines.
+        $workDir = & $script:NewWorkDir
+        $werRoot = Join-Path $workDir 'ProgramData'
+        $queue = Join-Path $werRoot 'Microsoft\Windows\WER\ReportQueue'
+        New-Item -ItemType Directory -Path $queue -Force | Out-Null
+        $outFile = Join-Path $workDir 'wer-out.txt'
+        $bat = Join-Path $workDir 'wer-capture.bat'
+        try {
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                ('set "ProgramData={0}"' -f $werRoot),
+                ('set "PROBE_OUT={0}"' -f $outFile),
+                ('set "PROBE_LOCAL={0}"' -f $outFile),
+                'set "WER_EXPLORER=0"',
+                'if exist "%ProgramData%\Microsoft\Windows\WER\ReportQueue" (',
+                '    dir /b "%ProgramData%\Microsoft\Windows\WER\ReportQueue" 2>nul | find /i "explorer" >nul',
+                '    if not errorlevel 1 set "WER_EXPLORER=1"',
+                '    for /f "delims=" %%N in (''dir /b "%ProgramData%\Microsoft\Windows\WER\ReportQueue" 2^>nul ^| find /i "explorer"'') do (',
+                '        echo wer_explorer_name=%%N >> "%PROBE_LOCAL%" & echo wer_explorer_name=%%N >> "%PROBE_OUT%"',
+                '        for %%T in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\%%N") do echo wer_explorer_time=%%~tT >> "%PROBE_LOCAL%" & echo wer_explorer_time=%%~tT >> "%PROBE_OUT%"',
+                '    )',
+                ')',
+                'if exist "%ProgramData%\Microsoft\Windows\WER\ReportArchive" (',
+                '    dir /b "%ProgramData%\Microsoft\Windows\WER\ReportArchive" 2>nul | find /i "explorer" >nul',
+                '    if not errorlevel 1 set "WER_EXPLORER=1"',
+                '    for /f "delims=" %%N in (''dir /b "%ProgramData%\Microsoft\Windows\WER\ReportArchive" 2^>nul ^| find /i "explorer"'') do (',
+                '        echo wer_explorer_archive_name=%%N >> "%PROBE_LOCAL%" & echo wer_explorer_archive_name=%%N >> "%PROBE_OUT%"',
+                '        for %%T in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\%%N") do echo wer_explorer_archive_time=%%~tT >> "%PROBE_LOCAL%" & echo wer_explorer_archive_time=%%~tT >> "%PROBE_OUT%"',
+                '    )',
+                ')',
+                'echo wer_explorer=%WER_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_explorer=%WER_EXPLORER% >> "%PROBE_OUT%"'
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "wer capture empty: [$text]"
+            $text | Should -Match 'wer_explorer=0'
+            $text | Should -Not -Match 'wer_explorer_name='
+            $text | Should -Not -Match 'wer_explorer_time='
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     It 'reverse control: without the frame-host check the diagnostics test fails' {
@@ -697,11 +828,45 @@ Describe 'explorer CPU time (run 44428428849)' {
         # The table form cannot be parsed — its memory column holds
         # "31,048 K", whose comma breaks token counting — so the probe
         # reads the list form's "CPU Time:  0:00:13" line with tokens=3.
-        # This test proves the exact snippet on a real cmd.exe: a time
-        # when explorer is running, an explicit missing when it is not.
+        # Run 44441708839: the old snippet carried /nh, which is only
+        # valid with /fo table or csv — with /fo list tasklist fails,
+        # the error is swallowed by 2>nul, and every key came back
+        # missing. The old C1 passed anyway: it accepted "a time or an
+        # explicit missing", so the missing branch hid the broken
+        # snippet. Strict now: on the runner explorer.exe is running,
+        # so the snippet must produce a real time; missing means the
+        # snippet itself is broken.
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'cpu-out.txt'
         $bat = Join-Path $workDir 'cpu-parse.bat'
+        try {
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                'set "EXPLORER_CPU="',
+                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq explorer.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
+                ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "cpu parse: [$text]"
+            $text | Should -Match 'explorer_cpu=[0-9]+:[0-9]{2}:[0-9]{2}' -Because 'explorer runs on the runner, so the parse must yield a real time — missing would mean the snippet is broken (run 44441708839)'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'C1b: the same snippet WITH /nh yields missing on real cmd.exe (run 44441708839)' -Skip:(-not $IsWindows) {
+        # Reverse control for C1: the exact pre-fix snippet, /nh and
+        # all, must produce missing on the same runner where C1
+        # produces a time. This proves the /nh was the breakage — the
+        # strict C1 above would have caught it — and that the missing
+        # branch is real, not a vacuous pass.
+        $workDir = & $script:NewWorkDir
+        $outFile = Join-Path $workDir 'cpu-out.txt'
+        $bat = Join-Path $workDir 'cpu-parse-broken.bat'
         try {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
@@ -713,8 +878,8 @@ Describe 'explorer CPU time (run 44428428849)' {
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be 0
             $text = Get-Content -LiteralPath $outFile -Raw
-            Write-Host "cpu parse: [$text]"
-            $text | Should -Match 'explorer_cpu=([0-9]+:[0-9]{2}:[0-9]{2}|missing)' -Because 'the parse must yield a time when explorer runs, or an explicit missing'
+            Write-Host "cpu parse with /nh: [$text]"
+            $text | Should -Match 'explorer_cpu=missing' -Because '/nh is invalid with /fo list, so tasklist fails and nothing parses'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue

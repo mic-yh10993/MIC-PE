@@ -438,6 +438,28 @@ Describe 'probe local mirror (static)' {
         $text.IndexOf('set "MIRROR_DIR="') | Should -BeGreaterThan $text.IndexOf('echo boot=1') -Because 'the scan must run after the truncating boot line'
     }
 
+    It 'probe.cmd lists every drive letter the guest can see (run 44441708839)' {
+        # mirror=0 alone cannot say whether the mirror volume never
+        # mounted or mounted without its sentinel. The drives= line
+        # splits the two: a mirror letter present with mirror=0 means
+        # the volume mounted but the sentinel is invisible (vvfat
+        # quirk); a letter absent means the volume never enumerated.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'for %%D in \(C D E F G H I J K L M N O P Q R S T U V W X Y Z\) do if exist "%%D:\\" set "DRIVES=!DRIVES!%%D"' -Because 'every letter is probed for a visible root'
+        $text | Should -Match 'echo drives=%DRIVES% >> "%PROBE_LOCAL%"' -Because 'the list is mirrored to the local file'
+        $text | Should -Match 'echo drives=%DRIVES% >> "%PROBE_OUT%"' -Because 'and to the share'
+        # Right after the mirror scan, so it answers the mirror=0
+        # question in the same breath, and before the serial test.
+        $text.IndexOf('echo drives=') | Should -BeGreaterThan $text.IndexOf('echo mirror_drive=')
+        $text.IndexOf('echo drives=') | Should -BeLessThan $text.IndexOf('echo sync_test=')
+    }
+
+    It 'reverse control: without the drives echo the enumeration test fails' {
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $mutated = $text.Replace('echo drives=%DRIVES% >> "%PROBE_LOCAL%"', 'rem drives echo removed')
+        $mutated | Should -Not -Match 'echo drives=%DRIVES% >> "%PROBE_LOCAL%"'
+    }
+
     It 'probe.cmd starts probe-mirror.cmd right after probe-sync.cmd (run 44428428849)' {
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $text | Should -Match 'probe-mirror\.cmd "%PROBE_LOCAL%" "%MIRROR_DIR%"'
