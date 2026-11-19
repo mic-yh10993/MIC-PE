@@ -202,48 +202,48 @@ Describe 'probe sync mechanism (run 44386689307)' {
     It 'S4: the COM1 open test distinguishes a writable device from a missing one (run 44410311576)' -Skip:(-not $IsWindows) {
         # Run 41: probe-sync.cmd wrote zero sync lines although it lived
         # until the stop flag, so the channel itself is the suspect.
-        # probe.cmd tests it with `echo sync_test > COM1` and records
-        # com1=1/0 from the redirect's errorlevel. This test proves the
-        # errorlevel logic on real cmd.exe: a redirect to an existing
-        # device succeeds, a redirect to a target that cannot be opened
-        # fails. Two failing sides: a path under a directory that does
-        # not exist, and the SystemRoot directory itself (the existing
-        # 'Access is denied' test proves that open fails). CI run
-        # 44423069424 proved `> COM99` succeeds on Windows because cmd
-        # creates a plain file named COM99 (only COM1-COM9 are reserved
-        # device names), so a high COM number is not a missing-device
-        # sentinel at all. The Test-Path lines are diagnostics: if the
-        # missing-dir redirect reports success, they say whether the
-        # file (and its directory) were really created or the errorlevel
-        # simply never moved.
+        # probe.cmd tests it with `copy /y nul COM1` and records
+        # com1=1/0 from copy's errorlevel, and separately writes
+        # `echo sync_test > COM1` as the end-to-end proof in the serial
+        # log. The redirect's errorlevel must NOT be used: CI run
+        # 44425584830 proved a failed `>` redirect prints its error,
+        # creates nothing, and leaves errorlevel at 0 — the old design
+        # could never have reported com1=0. This test proves all three
+        # legs on real cmd.exe: copy to a writable target succeeds,
+        # copy to an unopenable target fails with errorlevel 1, and a
+        # failed echo redirect leaves errorlevel at 0 (the trap, pinned
+        # so nobody reintroduces the redirect-errorlevel assumption).
+        # `> COM99` is not a missing-device sentinel either (CI run
+        # 44423069424: cmd creates a plain file named COM99; only
+        # COM1-COM9 are reserved device names).
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'com1-test.txt'
         $deviceFile = Join-Path $workDir 'serial-device.log'
+        $copyFile = Join-Path $workDir 'copy-target.log'
         $missingFile = Join-Path $workDir 'no-such-dir\device.log'
-        $errFile = Join-Path $workDir 'cmd-err.txt'
         $bat = Join-Path $workDir 'com1-test.bat'
         try {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 ('echo sync_test > "{0}" 2>nul' -f $deviceFile),
-                ('if errorlevel 1 (echo com1=0 >> "{0}") else (echo com1=1 >> "{0}")' -f $outFile),
+                ('if errorlevel 1 (echo redirect_ok=0 >> "{0}") else (echo redirect_ok=1 >> "{0}")' -f $outFile),
+                ('copy /y nul "{0}" >nul 2>&1' -f $copyFile),
+                ('if errorlevel 1 (echo copy_ok=0 >> "{0}") else (echo copy_ok=1 >> "{0}")' -f $outFile),
+                ('copy /y nul "{0}" >nul 2>&1' -f $missingFile),
+                ('if errorlevel 1 (echo copy_missing=0 >> "{0}") else (echo copy_missing=1 >> "{0}")' -f $outFile),
                 ('echo sync_test > "{0}" 2>nul' -f $missingFile),
-                ('if errorlevel 1 (echo com1_missing=0 >> "{0}") else (echo com1_missing=1 >> "{0}")' -f $outFile),
-                ('echo sync_test > "{0}" 2>nul' -f $env:SystemRoot),
-                ('if errorlevel 1 (echo com1_dir=0 >> "{0}") else (echo com1_dir=1 >> "{0}")' -f $outFile)
+                ('if errorlevel 1 (echo redirect_missing=0 >> "{0}") else (echo redirect_missing=1 >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be 0
             $text = Get-Content -LiteralPath $outFile -Raw
             Write-Host "com1 test: [$text]"
-            Write-Host "missing file created: $(Test-Path -LiteralPath $missingFile); missing dir created: $(Test-Path -LiteralPath (Split-Path -Parent $missingFile))"
-            $err = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
-            Write-Host "cmd stderr: [$err]"
-            $text | Should -Match 'com1=1' -Because 'a redirect to an existing device succeeds'
-            $text | Should -Match 'com1_missing=0' -Because 'a redirect to a target that cannot be opened fails'
-            $text | Should -Match 'com1_dir=0' -Because 'a redirect to a directory fails'
-            (Get-Content -LiteralPath $deviceFile -Raw) | Should -Match 'sync_test' -Because 'the successful write lands in the device file'
+            $text | Should -Match 'redirect_ok=1' -Because 'a redirect to an existing device succeeds'
+            $text | Should -Match 'copy_ok=1' -Because 'copy to a writable target succeeds'
+            $text | Should -Match 'copy_missing=0' -Because 'copy to a target that cannot be opened fails with errorlevel 1'
+            $text | Should -Match 'redirect_missing=1' -Because 'a failed redirect leaves errorlevel at 0 — the trap the probe must not rely on'
+            (Get-Content -LiteralPath $deviceFile -Raw) | Should -Match 'sync_test' -Because 'the successful redirect write lands in the device file'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -292,8 +292,13 @@ Describe 'probe local mirror (static)' {
         # could open COM1 at all; serial_sys / serialcomm say whether
         # the driver and the port enumeration exist.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Match 'echo sync_test=%TIME: =0% > COM1 2>nul' -Because 'the write itself is the decisive test'
+        $text | Should -Match 'echo sync_test=%TIME: =0% > COM1 2>nul' -Because 'the write is the end-to-end proof: it lands in micpe-serial.log iff the channel works'
         $text.IndexOf('echo sync_test=') | Should -BeLessThan $text.IndexOf('probe-watchdog.cmd') -Because 'the test must run even if the probe dies later'
+        # The open itself is tested with copy, not with the redirect's
+        # errorlevel: a failed redirect never sets errorlevel (CI run
+        # 44425584830), so the redirect could never report com1=0.
+        $text | Should -Match 'copy /y nul COM1 >nul 2>&1' -Because 'copy fails with errorlevel 1 when the port cannot be opened'
+        $text.IndexOf('copy /y nul COM1') | Should -BeLessThan $text.IndexOf('echo com1=0') -Because 'the copy runs before the com1 key is recorded'
         $text | Should -Match 'echo com1=0 >> "%PROBE_LOCAL%"' -Because 'both branches of the open test record the result'
         $text | Should -Match 'echo com1=1 >> "%PROBE_OUT%"'
         $text | Should -Match 'serial\.sys' -Because 'a missing driver is the first suspect when COM1 cannot be opened'
