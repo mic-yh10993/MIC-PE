@@ -599,7 +599,20 @@ function Test-ScreenshotFrozen {
         [int] $PreviousProbeLength,
         [int] $CurrentProbeLength,
         [bool] $ProbeExists,
-        [string] $ProbeContent
+        [string] $ProbeContent,
+
+        # Run 48: the watchdog heartbeat is a second liveness signal.
+        # Run 47 proved the share probe file's host view can stall while
+        # the guest keeps writing (host saw 7794 bytes, guest wrote
+        # 11184), so "probe did not grow" alone is not proof the guest
+        # is wedged — the watchdog was still ticking the whole time
+        # (quiet=0, last line 12:45:18). A growing heartbeat vetoes the
+        # frozen verdict the same way a growing probe does. The three
+        # parameters are optional: when no heartbeat file exists yet
+        # (the watchdog starts mid-run) the old behaviour stands.
+        [int] $PreviousHeartbeatLength = -1,
+        [int] $CurrentHeartbeatLength = -1,
+        [bool] $HeartbeatExists = $false
     )
 
     # The guest is frozen only when three things are true at once:
@@ -616,6 +629,7 @@ function Test-ScreenshotFrozen {
     if (-not $PreviousHash -or -not $CurrentHash) { return $false }
     if ($PreviousHash -ne $CurrentHash) { return $false }
     if ($CurrentProbeLength -ne $PreviousProbeLength) { return $false }
+    if ($HeartbeatExists -and $CurrentHeartbeatLength -ne $PreviousHeartbeatLength) { return $false }
     if ($ProbeContent -match '(?m)^mark_installer_deploy=') { return $false }
     if (Test-ProbeComplete -Content $ProbeContent) { return $false }
     return $true
@@ -700,6 +714,18 @@ function Invoke-QemuVerify {
         Remove-Item -LiteralPath $probePath -Force
     }
 
+    # Run 48: the probe's local copy and the watchdog heartbeat live in
+    # the same share directory. A stale copy from a previous run in
+    # this directory would fake completion, so both are removed here
+    # alongside the probe file itself.
+    $probeLocalPath = Join-Path $ShareDir 'micpe-probe-local.txt'
+    $heartbeatPath = Join-Path $ShareDir 'micpe-watchdog-heartbeat.txt'
+    foreach ($stale in @($probeLocalPath, $heartbeatPath)) {
+        if (Test-Path -LiteralPath $stale) {
+            Remove-Item -LiteralPath $stale -Force
+        }
+    }
+
     if (-not $FirmwarePath) {
         switch ($Firmware) {
             'bios' {
@@ -763,10 +789,12 @@ function Invoke-QemuVerify {
     $shotIndex = 0
     $prevShotHash = $null
     $prevProbeLength = -1
+    $prevHeartbeatLength = -1
     $nextShotAt = (Get-Date).AddMinutes(10)
     $bootKeyAt = (Get-Date).AddSeconds($BootKeyDelaySec)
     $bootKeysSent = 0
     $probe = @{}
+    $probeLocal = $null
 
     try {
         while ((Get-Date) -lt $deadline) {
@@ -803,6 +831,18 @@ function Invoke-QemuVerify {
                 }
             }
 
+            # Run 48: the local copy is the second completion signal.
+            # Run 47's share file stopped at 12:43:48 while the guest
+            # kept writing to 12:45:18 — the local copy held payload=1
+            # and brand=1, and probe_done lands there first now.
+            if (Test-Path -LiteralPath $probeLocalPath) {
+                $probeLocal = Get-Content -LiteralPath $probeLocalPath -Raw -ErrorAction SilentlyContinue
+                if (Test-ProbeComplete -Content $probeLocal) {
+                    Start-Sleep -Seconds 5
+                    break
+                }
+            }
+
             # Periodic screenshots: run 43896578569 waited the full 45
             # minutes with no probe and no picture of what the guest was
             # doing. A shot every 10 minutes shows whether it is stuck at
@@ -820,19 +860,34 @@ function Invoke-QemuVerify {
                 # frozen guest — fail early instead of waiting.
                 # $probe is a hashtable until the first read, so only
                 # a string counts as probe text here.
+                # Run 48: the growth check reads the longer of the
+                # share probe and the local copy (run 47: the share
+                # view stalled while the guest kept writing), and a
+                # growing watchdog heartbeat vetoes the verdict — a
+                # ticking watchdog means the guest is alive even when
+                # both probe views look still.
                 $shotPath = Join-Path $ScreenshotDir ("shot-{0:d2}.ppm" -f $shotIndex)
                 if (Test-Path -LiteralPath $shotPath) {
                     $probeText = if ($probe -is [string]) { $probe } else { '' }
                     $probeLength = if ($probe -is [string]) { $probe.Length } else { 0 }
+                    if ($probeLocal -is [string] -and $probeLocal.Length -gt $probeLength) {
+                        $probeText = $probeLocal
+                        $probeLength = $probeLocal.Length
+                    }
+                    $heartbeatExists = Test-Path -LiteralPath $heartbeatPath
+                    $heartbeatLength = if ($heartbeatExists) { (Get-Item -LiteralPath $heartbeatPath).Length } else { -1 }
                     $shotHash = (Get-FileHash -LiteralPath $shotPath -Algorithm MD5).Hash
                     if (Test-ScreenshotFrozen -PreviousHash $prevShotHash -CurrentHash $shotHash `
                             -PreviousProbeLength $prevProbeLength -CurrentProbeLength $probeLength `
-                            -ProbeExists (Test-Path -LiteralPath $probePath) -ProbeContent $probeText) {
+                            -ProbeExists (Test-Path -LiteralPath $probePath) -ProbeContent $probeText `
+                            -PreviousHeartbeatLength $prevHeartbeatLength -CurrentHeartbeatLength $heartbeatLength `
+                            -HeartbeatExists $heartbeatExists) {
                         Write-Host '!!! screenshot frozen and probe silent: the guest appears wedged, failing early instead of waiting out the timeout'
                         break
                     }
                     $prevShotHash = $shotHash
                     $prevProbeLength = $probeLength
+                    $prevHeartbeatLength = $heartbeatLength
                 }
             }
 
@@ -865,10 +920,24 @@ function Invoke-QemuVerify {
     }
     else { $null }
 
+    # Run 48: the local copy is read after QEMU exits, same as the
+    # share probe — a clean guest shutdown flushes the vvfat share,
+    # so this is the freshest copy the host will ever see. Test-Stage
+    # merges the two (see Merge-ProbeFiles): neither file alone holds
+    # every key — the share file has the early share-only keys, the
+    # local copy has the late keys a stalled host view never saw.
+    $localContent = if (Test-Path -LiteralPath $probeLocalPath) {
+        Get-Content -LiteralPath $probeLocalPath -Raw
+    }
+    else { $null }
+
     return [pscustomobject]@{
         ProbePath   = $probePath
         ProbeText   = $content
         ProbeSeen   = ($null -ne $content)
+        ProbeLocalPath = $probeLocalPath
+        ProbeLocalText = $localContent
+        LocalProbeSeen = ($null -ne $localContent)
         Screenshots = if ($ScreenshotDir) { @(Get-ChildItem -LiteralPath $ScreenshotDir -Filter '*.ppm' -File) } else { @() }
         QemuLog     = $LogPath
     }

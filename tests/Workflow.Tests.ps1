@@ -85,6 +85,14 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'verify-out/share/micpe-application-xcheck\.evtx'
     }
 
+    It 'uploads the WER report copies with the verify artifacts (run 48)' {
+        # Run 47: the Report.wer content never reached the host, so
+        # the faulting module is still blank. The probe now copies
+        # each explorer Report.wer straight to the share, and the
+        # glob must pick them up.
+        $script:buildYml | Should -Match 'verify-out/share/micpe-wer-explorer\*\.wer'
+    }
+
     It 'derives the mirror dir from the work dir in Test-Stage.ps1 (run 44428428849)' {
         $script:testStage | Should -Match 'Join-Path \$WorkDir ''mirror'''
         $script:testStage | Should -Match '-MirrorDir \$mirrorDir'

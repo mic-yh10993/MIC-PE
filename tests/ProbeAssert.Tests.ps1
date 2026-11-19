@@ -122,3 +122,60 @@ Describe 'Get-StageProbeExpect' {
         (Get-StageProbeExpect -Stage 'm1')['boot'] | Should -Be '1'
     }
 }
+
+Describe 'Merge-ProbeFiles' {
+    It 'returns the union of the share file and the local copy (run 48)' {
+        # Run 47, counted from the two artifact files: the share file
+        # held 55 keys the local copy lacks (the early share-only keys
+        # and the poll markers), the local copy held 39 keys only it
+        # has (payload, brand, the end snapshot). Neither file alone
+        # judges a run; the merge holds both.
+        $share = New-TemporaryFile
+        $local = New-TemporaryFile
+        Set-Content -LiteralPath $share -Value @('boot=1', 'explorer=1', 'shell_ready=1', 'appxsvc=0')
+        Set-Content -LiteralPath $local -Value @('boot=1', 'payload=1', 'brand=1')
+        $merged = Merge-ProbeFiles -SharePath $share -LocalPath $local
+        $merged['explorer'] | Should -Be '1' -Because 'a share-only key survives the merge'
+        $merged['shell_ready'] | Should -Be '1'
+        $merged['payload'] | Should -Be '1' -Because 'a local-only key survives the merge'
+        $merged['brand'] | Should -Be '1'
+        $merged['boot'] | Should -Be '1'
+        $merged['appxsvc'] | Should -Be '0'
+    }
+
+    It 'lets the local copy win on conflict (it holds the newest write)' {
+        # The probe echoes every key to both files; the local copy is
+        # refreshed by a whole-file copy at every section sync, so its
+        # value of a twice-written key (the per-app markers) is the
+        # newest one.
+        $share = New-TemporaryFile
+        $local = New-TemporaryFile
+        Set-Content -LiteralPath $share -Value @('mark_xcheck_enter=12:43:25.81', 'explorer=1')
+        Set-Content -LiteralPath $local -Value @('mark_xcheck_enter=12:44:16.34', 'explorer=1')
+        $merged = Merge-ProbeFiles -SharePath $share -LocalPath $local
+        $merged['mark_xcheck_enter'] | Should -Be '12:44:16.34'
+    }
+
+    It 'tolerates a missing file on either side' {
+        $share = New-TemporaryFile
+        Set-Content -LiteralPath $share -Value @('boot=1', 'explorer=1')
+        $missing = Join-Path $script:TempRoot 'micpe-absent-probe.txt'
+        $merged = Merge-ProbeFiles -SharePath $share -LocalPath $missing
+        $merged['explorer'] | Should -Be '1'
+        $merged = Merge-ProbeFiles -SharePath $missing -LocalPath $share
+        $merged['explorer'] | Should -Be '1'
+        (Merge-ProbeFiles -SharePath $missing -LocalPath $missing).Count | Should -Be 0
+    }
+
+    It 'trims the trailing-space difference between the two copies' {
+        # The two files' copies of one line differ by a trailing space
+        # (run 47: share values end in one space, local values in
+        # two) — the merged value must be the bare value either way.
+        $share = New-TemporaryFile
+        $local = New-TemporaryFile
+        Set-Content -LiteralPath $share -Value @('payload=1 ')
+        Set-Content -LiteralPath $local -Value @('payload=1  ')
+        $merged = Merge-ProbeFiles -SharePath $share -LocalPath $local
+        $merged['payload'] | Should -Be '1'
+    }
+}

@@ -64,21 +64,41 @@ set "WD_WAIT=%~3"
 if not defined WD_WAIT set "WD_WAIT=60"
 set "WD_STOP=%SystemDrive%\micpe-watchdog-stop.txt"
 set "WD_HEARTBEAT=%~dp1micpe-watchdog-heartbeat.txt"
+rem Run 48: the local probe copy lives next to the share probe file
+rem (probe.cmd syncs it there at every section end). Run 47 proved
+rem the share file's host view can stall while the guest keeps
+rem writing, so the watcher reads both: probe_done in either file
+rem ends the watch, and growth in either file resets the quiet count.
+rem The local copy is refreshed by a whole-file copy, which is the
+rem channel that survived run 47 — an append into the live share
+rem file stalled, a fresh copy did not.
+set "WD_LOCAL=%~dp1micpe-probe-local.txt"
 set "WD_SIZE="
+set "WD_LOCAL_SIZE="
 set "WD_QUIET=0"
 echo watchdog_start=%TIME: =0% >> "%WD_HEARTBEAT%"
 :watchdog_loop
 findstr /b /c:"probe_done=1" "%WD_FILE%" >nul 2>&1
 if not errorlevel 1 exit /b 0
+findstr /b /c:"probe_done=1" "%WD_LOCAL%" >nul 2>&1
+if not errorlevel 1 exit /b 0
 if exist "%WD_STOP%" exit /b 0
 for %%F in ("%WD_FILE%") do set "WD_NOW=%%~zF"
+for %%F in ("%WD_LOCAL%") do set "WD_LOCAL_NOW=%%~zF"
 if "%WD_NOW%"=="%WD_SIZE%" (
-    set /a WD_QUIET+=1
+    if "%WD_LOCAL_NOW%"=="%WD_LOCAL_SIZE%" (
+        set /a WD_QUIET+=1
+    ) else (
+        set "WD_SIZE=%WD_NOW%"
+        set "WD_LOCAL_SIZE=%WD_LOCAL_NOW%"
+        set "WD_QUIET=0"
+    )
 ) else (
     set "WD_SIZE=%WD_NOW%"
+    set "WD_LOCAL_SIZE=%WD_LOCAL_NOW%"
     set "WD_QUIET=0"
 )
-echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% phase=before_wait >> "%WD_HEARTBEAT%"
+echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% local=%WD_LOCAL_NOW% phase=before_wait >> "%WD_HEARTBEAT%"
 if %WD_QUIET% geq %WD_LIMIT% goto :watchdog_fail
 rem Split the wait into short choice ticks (run 44349189039): a single
 rem 60-second choice wait never returned in run 38, while 1-second
@@ -103,6 +123,11 @@ if not errorlevel 1 (
     echo %TIME: =0% probe_done_seen=1 >> "%WD_HEARTBEAT%"
     exit /b 0
 )
+findstr /b /c:"probe_done=1" "%WD_LOCAL%" >nul 2>&1
+if not errorlevel 1 (
+    echo %TIME: =0% probe_done_seen=1 >> "%WD_HEARTBEAT%"
+    exit /b 0
+)
 if exist "%WD_STOP%" (
     echo %TIME: =0% stop_seen=1 >> "%WD_HEARTBEAT%"
     exit /b 0
@@ -111,11 +136,13 @@ choice /c Y /d Y /t %WD_TICKLEN% >nul
 set /a WD_TICK+=1
 echo %TIME: =0% phase=wait_tick tick=%WD_TICK%/%WD_TICKS% >> "%WD_HEARTBEAT%"
 if %WD_TICK% lss %WD_TICKS% goto :watchdog_wait_tick
-echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% phase=after_wait >> "%WD_HEARTBEAT%"
+echo %TIME: =0% quiet=%WD_QUIET% size=%WD_NOW% local=%WD_LOCAL_NOW% phase=after_wait >> "%WD_HEARTBEAT%"
 goto :watchdog_loop
 :watchdog_fail
 if not exist "%WD_FILE%" exit /b 1
 findstr /b /c:"probe_done=1" "%WD_FILE%" >nul 2>&1
+if not errorlevel 1 exit /b 0
+findstr /b /c:"probe_done=1" "%WD_LOCAL%" >nul 2>&1
 if not errorlevel 1 exit /b 0
 echo probe_failed=1 >> "%WD_FILE%"
 echo %TIME: =0% probe_failed_written=1 >> "%WD_HEARTBEAT%"

@@ -391,6 +391,23 @@ Describe 'probe watchdog (static)' {
         $build.IndexOf('probe-watchdog.cmd') | Should -BeGreaterThan $build.IndexOf('probe.cmd') -Because 'the watchdog is injected by the same reseed step as probe.cmd'
     }
 
+    It 'the watchdog watches the local probe copy as well as the share probe file (run 48)' {
+        # Run 47: the share file's host view stalled at 12:43:48
+        # while the guest kept writing to 12:45:18 — the local copy
+        # held the whole run. The watcher reads both: probe_done in
+        # either file ends the watch, and growth in either file resets
+        # the quiet count, so a stalled share view can no longer fake
+        # a dead probe.
+        $wd = Get-Content -LiteralPath $script:WatchdogPath -Raw -Encoding utf8
+        $wd | Should -Match 'WD_LOCAL=%~dp1micpe-probe-local\.txt' -Because 'the local copy lives next to the share probe file'
+        $wdLines = Get-Content -LiteralPath $script:WatchdogPath -Encoding utf8
+        $localDoneChecks = @($wdLines | Where-Object { $_ -match 'findstr /b /c:"probe_done=1" "%WD_LOCAL%"' })
+        $localDoneChecks.Count | Should -Be 3 -Because 'the loop top, the tick loop and the fail branch all check the local copy'
+        $wd | Should -Match 'WD_LOCAL_SIZE=' -Because 'the local size is tracked alongside the share size'
+        $wd | Should -Match 'WD_LOCAL_NOW' -Because 'each round reads the local size too'
+        $wd | Should -Match 'local=%WD_LOCAL_NOW%' -Because 'the heartbeat records the local size it observed'
+    }
+
     It 'the watchdog writes a heartbeat line every loop iteration (run 44303866765)' {
         # Run 44319967017: each round writes two heartbeat lines, one
         # before the wait and one after it, so a partial heartbeat says
