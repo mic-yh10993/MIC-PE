@@ -65,6 +65,26 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'verify-out/mirror/micpe-probe-local\.txt'
     }
 
+    It 'uploads the share copy of the local probe file with the verify artifacts (run 47)' {
+        # Run 46: the live probe file came back with a 724-byte NUL
+        # hole that ate the Calculator launch result. The probe now
+        # copies its local file to the share at the end of every
+        # section, and that copy must be uploaded too.
+        $script:buildYml | Should -Match 'verify-out/share/micpe-probe-local\.txt'
+    }
+
+    It 'uploads the per-segment evtx copies with the verify artifacts (run 47)' {
+        # The WER/evtx snapshot is now taken three times mid-run, each
+        # copy suffixed by segment, so a wedge cannot take the
+        # breakpoint evidence with it.
+        $script:buildYml | Should -Match 'verify-out/share/micpe-system-diag\.evtx'
+        $script:buildYml | Should -Match 'verify-out/share/micpe-application-diag\.evtx'
+        $script:buildYml | Should -Match 'verify-out/share/micpe-system-uwp\.evtx'
+        $script:buildYml | Should -Match 'verify-out/share/micpe-application-uwp\.evtx'
+        $script:buildYml | Should -Match 'verify-out/share/micpe-system-xcheck\.evtx'
+        $script:buildYml | Should -Match 'verify-out/share/micpe-application-xcheck\.evtx'
+    }
+
     It 'derives the mirror dir from the work dir in Test-Stage.ps1 (run 44428428849)' {
         $script:testStage | Should -Match 'Join-Path \$WorkDir ''mirror'''
         $script:testStage | Should -Match '-MirrorDir \$mirrorDir'

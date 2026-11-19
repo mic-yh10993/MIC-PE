@@ -204,6 +204,55 @@ Describe 'Send-QemuBootKey' {
     }
 }
 
+Describe 'Save-QemuBlockInfo' {
+    It 'asks the monitor for the attached block devices' {
+        Mock Invoke-MonitorCommand {}
+        Save-QemuBlockInfo -Port '4444'
+        Should -Invoke Invoke-MonitorCommand -Times 1 -Exactly -ParameterFilter {
+            $Command -eq 'info block'
+        }
+    }
+
+    It 'reads the monitor reply back instead of fire-and-forget' {
+        Mock Invoke-MonitorCommand { return '(qemu) ' }
+        Save-QemuBlockInfo -Port '4444'
+        Should -Invoke Invoke-MonitorCommand -Times 1 -Exactly -ParameterFilter {
+            $ReadResponse -eq $true
+        }
+    }
+
+    It 'never fails the run when the monitor is unreachable' {
+        Mock Invoke-MonitorCommand { throw 'no monitor' }
+        { Save-QemuBlockInfo -Port '4444' } | Should -Not -Throw
+    }
+
+    It 'never fails the run when the monitor rejects the query' {
+        Mock Invoke-MonitorCommand { return 'Error: unknown command' }
+        { Save-QemuBlockInfo -Port '4444' } | Should -Not -Throw
+    }
+}
+
+Describe 'Invoke-QemuVerify block info (run 47)' {
+    BeforeAll {
+        $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
+    }
+
+    It 'queries the attached block devices once, right after QEMU starts' {
+        # Run 46: the guest enumerates only C/D/X although the harness
+        # attaches a second vvfat volume. The probe reports truthfully,
+        # so the gap is between QEMU and the guest — log what QEMU
+        # actually attached before the guest has any chance to enumerate.
+        $script:qemuVerify | Should -Match 'Save-QemuBlockInfo'
+        $script:qemuVerify | Should -Match "'info block'"
+        $start = $script:qemuVerify.IndexOf('Start-Process -FilePath $QemuPath')
+        $call = $script:qemuVerify.IndexOf('Save-QemuBlockInfo -Port $MonitorPort')
+        $start | Should -BeGreaterThan -1 -Because 'QEMU must be started before its block devices can be queried'
+        $call | Should -BeGreaterThan $start -Because 'the query runs after QEMU starts'
+        $deadline = $script:qemuVerify.IndexOf('$deadline = (Get-Date).AddMinutes($TimeoutMin)')
+        $call | Should -BeLessThan $deadline -Because 'the query runs before the verify loop starts'
+    }
+}
+
 Describe 'Find-OvmfCode' {
     BeforeAll {
         $script:fakeQemuDir = Join-Path ([System.IO.Path]::GetTempPath()) "qemu-fake-$(Get-Random)"
