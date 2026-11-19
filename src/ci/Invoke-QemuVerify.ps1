@@ -53,6 +53,15 @@ param(
 
     [string[]] $DataDisks,
 
+    # Second vvfat volume for the local-mirror control (run 44428428849):
+    # the serial channel is dead, so the local mirror file needs a
+    # retrieval path that does not depend on the suspect share. The
+    # probe's detached probe-mirror.cmd copies the local file here
+    # every few seconds; the host reads it straight from this
+    # directory after QEMU exits. Empty means no mirror drive (the
+    # probe runs on without it, mirror=0).
+    [string] $MirrorDir,
+
     [switch] $ParseOnly
 )
 
@@ -82,7 +91,9 @@ function Get-QemuArgs {
         # drives instead of -bios.
         [string] $FirmwareVarsPath,
 
-        [string[]] $DataDisks
+        [string[]] $DataDisks,
+
+        [string] $MirrorDir
     )
 
     $args = [System.Collections.Generic.List[string]]::new()
@@ -132,6 +143,20 @@ function Get-QemuArgs {
     $args.AddRange([string[]] @(
         '-drive', "file=fat:rw:$ShareDir,format=raw,media=disk,if=ide"
     ))
+
+    # Mirror drive (run 44428428849): a second vvfat volume for the
+    # local-mirror control, attached right after the share so it
+    # letters after it (D: when the share is C:). The probe finds it
+    # by the micpe-mirror.txt sentinel, not by letter. A second
+    # independent vvfat instance: if the share volume wedges but the
+    # guest lives, the mirror copy keeps growing; if both stop, the
+    # guest itself froze (or both volumes wedged at once — the
+    # residual ambiguity, see eval card §29).
+    if ($MirrorDir) {
+        $args.AddRange([string[]] @(
+            '-drive', "file=fat:rw:$MirrorDir,format=raw,media=disk,if=ide"
+        ))
+    }
 
     foreach ($disk in $DataDisks) {
         $args.AddRange([string[]] @('-drive', "file=$disk,format=qcow2,media=disk,if=ide"))
@@ -592,6 +617,8 @@ function Invoke-QemuVerify {
 
         [string[]] $DataDisks,
 
+        [string] $MirrorDir,
+
         [string] $ProbeFileName = 'micpe-probe.txt',
 
         # Which firmware to boot: auto prefers UEFI (OVMF) when it is
@@ -624,6 +651,14 @@ function Invoke-QemuVerify {
     }
     if (-not (Test-Path -LiteralPath $ShareDir)) {
         New-Item -ItemType Directory -Path $ShareDir -Force | Out-Null
+    }
+    if ($MirrorDir) {
+        if (-not (Test-Path -LiteralPath $MirrorDir)) {
+            New-Item -ItemType Directory -Path $MirrorDir -Force | Out-Null
+        }
+        # Sentinel: the probe finds the mirror drive by this file, not
+        # by letter, so a letter shift cannot misidentify it.
+        Set-Content -LiteralPath (Join-Path $MirrorDir 'micpe-mirror.txt') -Value 'MICPE mirror drive' -Encoding ascii
     }
     if ($ScreenshotDir -and -not (Test-Path -LiteralPath $ScreenshotDir)) {
         New-Item -ItemType Directory -Path $ScreenshotDir -Force | Out-Null
@@ -682,7 +717,8 @@ function Invoke-QemuVerify {
 
     $qemuArgs = Get-QemuArgs -Iso $Iso -ShareDir $ShareDir -MonitorPort $MonitorPort `
         -MemoryMb $MemoryMb -CpuCount $CpuCount -LogPath $LogPath `
-        -FirmwarePath $FirmwarePath -FirmwareVarsPath $FirmwareVarsPath -DataDisks $DataDisks
+        -FirmwarePath $FirmwarePath -FirmwareVarsPath $FirmwareVarsPath -DataDisks $DataDisks `
+        -MirrorDir $MirrorDir
 
     Write-Host "==> starting qemu (timeout ${TimeoutMin}m)"
     $qemuArgString = ConvertTo-NativeArgumentString -Arguments $qemuArgs

@@ -43,6 +43,12 @@ param(
     # trap: Invoke-QemuVerify.ps1 declares $DataDisks too.
     [string[]] $DataDisks,
 
+    # Second vvfat volume for the local-mirror control (run 44428428849).
+    # Empty means "derive it from WorkDir" (verify-out\mirror), so the
+    # workflow needs no change. Same dot-source trap as $DataDisks:
+    # Invoke-QemuVerify.ps1 declares $MirrorDir too.
+    [string] $MirrorDir,
+
     [switch] $KeepRawScreenshots
 )
 
@@ -59,7 +65,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # empty and the Invoke-QemuVerify call died on parameter binding (runs
 # 43884981629 and 43891758991 both failed exactly this way). Save the three
 # colliding parameters first and restore them right after.
-$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware; FirmwarePath = $FirmwarePath; DataDisks = $DataDisks }
+$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware; FirmwarePath = $FirmwarePath; DataDisks = $DataDisks; MirrorDir = $MirrorDir }
 . (Join-Path $PSScriptRoot 'Invoke-QemuVerify.ps1') -ParseOnly
 $Iso = $dotSourceParams.Iso
 $TimeoutMin = $dotSourceParams.TimeoutMin
@@ -67,6 +73,7 @@ $QemuPath = $dotSourceParams.QemuPath
 $Firmware = $dotSourceParams.Firmware
 $FirmwarePath = $dotSourceParams.FirmwarePath
 $DataDisks = $dotSourceParams.DataDisks
+$MirrorDir = $dotSourceParams.MirrorDir
 
 if (-not $WorkDir) {
     $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) "micpe-verify-$Stage"
@@ -75,8 +82,9 @@ if (-not $WorkDir) {
 $shareDir = Join-Path $WorkDir 'share'
 $shotDir = Join-Path $WorkDir 'shots'
 $qemuLog = Join-Path $WorkDir 'qemu.log'
+$mirrorDir = if ($MirrorDir) { $MirrorDir } else { Join-Path $WorkDir 'mirror' }
 
-foreach ($dir in $WorkDir, $shareDir, $shotDir) {
+foreach ($dir in $WorkDir, $shareDir, $shotDir, $mirrorDir) {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
@@ -85,10 +93,11 @@ foreach ($dir in $WorkDir, $shareDir, $shotDir) {
 Write-Step "verifying $Stage"
 Write-SubStep "iso: $Iso"
 Write-SubStep "share: $shareDir"
+Write-SubStep "mirror: $mirrorDir"
 
 $result = Invoke-QemuVerify -Iso $Iso -ShareDir $shareDir -TimeoutMin $TimeoutMin `
     -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -Firmware $Firmware `
-    -FirmwarePath $FirmwarePath -DataDisks $DataDisks
+    -FirmwarePath $FirmwarePath -DataDisks $DataDisks -MirrorDir $mirrorDir
 
 # A leaked monitor reply can turn $result into an Object[] instead of the
 # single result object (run 44046530462 threw "The property 'ProbeSeen'

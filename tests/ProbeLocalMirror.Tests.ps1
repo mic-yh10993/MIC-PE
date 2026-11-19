@@ -33,6 +33,7 @@
 BeforeAll {
     $script:RepoRoot = (Resolve-Path "$PSScriptRoot/..").Path
     $script:SyncPath = Join-Path $script:RepoRoot 'src/ci/probe-sync.cmd'
+    $script:MirrorPath = Join-Path $script:RepoRoot 'src/ci/probe-mirror.cmd'
     $script:ProbePath = Join-Path $script:RepoRoot 'src/ci/probe.cmd'
     $script:BuildPath = Join-Path $script:RepoRoot 'src/build/Build-Micpe.ps1'
     $script:WorkflowPath = Join-Path $script:RepoRoot '.github/workflows/build.yml'
@@ -115,6 +116,39 @@ BeforeAll {
             '@echo off',
             ('set "SystemDrive={0}"' -f $WorkDir),
             ('call "{0}" "{1}" 1 "{2}"' -f $script:SyncPath, $LocalFile, $SerialFile),
+            'exit /b %errorlevel%'
+        )
+        $oldPath = $env:PATH
+        try {
+            $env:PATH = $WorkDir
+            return Start-Process -FilePath $script:CmdExe -ArgumentList '/c', $wrapper -PassThru -NoNewWindow
+        }
+        finally { $env:PATH = $oldPath }
+    }
+
+    # The mirror companion takes the local file and the mirror dir
+    # (trailing backslash, as the probe passes %MIRROR_DIR%). Same
+    # SystemDrive wrapper as the sync so the stop-flag check reads the
+    # work dir, never the drive root.
+    $script:InvokeMirror = {
+        param([string] $WorkDir, [string] $LocalFile, [string] $MirrorDir, [int] $TimeoutSec = 60)
+        $wrapper = Join-Path $WorkDir 'run-mirror.bat'
+        & $script:WriteBatchCrlf $wrapper @(
+            '@echo off',
+            ('set "SystemDrive={0}"' -f $WorkDir),
+            ('call "{0}" "{1}" "{2}\"' -f $script:MirrorPath, $LocalFile, $MirrorDir),
+            'exit /b %errorlevel%'
+        )
+        return (& $script:InvokeCmdTimed $wrapper $WorkDir -TimeoutSec $TimeoutSec)
+    }
+
+    $script:StartMirror = {
+        param([string] $WorkDir, [string] $LocalFile, [string] $MirrorDir)
+        $wrapper = Join-Path $WorkDir 'run-mirror.bat'
+        & $script:WriteBatchCrlf $wrapper @(
+            '@echo off',
+            ('set "SystemDrive={0}"' -f $WorkDir),
+            ('call "{0}" "{1}" "{2}\"' -f $script:MirrorPath, $LocalFile, $MirrorDir),
             'exit /b %errorlevel%'
         )
         $oldPath = $env:PATH
@@ -267,6 +301,93 @@ Describe 'probe sync mechanism (run 44386689307)' {
     }
 }
 
+Describe 'probe mirror mechanism (run 44428428849)' {
+    It 'M1: copies the local file to the mirror dir and follows it when the file grows, then stops on probe_done' -Skip:(-not $IsWindows) {
+        # The serial channel is dead (run 42), so the local mirror file
+        # needs a retrieval path that does not depend on the suspect
+        # share: the mirror companion copies the whole local file to a
+        # second vvfat volume every 5 seconds. The copy is the whole
+        # file, not just the last line, so the host gets every marker.
+        $workDir = & $script:NewWorkDir
+        $localFile = Join-Path $workDir 'micpe-probe-local.txt'
+        $mirrorDir = Join-Path $workDir 'mirror'
+        New-Item -ItemType Directory -Path $mirrorDir -Force | Out-Null
+        $mirrorFile = Join-Path $mirrorDir 'micpe-probe-local.txt'
+        try {
+            Set-Content -LiteralPath $localFile -Value @('boot=1', 'share=1') -Encoding ascii
+            $proc = & $script:StartMirror $workDir $localFile $mirrorDir
+            try {
+                Start-Sleep -Seconds 3
+                $mirror = Get-Content -LiteralPath $mirrorFile -Raw -ErrorAction SilentlyContinue
+                Write-Host "mirror after 3s: [$mirror]"
+                $mirror | Should -Match 'share=1' -Because 'the first copy carries the local file as it stands'
+                Add-Content -LiteralPath $localFile -Value 'explorer=1' -Encoding ascii
+                Start-Sleep -Seconds 6
+                $mirror = Get-Content -LiteralPath $mirrorFile -Raw -ErrorAction SilentlyContinue
+                Write-Host "mirror after grow: [$mirror]"
+                $mirror | Should -Match 'explorer=1' -Because 'the next copy follows the grown file'
+                Add-Content -LiteralPath $localFile -Value 'probe_done=1' -Encoding ascii
+                $exited = $proc.WaitForExit(30000)
+                if (-not $exited) { try { $proc.Kill($true) } catch { }; $proc.WaitForExit(10000) }
+                $exited | Should -Be $true -Because 'the mirror must stop once the probe is done'
+                $proc.ExitCode | Should -Be 0
+                $mirror = Get-Content -LiteralPath $mirrorFile -Raw -ErrorAction SilentlyContinue
+                $mirror | Should -Match 'probe_done=1' -Because 'the final copy runs on the stop'
+            }
+            finally {
+                if (-not $proc.HasExited) { try { $proc.Kill($true) } catch { } }
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'M2: exits quietly when probe_done=1 is already there, after a final copy' -Skip:(-not $IsWindows) {
+        $workDir = & $script:NewWorkDir
+        $localFile = Join-Path $workDir 'micpe-probe-local.txt'
+        $mirrorDir = Join-Path $workDir 'mirror'
+        New-Item -ItemType Directory -Path $mirrorDir -Force | Out-Null
+        $mirrorFile = Join-Path $mirrorDir 'micpe-probe-local.txt'
+        try {
+            Set-Content -LiteralPath $localFile -Value @('boot=1', 'probe_done=1') -Encoding ascii
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $result = & $script:InvokeMirror $workDir $localFile $mirrorDir -TimeoutSec 60
+            $sw.Stop()
+            Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode); elapsed seconds: $($sw.Elapsed.TotalSeconds)"
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $sw.Elapsed.TotalSeconds | Should -BeLessThan 15 -Because 'a finished probe ends the first check at once'
+            $mirror = Get-Content -LiteralPath $mirrorFile -Raw -ErrorAction SilentlyContinue
+            $mirror | Should -Match 'probe_done=1' -Because 'the final copy still runs'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'M3: stops when probe.cmd writes the stop flag before the deploy' -Skip:(-not $IsWindows) {
+        $workDir = & $script:NewWorkDir
+        $localFile = Join-Path $workDir 'micpe-probe-local.txt'
+        $mirrorDir = Join-Path $workDir 'mirror'
+        New-Item -ItemType Directory -Path $mirrorDir -Force | Out-Null
+        try {
+            Set-Content -LiteralPath $localFile -Value @('boot=1', 'share=1') -Encoding ascii
+            New-Item -ItemType File -Path (Join-Path $workDir 'micpe-watchdog-stop.txt') -Force | Out-Null
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $result = & $script:InvokeMirror $workDir $localFile $mirrorDir -TimeoutSec 60
+            $sw.Stop()
+            Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode); elapsed seconds: $($sw.Elapsed.TotalSeconds)"
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $sw.Elapsed.TotalSeconds | Should -BeLessThan 15 -Because 'a present stop flag ends the first check at once'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'probe local mirror (static)' {
     It 'probe.cmd defines PROBE_LOCAL on %SystemDrive% next to PROBE_OUT' {
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
@@ -298,6 +419,100 @@ Describe 'probe local mirror (static)' {
         $text | Should -Match 'probe-sync\.cmd "%PROBE_LOCAL%"'
         $text.IndexOf('probe-watchdog.cmd "%PROBE_OUT%"') | Should -BeLessThan $text.IndexOf('probe-sync.cmd "%PROBE_LOCAL%"')
         $text.IndexOf('probe-sync.cmd "%PROBE_LOCAL%"') | Should -BeLessThan $text.IndexOf('--- pecmd markers')
+    }
+
+    It 'probe.cmd finds the mirror drive by its sentinel and records mirror=1/0 (run 44428428849)' {
+        # The serial channel is dead, so the local mirror needs a
+        # retrieval path that does not depend on the suspect share: a
+        # second vvfat volume carrying a micpe-mirror.txt sentinel.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'if exist "%%D:\\micpe-mirror\.txt" set "MIRROR_DIR=%%D:\\"' -Because 'the mirror drive is found by sentinel, never by letter'
+        $text | Should -Match 'echo mirror=1 >> "%PROBE_LOCAL%"'
+        $text | Should -Match 'echo mirror=0 >> "%PROBE_OUT%"'
+        $text | Should -Match 'echo mirror_drive=%MIRROR_DIR% >> "%PROBE_OUT%"'
+        $text.IndexOf('set "PROBE_LOCAL=') | Should -BeLessThan $text.IndexOf('set "MIRROR_DIR="') -Because 'PROBE_LOCAL must be set before the mirror keys are written to it'
+        $text.IndexOf('set "MIRROR_DIR="') | Should -BeLessThan $text.IndexOf('echo boot=1') -Because 'the mirror is identified before the first marker'
+    }
+
+    It 'probe.cmd starts probe-mirror.cmd right after probe-sync.cmd (run 44428428849)' {
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'probe-mirror\.cmd "%PROBE_LOCAL%" "%MIRROR_DIR%"'
+        $text.IndexOf('probe-sync.cmd "%PROBE_LOCAL%"') | Should -BeLessThan $text.IndexOf('probe-mirror.cmd "%PROBE_LOCAL%"')
+        $text.IndexOf('probe-mirror.cmd "%PROBE_LOCAL%"') | Should -BeLessThan $text.IndexOf('--- pecmd markers')
+        $text | Should -Match 'if defined MIRROR_DIR' -Because 'without a mirror drive the companion is never started'
+    }
+
+    It 'probe-mirror.cmd copies the local file to the mirror drive' {
+        $text = Get-Content -LiteralPath $script:MirrorPath -Raw -Encoding utf8
+        $text | Should -Match 'set "MIRROR_DEST=%MIRROR_DIR%micpe-probe-local\.txt"'
+        $text | Should -Match 'copy /y "%MIRROR_LOCAL%" "%MIRROR_DEST%"'
+    }
+
+    It 'probe-mirror.cmd stops on probe_done and on the stop flag' {
+        $text = Get-Content -LiteralPath $script:MirrorPath -Raw -Encoding utf8
+        $text | Should -Match 'findstr /b /c:"probe_done=1" "%MIRROR_LOCAL%"'
+        $text | Should -Match 'if exist "%SystemDrive%\\micpe-watchdog-stop\.txt" goto :mirror_final'
+        $text | Should -Match ':mirror_final'
+    }
+
+    It 'probe-mirror.cmd never writes to the share or the serial log' {
+        # A share write is exactly the operation under suspicion, and
+        # the serial channel is dead — the mirror must touch neither.
+        # The header names COM1 in prose (why the serial path is dead),
+        # so the assertion pins the write form, not the bare word.
+        # The file must exist first: every assertion below is a
+        # Not-Match, which would pass vacuously on a missing file.
+        Test-Path -LiteralPath $script:MirrorPath | Should -Be $true
+        $text = Get-Content -LiteralPath $script:MirrorPath -Raw -Encoding utf8
+        $text | Should -Not -Match 'PROBE_OUT'
+        $text | Should -Not -Match '> "?COM1"?'
+        $text | Should -Not -Match 'SYNC_SERIAL'
+        $text | Should -Not -Match 'probe_failed'
+    }
+
+    It 'probe.cmd diagnoses the serial enumeration: service states, Start values, ACPI device (run 44428428849)' {
+        # serial.sys is in the image but the port was never enumerated
+        # (run 42: serialcomm=0) — file present is not driver loaded.
+        # These keys say which link is broken: the ACPI device, the
+        # Serial service state, or its Start value.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'call :probe_svc Serial serial_svc "%PROBE_LOCAL%"' -Because 'the Serial service state says whether the driver is up'
+        $text | Should -Match 'call :probe_svc Serenum serenum_svc "%PROBE_LOCAL%"' -Because 'Serenum is the enumerator the port depends on'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Serial" /v Start' -Because 'the Start value says disabled vs manual vs auto'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Serenum" /v Start'
+        $text | Should -Match 'echo serial_start=%SERIAL_START%'
+        $text | Should -Match 'echo serenum_start=%SERENUM_START%'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Enum\\ACPI\\PNP0501" >nul 2>&1' -Because 'a bare query only sets errorlevel when the device is not enumerated'
+        $text | Should -Match 'echo serial_enum=0 >> "%PROBE_LOCAL%"'
+        $text | Should -Match 'echo serial_enum=1 >> "%PROBE_OUT%"'
+        # Diagnosis only: no service is started in the probe.
+        $text | Should -Not -Match 'sc start Serial'
+        $text | Should -Not -Match 'sc start Serenum'
+        # The block sits after the serialcomm read and before the
+        # watchdog start, so it runs even if the probe dies later.
+        $text.IndexOf('echo serialcomm=') | Should -BeLessThan $text.IndexOf('call :probe_svc Serial')
+        $text.IndexOf('echo serial_enum=0') | Should -BeLessThan $text.IndexOf('probe-watchdog.cmd')
+    }
+
+    It ':probe_svc mirrors to the local file when a third argument is given (run 44428428849)' {
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'if not "%~3"=="" echo %~2=MISSING >> "%~3"'
+        $text | Should -Match 'if not "%~3"=="" echo %~2=RUNNING >> "%~3"'
+        $text | Should -Match 'if not "%~3"=="" echo %~2=STOPPED >> "%~3"'
+        # The existing UWP calls stay two-argument (share-only).
+        $text | Should -Match 'call :probe_svc AppXSVC appxsvc'
+        $text | Should -Not -Match 'call :probe_svc AppXSVC appxsvc "'
+    }
+
+    It 'the build injects probe-mirror.cmd into System32 next to probe.cmd' {
+        $build = Get-Content -LiteralPath $script:BuildPath -Raw -Encoding utf8
+        $build | Should -Match 'Assert-PathExists -Path \$mirror -Label ''probe-mirror\.cmd'''
+        $build | Should -Match 'Copy-Item -LiteralPath \$mirror -Destination \(Join-Path \$system32 ''probe-mirror\.cmd''\) -Force'
+    }
+
+    It 'the verify artifact collects the mirror copy of the local probe file' {
+        $workflow = Get-Content -LiteralPath $script:WorkflowPath -Raw -Encoding utf8
+        $workflow | Should -Match 'verify-out/mirror/micpe-probe-local\.txt'
     }
 
     It 'probe.cmd tests the serial channel with a sync_test write to COM1 (run 44410311576)' {

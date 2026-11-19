@@ -215,10 +215,12 @@ function Invoke-ReseedStep {
     # Inject the MICPE boot files so the image can self-check: the repo's
     # startnet.cmd (which calls probe.cmd when present), probe.cmd itself,
     # probe-watchdog.cmd, the detached watcher that fails a stalled
-    # probe early (run 44285721257), and probe-sync.cmd, the detached
+    # probe early (run 44285721257), probe-sync.cmd, the detached
     # watcher that echoes the probe's local mirror to the serial log so
     # the host can tell a wedged share from a frozen guest
-    # (run 44386689307).
+    # (run 44386689307), and probe-mirror.cmd, the detached watcher
+    # that copies the local mirror to the second vvfat volume now that
+    # the serial channel is dead (run 44428428849).
     # Mounted with DISM and committed; a failure here discards the mount so
     # a half-injected image never ships.
     Write-Step 'injecting MICPE boot files into boot.wim'
@@ -226,10 +228,12 @@ function Invoke-ReseedStep {
     $probe = Join-Path $repoRoot 'src\ci\probe.cmd'
     $watchdog = Join-Path $repoRoot 'src\ci\probe-watchdog.cmd'
     $sync = Join-Path $repoRoot 'src\ci\probe-sync.cmd'
+    $mirror = Join-Path $repoRoot 'src\ci\probe-mirror.cmd'
     Assert-PathExists -Path $startnet -Label 'startnet.cmd'
     Assert-PathExists -Path $probe -Label 'probe.cmd'
     Assert-PathExists -Path $watchdog -Label 'probe-watchdog.cmd'
     Assert-PathExists -Path $sync -Label 'probe-sync.cmd'
+    Assert-PathExists -Path $mirror -Label 'probe-mirror.cmd'
     Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
     try {
         $system32 = Join-Path $paths.Mount 'Windows\System32'
@@ -237,6 +241,7 @@ function Invoke-ReseedStep {
         Copy-Item -LiteralPath $probe -Destination (Join-Path $system32 'probe.cmd') -Force
         Copy-Item -LiteralPath $watchdog -Destination (Join-Path $system32 'probe-watchdog.cmd') -Force
         Copy-Item -LiteralPath $sync -Destination (Join-Path $system32 'probe-sync.cmd') -Force
+        Copy-Item -LiteralPath $mirror -Destination (Join-Path $system32 'probe-mirror.cmd') -Force
     }
     catch {
         Dismount-WimImage -MountDir $paths.Mount

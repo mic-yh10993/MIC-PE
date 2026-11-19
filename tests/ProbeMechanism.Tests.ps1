@@ -48,11 +48,16 @@ BeforeAll {
         $script:CmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
         $script:FindExe = Join-Path $env:SystemRoot 'System32\find.exe'
         $script:TasklistExe = Join-Path $env:SystemRoot 'System32\tasklist.exe'
+        # sc.exe is the serial-enumeration block's service query (run
+        # 44428428849): :probe_svc calls it, so the head test copies it
+        # in alongside reg.exe.
+        $script:ScExe = Join-Path $env:SystemRoot 'System32\sc.exe'
     }
     else {
         $script:CmdExe = $null
         $script:FindExe = $null
         $script:TasklistExe = $null
+        $script:ScExe = $null
     }
 
     # Run a batch with only what the test copies in on PATH, as in the
@@ -94,6 +99,13 @@ BeforeAll {
     # missing explorer= key. 'echo shell_ready=[01]' matches only the real
     # if/else line; the marker line has 'mark_' between 'echo ' and
     # 'shell_ready='.
+    #
+    # The head calls two subroutines defined at the end of probe.cmd:
+    # :probe_svc (the serial-enumeration block, run 44428428849) and
+    # :probe_explorer_cpu (the shell CPU-time call). Both definitions
+    # are appended after an exit, the same shape as the UWP mechanism
+    # test's BuildUwpBatch, so the calls resolve and the batch cannot
+    # fall through into them.
     $script:ShellReadyCutPattern = 'echo shell_ready=[01]'
     $script:BuildProbeHeadBatch = {
         param([string] $Path)
@@ -103,7 +115,12 @@ BeforeAll {
             if ($probeLines[$i] -match $script:ShellReadyCutPattern) { $end = $i; break }
         }
         if ($end -lt 0) { throw 'probe.cmd has no shell_ready line; the head cut is stale' }
-        $lines = @($probeLines[0..$end]) + @('echo probe_head_done=1 >> "%PROBE_OUT%"')
+        $sub = -1
+        for ($i = 0; $i -lt $probeLines.Count; $i++) {
+            if ($probeLines[$i] -match '^:probe_explorer_cpu') { $sub = $i; break }
+        }
+        if ($sub -lt 0) { throw 'probe.cmd has no :probe_explorer_cpu subroutine; the head cut is stale' }
+        $lines = @($probeLines[0..$end]) + @('echo probe_head_done=1 >> "%PROBE_OUT%"', 'exit /b 0') + @($probeLines[$sub..($probeLines.Count - 1)])
         & $script:WriteBatchCrlf $Path $lines
     }
 }
@@ -176,13 +193,17 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
         # but is not the PE behaviour). reg.exe is copied in too: the
         # head's SERIALCOMM check reads it (run 44410311576), and the
         # PE image ships it (src/filelists/30-runtimes.txt), as the run
-        # 41 probe's enablelua=0x1 read proves.
+        # 41 probe's enablelua=0x1 read proves. sc.exe is copied in
+        # too: the serial-enumeration block (run 44428428849) calls
+        # :probe_svc, which needs it, and the PE image ships it (the
+        # UWP diagnostics already use sc query in PE).
         $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $workDir -Force | Out-Null
         Copy-Item -LiteralPath $script:FindExe -Destination (Join-Path $workDir 'find.exe')
         Copy-Item -LiteralPath $script:TasklistExe -Destination (Join-Path $workDir 'tasklist.exe')
         Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\ping.exe') -Destination (Join-Path $workDir 'ping.exe')
         Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\reg.exe') -Destination (Join-Path $workDir 'reg.exe')
+        Copy-Item -LiteralPath $script:ScExe -Destination (Join-Path $workDir 'sc.exe')
         $bat = Join-Path $workDir 'probe-head.bat'
         try {
             & $script:BuildProbeHeadBatch $bat
@@ -195,6 +216,26 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
             $text | Should -Match 'share_drive=C:\\'
             $text | Should -Match 'com1=[01]' -Because 'the key is recorded either way; the runner''s COM1 may be reserved by the Azure serial console, so the open can fail there — the true-side value is verified in PE by the Build (run 44410311576)'
             $text | Should -Match 'serialcomm=1' -Because 'the runner has COM1, so the /v form of the enumeration must read it (run 44410311576)'
+            # Serial enumeration (run 44428428849): the runner is a full
+            # Windows VM, so the Serial/Serenum services exist and are
+            # stopped or running — never MISSING, which would mean sc.exe
+            # never ran. The Start values are hex; the ACPI enum is 0
+            # or 1 depending on whether the hypervisor presents a 16550
+            # port. The true-side values are verified in PE by the Build.
+            $text | Should -Match 'serial_svc=(RUNNING|STOPPED)' -Because 'the Serial service exists on a full Windows install'
+            $text | Should -Match 'serial_start=0x[0-9]' -Because 'the Start value must parse out of the reg query'
+            $text | Should -Match 'serial_enum=[01]' -Because 'the ACPI enum key is present or absent, never unparseable'
+            $text | Should -Match 'serenum_svc=(RUNNING|STOPPED)' -Because 'the Serenum service exists on a full Windows install'
+            $text | Should -Match 'serenum_start=0x[0-9]' -Because 'the Start value must parse out of the reg query'
+            # Mirror drive (run 44428428849): no sentinel on the runner,
+            # so mirror=0 and no mirror_drive — the probe runs on without
+            # it, and the mirror companion is never started.
+            $text | Should -Match 'mirror=0' -Because 'no micpe-mirror.txt sentinel exists on the runner'
+            $text | Should -Not -Match 'mirror_drive=' -Because 'no mirror drive was found, so no drive is recorded'
+            # Explorer CPU time (run 44428428849): the shell call sits
+            # before the shell_ready line, so it runs inside the head.
+            # A time when explorer is running, missing when it is not.
+            $text | Should -Match 'explorer_cpu_shell=([0-9]+:[0-9]{2}:[0-9]{2}|missing)' -Because 'the CPU-time parse must produce a time or an explicit missing'
             $text | Should -Match 'explorer=[01]'
             $text | Should -Match 'dwm=[01]'
             $text | Should -Match 'shell_ready=[01]'
@@ -202,6 +243,7 @@ Describe 'probe.cmd shell section under a missing tasklist (run 44135105700)' {
         }
         finally {
             Remove-Item -LiteralPath 'C:\micpe-probe.txt' -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath 'C:\micpe-probe-local.txt' -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }

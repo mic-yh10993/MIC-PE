@@ -58,6 +58,23 @@ rem fire every second; the section markers bracket the freeze points
 rem runs 39/40 actually hit).
 set "PROBE_LOCAL=%SystemDrive%\micpe-probe-local.txt"
 
+rem Mirror drive (run 44428428849): the serial channel is dead, so the
+rem local mirror needs a retrieval path that does not depend on the
+rem suspect share. The harness attaches a second vvfat volume
+rem carrying a micpe-mirror.txt sentinel; the drive holding it is the
+rem mirror. Found by sentinel, never by letter, so a letter shift
+rem cannot misidentify it. The detached probe-mirror.cmd (started
+rem below next to the sync) copies the local file there every few
+rem seconds; the host reads it straight from the mirror directory
+rem after QEMU exits. mirror=0 means no mirror drive was attached
+rem (old harness); the probe runs on without it.
+set "MIRROR_DIR="
+for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+    if exist "%%D:\micpe-mirror.txt" set "MIRROR_DIR=%%D:\"
+)
+if defined MIRROR_DIR (echo mirror=1 >> "%PROBE_LOCAL%" & echo mirror=1 >> "%PROBE_OUT%") else (echo mirror=0 >> "%PROBE_LOCAL%" & echo mirror=0 >> "%PROBE_OUT%")
+if defined MIRROR_DIR (echo mirror_drive=%MIRROR_DIR% >> "%PROBE_LOCAL%" & echo mirror_drive=%MIRROR_DIR% >> "%PROBE_OUT%")
+
 > "%PROBE_LOCAL%" echo boot=1 & > "%PROBE_OUT%" echo boot=1
 >> "%PROBE_LOCAL%" echo share=%SHARE% & >> "%PROBE_OUT%" echo share=%SHARE%
 if defined PROBE_DIR >> "%PROBE_LOCAL%" echo share_drive=%PROBE_DIR%
@@ -96,6 +113,36 @@ rem key through find.
 reg query "HKLM\HARDWARE\DEVICEMAP\SERIALCOMM" /v \Device\Serial0 >nul 2>&1
 if errorlevel 1 (echo serialcomm=0 >> "%PROBE_LOCAL%" & echo serialcomm=0 >> "%PROBE_OUT%") else (echo serialcomm=1 >> "%PROBE_LOCAL%" & echo serialcomm=1 >> "%PROBE_OUT%")
 
+rem Serial enumeration (run 44428428849): serial.sys is in the image
+rem (serial_sys=1) but the port was never enumerated (serialcomm=0) —
+rem file present is not driver loaded. These keys say which link is
+rem broken: the ACPI device, the Serial service state, or its Start
+rem value. serial_enum=0 means QEMU/OVMF never presented the 16550
+rem port to Windows (the channel is dead at the hardware level);
+rem serial_enum=1 with serial_start=0x4 means the driver is disabled
+rem (revivable from CI by setting Start at image build time — never
+rem by a registry import inside PE, user decision 2026-11-17 23:43);
+rem serial_enum=1 with Start 0x3/0x2/0x1/0x0 means the driver should
+rem have loaded and did not. Diagnosis only: no service is started
+rem here, so this block cannot change the freeze behaviour.
+rem The service states go through :probe_svc (third argument mirrors
+rem them to the local file); the Start values use the EnableLUA parse
+rem shape (for /f tokens=3 over reg query /v, find matches only the
+rem value line); the enum check is a bare reg query, so a missing key
+rem only sets errorlevel and the batch continues. sc.exe is in the
+rem image (:probe_svc already uses it for AppXSVC) and the mechanism
+rem harness copies it in alongside reg.exe.
+call :probe_svc Serial serial_svc "%PROBE_LOCAL%"
+call :probe_svc Serenum serenum_svc "%PROBE_LOCAL%"
+set "SERIAL_START="
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\Serial" /v Start 2^>nul ^| find /i "Start"') do set "SERIAL_START=%%A"
+if defined SERIAL_START (echo serial_start=%SERIAL_START% >> "%PROBE_LOCAL%" & echo serial_start=%SERIAL_START% >> "%PROBE_OUT%") else (echo serial_start=missing >> "%PROBE_LOCAL%" & echo serial_start=missing >> "%PROBE_OUT%")
+set "SERENUM_START="
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\Serenum" /v Start 2^>nul ^| find /i "Start"') do set "SERENUM_START=%%A"
+if defined SERENUM_START (echo serenum_start=%SERENUM_START% >> "%PROBE_LOCAL%" & echo serenum_start=%SERENUM_START% >> "%PROBE_OUT%") else (echo serenum_start=missing >> "%PROBE_LOCAL%" & echo serenum_start=missing >> "%PROBE_OUT%")
+reg query "HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\PNP0501" >nul 2>&1
+if errorlevel 1 (echo serial_enum=0 >> "%PROBE_LOCAL%" & echo serial_enum=0 >> "%PROBE_OUT%") else (echo serial_enum=1 >> "%PROBE_LOCAL%" & echo serial_enum=1 >> "%PROBE_OUT%")
+
 rem Watchdog (run 44285721257): if this probe stalls or dies mid-run, no
 rem probe_done line is ever written and the CI host waits out the full
 rem 45 minutes. A detached watcher notices the probe file going quiet
@@ -112,6 +159,15 @@ rem when it sees probe_done=1 in the local file, or when probe.cmd
 rem writes the stop flag before the long installer deploy. Same
 rem missing-file-is-a-silent-no-op rule as the watchdog above.
 if exist "%SystemRoot%\System32\probe-sync.cmd" start "" /min cmd /c %SystemRoot%\System32\probe-sync.cmd "%PROBE_LOCAL%"
+
+rem Local-mirror copy (run 44428428849): the detached probe-mirror.cmd
+rem copies the local file to the mirror drive every few seconds, so the
+rem host can read it without the share. Only when a mirror drive was
+rem found (MIRROR_DIR set) and the script made it into the image; a
+rem missing file is a silent no-op, same rule as the watchdog/sync.
+if defined MIRROR_DIR (
+    if exist "%SystemRoot%\System32\probe-mirror.cmd" start "" /min cmd /c %SystemRoot%\System32\probe-mirror.cmd "%PROBE_LOCAL%" "%MIRROR_DIR%"
+)
 
 rem --- pecmd markers ---------------------------------------------------------
 rem Diagnostic, run 44267918861: PECMD.INI and startnet.cmd write
@@ -162,8 +218,17 @@ echo mark_shell_ping_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_shell_ping
 ping -n 16 127.0.0.1 >nul 2>&1
 echo mark_shell_ping_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_shell_ping_after=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+set "SHELL_EXPLORER=%ERRORLEVEL%"
 echo mark_shell_check_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_shell_check_after=%TIME: =0% >> "%PROBE_OUT%"
-if errorlevel 1 (echo shell_ready=0 >> "%PROBE_OUT%") else (echo shell_ready=1 >> "%PROBE_OUT%")
+rem Run 44428428849: explorer's CPU time was already frozen at 0:00:13 in
+rem the first tasklist snapshot, so the snapshots alone cannot say when
+rem it stopped working — at startup, or later. Record its CPU time at
+rem each liveness check (shell + after each UWP launch + probe end); a
+rem time that never advances across segments means it never did
+rem meaningful work after start. The errorlevel is captured first
+rem because the call below would clobber it.
+call :probe_explorer_cpu shell
+if "%SHELL_EXPLORER%"=="0" (echo shell_ready=1 >> "%PROBE_OUT%") else (echo shell_ready=0 >> "%PROBE_OUT%")
 
 rem --- network ---------------------------------------------------------------
 echo mark_network=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_network=%TIME: =0% >> "%PROBE_OUT%"
@@ -354,18 +419,21 @@ rem death window to a single launch (in run 41: alive at the Photos
 rem guard 22:50:16, gone at the Media guard 22:50:46).
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer_after_calculator=0 >> "%PROBE_LOCAL%" & echo explorer_after_calculator=0 >> "%PROBE_OUT%") else (echo explorer_after_calculator=1 >> "%PROBE_LOCAL%" & echo explorer_after_calculator=1 >> "%PROBE_OUT%")
+call :probe_explorer_cpu calculator
 
 echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
 if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer_after_photos=0 >> "%PROBE_LOCAL%" & echo explorer_after_photos=0 >> "%PROBE_OUT%") else (echo explorer_after_photos=1 >> "%PROBE_LOCAL%" & echo explorer_after_photos=1 >> "%PROBE_OUT%")
+call :probe_explorer_cpu photos
 
 echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
 if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer_after_media=0 >> "%PROBE_LOCAL%" & echo explorer_after_media=0 >> "%PROBE_OUT%") else (echo explorer_after_media=1 >> "%PROBE_LOCAL%" & echo explorer_after_media=1 >> "%PROBE_OUT%")
+call :probe_explorer_cpu media
 endlocal
 
 rem --- payload ---------------------------------------------------------------
@@ -463,6 +531,24 @@ tasklist /fi "imagename eq WerFault.exe" /nh 2>nul | find /i "WerFault.exe" >nul
 if errorlevel 1 (echo werfault_end=0 >> "%PROBE_LOCAL%" & echo werfault_end=0 >> "%PROBE_OUT%") else (echo werfault_end=1 >> "%PROBE_LOCAL%" & echo werfault_end=1 >> "%PROBE_OUT%")
 tasklist /fi "imagename eq dwm.exe" /nh 2>nul | find /i "dwm.exe" >nul
 if errorlevel 1 (echo dwm_end=0 >> "%PROBE_LOCAL%" & echo dwm_end=0 >> "%PROBE_OUT%") else (echo dwm_end=1 >> "%PROBE_LOCAL%" & echo dwm_end=1 >> "%PROBE_OUT%")
+call :probe_explorer_cpu end
+rem Run 44428428849: explorer exits silently (no WerFault in any snapshot),
+rem so a crash report would only exist if WerFault failed to launch at
+rem all. List the WER queues for an explorer-named entry — pure file
+rem checks, no service call, so they cannot stall the probe this late.
+rem No event-log query here: a silent exit writes no Event 1000/1001,
+rem and wevtutil against a stopped log service is a stall risk one line
+rem before probe_done.
+set "WER_EXPLORER=0"
+if exist "%ProgramData%\Microsoft\Windows\WER\ReportQueue" (
+    dir /b "%ProgramData%\Microsoft\Windows\WER\ReportQueue" 2>nul | find /i "explorer" >nul
+    if not errorlevel 1 set "WER_EXPLORER=1"
+)
+if exist "%ProgramData%\Microsoft\Windows\WER\ReportArchive" (
+    dir /b "%ProgramData%\Microsoft\Windows\WER\ReportArchive" 2>nul | find /i "explorer" >nul
+    if not errorlevel 1 set "WER_EXPLORER=1"
+)
+echo wer_explorer=%WER_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_explorer=%WER_EXPLORER% >> "%PROBE_OUT%"
 
 echo probe_done=1 >> "%PROBE_LOCAL%" & echo probe_done=1 >> "%PROBE_OUT%"
 
@@ -555,23 +641,55 @@ echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_after=%TIME: =0% >> "%PROBE_OUT%"
 tasklist /fi "imagename eq %UWP_PROC%.exe" /nh 2>nul | find /i "%UWP_PROC%.exe" >nul
 if not errorlevel 1 exit /b 0
 echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_check_after=%TIME: =0% >> "%PROBE_OUT%"
+rem Run 44428428849: in both death rounds explorer died ~25-30 s after a
+rem start explorer.exe call (run 41: Photos start to Media guard; run 42:
+rem Media start to after-media) — the same window as the poll itself, so
+rem the after-check cannot tell whether the start killed it. Check
+rem liveness once mid-poll (round 5) to split the death window in half:
+rem alive at r5 and dead at the after-check means it died in the second
+rem half of the poll, not at the start.
+if %UWP_WAIT%==5 (
+    tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+    if errorlevel 1 (echo explorer_midpoll_%UWP_PROC%=0 >> "%PROBE_LOCAL%" & echo explorer_midpoll_%UWP_PROC%=0 >> "%PROBE_OUT%") else (echo explorer_midpoll_%UWP_PROC%=1 >> "%PROBE_LOCAL%" & echo explorer_midpoll_%UWP_PROC%=1 >> "%PROBE_OUT%")
+)
 set /a UWP_WAIT+=1
 if %UWP_WAIT% lss 10 goto :probe_uwp_poll
 exit /b 1
 
+:probe_explorer_cpu
+rem %1 = key suffix: shell, calculator, photos, media, end
+rem (run 44428428849). Records explorer's CPU time at this point in the
+rem run, so the segments can be compared: a time that never advances
+rem means the process stopped doing work. tasklist /v /fo list prints
+rem one "CPU Time:  0:00:13" line per process; tokens=3 is the time
+rem itself (the table form cannot be parsed — its memory column holds
+rem "31,048 K", whose comma breaks token counting). Missing when the
+rem process is gone or the line never appears. The for /f runs in a
+rem child cmd, so a missing tasklist there cannot kill this batch;
+rem in the image tasklist is shipped (10-cmdpe.txt).
+set "EXPLORER_CPU="
+for /f "tokens=3" %%C in ('tasklist /v /fo list /fi "imagename eq explorer.exe" /nh 2^>nul ^| find /i "CPU Time"') do set "EXPLORER_CPU=%%C"
+if defined EXPLORER_CPU (echo explorer_cpu_%~1=%EXPLORER_CPU% >> "%PROBE_LOCAL%" & echo explorer_cpu_%~1=%EXPLORER_CPU% >> "%PROBE_OUT%") else (echo explorer_cpu_%~1=missing >> "%PROBE_LOCAL%" & echo explorer_cpu_%~1=missing >> "%PROBE_OUT%")
+exit /b 0
+
 :probe_svc
-rem %1 = service name, %2 = probe key (run 44349189039).
+rem %1 = service name, %2 = probe key (run 44349189039), %3 = local
+rem mirror file (optional, run 44428428849: the serial diagnostics
+rem need the service states in the local file too).
 rem Writes <key>=RUNNING, STOPPED or MISSING. sc query returns 0 when
 rem the service exists (even stopped) and 1060 when it does not.
 sc query "%~1" >nul 2>&1
 if errorlevel 1 (
     echo %~2=MISSING >> "%PROBE_OUT%"
+    if not "%~3"=="" echo %~2=MISSING >> "%~3"
     exit /b 0
 )
 sc query "%~1" 2>nul | find /i "RUNNING" >nul
 if not errorlevel 1 (
     echo %~2=RUNNING >> "%PROBE_OUT%"
+    if not "%~3"=="" echo %~2=RUNNING >> "%~3"
 ) else (
     echo %~2=STOPPED >> "%PROBE_OUT%"
+    if not "%~3"=="" echo %~2=STOPPED >> "%~3"
 )
 exit /b 0

@@ -61,6 +61,16 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'verify-out/share/micpe-tasklist\.txt'
     }
 
+    It 'uploads the mirror copy of the local probe file with the verify artifacts (run 44428428849)' {
+        $script:buildYml | Should -Match 'verify-out/mirror/micpe-probe-local\.txt'
+    }
+
+    It 'derives the mirror dir from the work dir in Test-Stage.ps1 (run 44428428849)' {
+        $script:testStage | Should -Match 'Join-Path \$WorkDir ''mirror'''
+        $script:testStage | Should -Match '-MirrorDir \$mirrorDir'
+        $script:testStage | Should -Match 'MirrorDir = \$MirrorDir' -Because 'the dot-source trap resets same-named variables, so MirrorDir is saved and restored like DataDisks'
+    }
+
     It 'patches the bundled aria2 verifier before the converter runs' {
         $script:buildScript | Should -Match 'Repair-UupAria2Script'
     }

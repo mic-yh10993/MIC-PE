@@ -54,6 +54,26 @@ Describe 'Get-QemuArgs' {
         ($args2 -join ' ') | Should -Match 'C:\\x\\d3\.qcow2,format=qcow2'
     }
 
+    It 'attaches the mirror drive as a second vvfat volume when MirrorDir is given (run 44428428849)' {
+        # The serial channel is dead, so the local mirror file needs a
+        # retrieval path that does not depend on the suspect share: a
+        # second independent vvfat volume the probe-mirror companion
+        # copies the local file to.
+        $args2 = Get-QemuArgs -Iso 'C:\x\MICPE.iso' -ShareDir 'C:\x\share' -MirrorDir 'C:\x\mirror'
+        $args2 | Should -Contain 'file=fat:rw:C:\x\mirror,format=raw,media=disk,if=ide'
+    }
+
+    It 'attaches the mirror drive after the share drive' {
+        $args2 = Get-QemuArgs -Iso 'C:\x\MICPE.iso' -ShareDir 'C:\x\share' -MirrorDir 'C:\x\mirror'
+        $joined = $args2 -join ' '
+        $joined.IndexOf('file=fat:rw:C:\x\share,') | Should -BeLessThan $joined.IndexOf('file=fat:rw:C:\x\mirror,') -Because 'the mirror must letter after the share'
+    }
+
+    It 'does not attach a mirror drive when MirrorDir is empty' {
+        ($script:joined) | Should -Not -Match 'file=fat:rw:C:\\x\\mirror'
+        @($script:args | Where-Object { $_ -like 'file=fat:rw:*' }).Count | Should -Be 1 -Because 'only the share drive is a vvfat volume without a mirror'
+    }
+
     It 'uses the supplied firmware when given' {
         $args3 = Get-QemuArgs -Iso 'C:\x\a.iso' -ShareDir 'C:\x\s' -FirmwarePath 'C:\x\OVMF.fd'
         $args3 | Should -Contain '-bios'
@@ -344,6 +364,21 @@ Describe 'Invoke-QemuVerify firmware selection' {
 
     It 'fails fast when UEFI is forced but the vars template is missing' {
         $script:qemuVerify | Should -Match 'no OVMF vars template'
+    }
+}
+
+Describe 'Invoke-QemuVerify mirror drive (run 44428428849)' {
+    BeforeAll {
+        $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
+    }
+
+    It 'creates the mirror dir and drops the sentinel before QEMU starts' {
+        # The probe finds the mirror drive by this file, not by letter.
+        $script:qemuVerify | Should -Match 'Join-Path \$MirrorDir ''micpe-mirror\.txt'''
+    }
+
+    It 'passes the mirror dir through to Get-QemuArgs' {
+        $script:qemuVerify | Should -Match '-MirrorDir \$MirrorDir'
     }
 }
 

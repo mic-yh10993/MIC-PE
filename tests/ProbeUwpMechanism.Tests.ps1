@@ -629,11 +629,95 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text.IndexOf('dwm_end=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the end keys run before probe_done'
     }
 
+    It 'records explorer CPU time at each liveness check (run 44428428849)' {
+        # Run 42: explorer's CPU time was already frozen at 0:00:13 in
+        # the first tasklist snapshot, so the snapshots alone cannot say
+        # when it stopped working — at startup, or later. The CPU time
+        # at each liveness check gives the freeze profile.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'tasklist /v /fo list /fi "imagename eq explorer.exe"' -Because 'the list form prints one CPU Time line per process'
+        $text | Should -Match 'find /i "CPU Time"' -Because 'only the CPU Time line is read'
+        $text | Should -Match 'echo explorer_cpu_%~1=%EXPLORER_CPU%' -Because 'the time is recorded under the segment key'
+        $text | Should -Match 'echo explorer_cpu_%~1=missing' -Because 'a missing process is recorded, not skipped'
+        $text | Should -Match 'call :probe_explorer_cpu shell' -Because 'the shell check records the first CPU time'
+        $text | Should -Match 'call :probe_explorer_cpu calculator'
+        $text | Should -Match 'call :probe_explorer_cpu photos'
+        $text | Should -Match 'call :probe_explorer_cpu media'
+        $text | Should -Match 'call :probe_explorer_cpu end'
+        # The shell call sits before the shell_ready echo, so the head
+        # mechanism test covers it; the after-check calls sit between
+        # the launches.
+        $text.IndexOf('call :probe_explorer_cpu shell') | Should -BeLessThan $text.IndexOf('echo shell_ready=1')
+        $text.IndexOf('call :probe_explorer_cpu calculator') | Should -BeLessThan $text.IndexOf('mark_uwp_launch_photos')
+        $text.IndexOf('call :probe_explorer_cpu media') | Should -BeLessThan $text.IndexOf('mark_payload')
+    }
+
+    It 'checks explorer liveness mid-poll to split the death window (run 44428428849)' {
+        # In both death rounds explorer died ~25-30 s after a start
+        # explorer.exe call — the same window as the ten-round poll, so
+        # the after-check cannot tell whether the start killed it. A
+        # mid-poll check at round 5 splits the window in half.
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $sub = -1
+        for ($i = 0; $i -lt $probe.Count; $i++) {
+            if ($probe[$i] -match '^:probe_uwp') { $sub = $i; break }
+        }
+        $sub | Should -BeGreaterThan -1 -Because 'probe.cmd must still carry the :probe_uwp subroutine'
+        $tail = $probe[$sub..($probe.Count - 1)] -join "`n"
+        $tail | Should -Match 'if %UWP_WAIT%==5' -Because 'the check runs once, in the middle of the ten-round poll'
+        $tail | Should -Match 'echo explorer_midpoll_%UWP_PROC%=0 >> "%PROBE_LOCAL%"' -Because 'a mid-poll death is recorded'
+        $tail | Should -Match 'echo explorer_midpoll_%UWP_PROC%=1 >> "%PROBE_OUT%"' -Because 'mid-poll survival is recorded too'
+    }
+
+    It 'the end snapshot checks the WER queues for an explorer entry (run 44428428849)' {
+        # Explorer exits silently (no WerFault in any snapshot), so a
+        # crash report would only exist if WerFault failed to launch at
+        # all. The queue check is pure file existence, so it cannot
+        # stall the probe one line before probe_done. No event-log
+        # query: a silent exit writes no Event 1000/1001.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'Microsoft\\Windows\\WER\\ReportQueue' -Because 'a crash report would queue here even if WerFault never ran'
+        $text | Should -Match 'Microsoft\\Windows\\WER\\ReportArchive'
+        $text | Should -Match 'echo wer_explorer=%WER_EXPLORER%' -Because 'the queue check result is recorded'
+        $text.IndexOf('wer_explorer=') | Should -BeGreaterThan $text.IndexOf('dwm_end=') -Because 'the WER check runs after the end keys'
+        $text.IndexOf('wer_explorer=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the WER check runs before probe_done'
+    }
+
     It 'reverse control: without the frame-host check the diagnostics test fails' {
         # The presence assertion above must actually depend on the probe
         # checking for the frame host, not pass vacuously.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $mutated = $text.Replace('appframehost=', 'appframehost-missing=')
         $mutated | Should -Not -Match 'appframehost='
+    }
+}
+
+Describe 'explorer CPU time (run 44428428849)' {
+    It 'C1: the CPU-time parse extracts a time from tasklist /v /fo list' -Skip:(-not $IsWindows) {
+        # The table form cannot be parsed — its memory column holds
+        # "31,048 K", whose comma breaks token counting — so the probe
+        # reads the list form's "CPU Time:  0:00:13" line with tokens=3.
+        # This test proves the exact snippet on a real cmd.exe: a time
+        # when explorer is running, an explicit missing when it is not.
+        $workDir = & $script:NewWorkDir
+        $outFile = Join-Path $workDir 'cpu-out.txt'
+        $bat = Join-Path $workDir 'cpu-parse.bat'
+        try {
+            & $script:WriteBatchCrlf $bat @(
+                '@echo off',
+                'set "EXPLORER_CPU="',
+                'for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq explorer.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"',
+                ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
+            )
+            $result = & $script:InvokeCmdTimed $bat $workDir
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "cpu parse: [$text]"
+            $text | Should -Match 'explorer_cpu=([0-9]+:[0-9]{2}:[0-9]{2}|missing)' -Because 'the parse must yield a time when explorer runs, or an explicit missing'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
