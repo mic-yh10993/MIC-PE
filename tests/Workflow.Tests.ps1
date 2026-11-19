@@ -101,19 +101,17 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'verify-out/share/micpe-minidump\*'
     }
 
-    It 'wires 60-werdumps.reg into the UWP step as an admin import and 70-feature-42537950.reg as a SYSTEM import (run 49, run 50)' {
-        # The WER LocalDumps key is admin-writable, so it rides the
-        # plain $regFiles path with 40-uwp.reg — not the SYSTEM path,
-        # which is reserved for the Appx sideload-policy key
-        # (Administrators have only KEY_READ there, CI run
-        # 44040699722). CI-time import only (user decision
-        # 2026-11-17 23:43). Run 50: 70-feature-42537950.reg joins the
-        # SYSTEM path too — it forces DisableWin10Taskbar off, and the
-        # Overrides key DACL could not be verified offline, so SYSTEM
-        # is used rather than risking an access-denied on the plain
-        # admin path.
+    It 'wires 60-werdumps.reg and 70-feature-42537950.reg into the UWP step as SYSTEM imports (run 49, run 50, run 51)' {
+        # 60-werdumps.reg rode the plain $regFiles path with 40-uwp.reg
+        # through run 50 on the assumption its WER LocalDumps key is
+        # admin-writable — but run 50 proved the plain path does not
+        # land the key even with the right PE-SOFT address
+        # (wer_localdumps_folder=missing while both SYSTEM imports
+        # landed), so run 51 moves it to the SYSTEM path with 40-uwp.reg
+        # and 70-feature-42537950.reg. CI-time import only (user
+        # decision 2026-11-17 23:43).
         $script:buildScript | Should -Match "'40-uwp\.reg', '60-werdumps\.reg', '70-feature-42537950\.reg'" -Because 'the feature patch is imported with the UWP patch'
-        $script:buildScript.Contains("-SystemRegFiles @('40-uwp.reg', '70-feature-42537950.reg')") | Should -BeTrue -Because '40-uwp.reg and 70-feature-42537950.reg go through the SYSTEM import'
+        $script:buildScript.Contains("-SystemRegFiles @('40-uwp.reg', '60-werdumps.reg', '70-feature-42537950.reg')") | Should -BeTrue -Because '40-uwp.reg, 60-werdumps.reg and 70-feature-42537950.reg all go through the SYSTEM import'
     }
 
     It 'derives the mirror dir from the work dir in Test-Stage.ps1 (run 44428428849)' {

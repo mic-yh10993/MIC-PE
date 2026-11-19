@@ -548,23 +548,24 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text | Should -Match 'StartMenuExperienceHost\.exe' -Because 'the check looks for the Start menu host by image name'
     }
 
-    It 'does NOT start the AppX services this round, and records their last exit codes (run 44365018616)' {
-        # Control for run 39: the probe and the watchdog both stopped
-        # within ~15 seconds of the two sc start calls, so sc start is
-        # the prime suspect for the freeze — but explorer was already
-        # Not Responding before any sc start, so it cannot be convicted
-        # yet. This round the services are not started at all: one
-        # variable at a time. If the probe now runs through, sc start
-        # was the trigger; if it still stops at the same place, sc
-        # start is exonerated. The last exit codes are recorded
-        # instead: run 39 showed sc start returning 0 while the
-        # service stayed STOPPED.
+    It 'starts the AppX services only after probe_done, and records their last exit codes (run 39 control lifted in run 51)' {
+        # Run 51 lifts the run 39 control: the probe and the watchdog
+        # both stopped within ~15 seconds of the two sc start calls, so
+        # the start attempt stayed out of the probe through run 50.
+        # Run 50 proved RpcSs is the only thing holding StateRepository
+        # back, so run 51 starts the services — but only after
+        # probe_done is already in the LOCAL file (§34.7), where a
+        # wedge costs a delayed shutdown, not a lost conclusion. The
+        # start calls run detached through :probe_sc_start. The last
+        # exit codes are still recorded before the first launch, as
+        # before: run 39 showed sc start returning 0 while the service
+        # stayed STOPPED.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Not -Match 'sc start AppXSVC' -Because 'the control run must not start AppXSVC'
-        $text | Should -Not -Match 'sc start StateRepository' -Because 'the control run must not start StateRepository'
+        $text.IndexOf('call :probe_sc_start AppXSVC appxsvc') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'AppXSVC is started only after probe_done'
+        $text.IndexOf('call :probe_sc_start StateRepository staterepo') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'StateRepository is started only after probe_done'
         $text | Should -Not -Match 'sc start AppReadiness' -Because 'AppReadiness is only queried, not started'
-        $text | Should -Not -Match 'appxsvc_start=' -Because 'no start attempt means no start outcome to record'
-        $text | Should -Not -Match 'staterepo_start=' -Because 'no start attempt means no start outcome to record'
+        $text | Should -Not -Match 'appxsvc_start=' -Because 'the start outcome is recorded under appxsvc_after_start, not appxsvc_start'
+        $text | Should -Not -Match 'staterepo_start=' -Because 'the start outcome is recorded under staterepo_after_start, not staterepo_start'
         $text | Should -Match 'sc queryex AppXSVC' -Because 'the stopped service exit code is read, not assumed'
         $text | Should -Match 'sc queryex StateRepository' -Because 'the stopped service exit code is read, not assumed'
         $text | Should -Match 'WIN32_EXIT_CODE' -Because 'queryex reports the service last exit code under that name'
@@ -1519,12 +1520,13 @@ Describe 'probe.cmd wedge and activation diagnostics (run 47)' {
     It 'copies the local probe file to the share at the end of every section' {
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $calls = @([regex]::Matches($text, 'call :probe_sync_local'))
-        $calls.Count | Should -Be 4 -Because 'diag, uwp, xcheck, and brand each sync the local file; the end uses a detached copy now (run 48)'
+        $calls.Count | Should -Be 5 -Because 'diag, uwp, xcheck, brand, and the sc start experiment each sync the local file; the end also fires a detached copy (run 48)'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot diag')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot diag') -Because 'the diag section syncs after its snapshot'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot uwp')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot uwp') -Because 'the uwp section syncs after its snapshot'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot xcheck')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot xcheck') -Because 'the xcheck section syncs after its snapshot'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('echo brand=')) | Should -BeGreaterThan $text.IndexOf('echo brand=') -Because 'the brand section syncs after the brand verdict'
-        $text.IndexOf('start "" /min cmd /c copy /y "%PROBE_LOCAL%"', $text.IndexOf('echo dump_memory=')) | Should -BeGreaterThan $text.IndexOf('echo dump_memory=') -Because 'the end copy happens after the end snapshot, in place of the fifth sync'
+        $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_sc_start AppXSVC appxsvc')) | Should -BeGreaterThan $text.IndexOf('call :probe_sc_start AppXSVC appxsvc') -Because 'the experiment syncs after the last start call, so the experiment keys reach the share copy too'
+        $text.IndexOf('start "" /min cmd /c copy /y "%PROBE_LOCAL%"', $text.IndexOf('echo dump_memory=')) | Should -BeGreaterThan $text.IndexOf('echo dump_memory=') -Because 'the end copy happens after the end snapshot'
         $text.IndexOf('start "" /min cmd /c copy /y "%PROBE_LOCAL%"') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'the end copy is fired after probe_done is written to the local file'
         $sync = & $script:ExtractProbeSub ':probe_sync_local' ''
         ($sync -join "`n") | Should -Match 'copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local\.txt"' -Because 'the sync copies the local file onto the share'
@@ -1780,21 +1782,23 @@ Describe 'probe.cmd run 48 harness liveness and activation diagnostics (run 48)'
         $regBody | Should -Match 'exit /b 0' -Because 'the subroutine returns cleanly'
     }
 
-    It 'still does NOT start the AppX services (run 39 control stays in force)' {
+    It 'starts the AppX services only after probe_done (run 39 control lifted in run 51)' {
         # The run 39 control: the probe and the watchdog both stopped
         # within ~15 seconds of two sc start calls, so sc start is the
         # prime suspect for a guest-wide wedge — and a detached sc.exe
         # would not protect against the service start itself wedging
         # the guest. Runs 41/44/45/47 proved the probe runs through
         # WITHOUT starting them, so the start attempt is a separate
-        # experiment (after probe_done, where a wedge costs nothing),
-        # not this round.
+        # experiment (after probe_done, where a wedge costs nothing).
+        # Run 51 runs that experiment: the start calls live after
+        # probe_done and go through the detached :probe_sc_start
+        # helper, so a wedge can only delay the shutdown.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Not -Match 'sc start AppXSVC' -Because 'the control run must not start AppXSVC'
-        $text | Should -Not -Match 'sc start StateRepository' -Because 'the control run must not start StateRepository'
+        $text.IndexOf('call :probe_sc_start AppXSVC appxsvc') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'AppXSVC is started only after probe_done'
+        $text.IndexOf('call :probe_sc_start StateRepository staterepo') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'StateRepository is started only after probe_done'
         $text | Should -Not -Match 'sc start AppReadiness' -Because 'AppReadiness is only queried, not started'
-        $text | Should -Not -Match 'appxsvc_start=' -Because 'no start attempt means no start outcome to record'
-        $text | Should -Not -Match 'staterepo_start=' -Because 'no start attempt means no start outcome to record'
+        $text | Should -Not -Match 'appxsvc_start=' -Because 'the start outcome is recorded under appxsvc_after_start, not appxsvc_start'
+        $text | Should -Not -Match 'staterepo_start=' -Because 'the start outcome is recorded under staterepo_after_start, not staterepo_start'
     }
 
     It 'counts the AUMID dump lines and checks the deployment server DLL' {
@@ -1941,17 +1945,18 @@ Describe 'probe.cmd run 49 BEX64 breakpoint control and minidump capture (run 49
         $text.IndexOf('mountvol_end=1') | Should -BeGreaterThan $text.IndexOf('mirror_late=') -Because 'the mountvol dump follows the late scan'
     }
 
-    It 'still does NOT start the AppX services (run 39 control stays in force)' {
+    It 'starts the AppX services only after probe_done (run 39 control lifted in run 51)' {
         # The run 39 control: the probe and the watchdog both stopped
         # within ~15 seconds of two sc start calls. The start attempt
         # is a separate experiment (after probe_done, where a wedge
-        # costs nothing), not this round.
+        # costs nothing) — run 51 runs it, through the detached
+        # :probe_sc_start helper.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Not -Match 'sc start AppXSVC' -Because 'the control run must not start AppXSVC'
-        $text | Should -Not -Match 'sc start StateRepository' -Because 'the control run must not start StateRepository'
+        $text.IndexOf('call :probe_sc_start AppXSVC appxsvc') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'AppXSVC is started only after probe_done'
+        $text.IndexOf('call :probe_sc_start StateRepository staterepo') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'StateRepository is started only after probe_done'
         $text | Should -Not -Match 'sc start AppReadiness' -Because 'AppReadiness is only queried, not started'
-        $text | Should -Not -Match 'appxsvc_start=' -Because 'no start attempt means no start outcome to record'
-        $text | Should -Not -Match 'staterepo_start=' -Because 'no start attempt means no start outcome to record'
+        $text | Should -Not -Match 'appxsvc_start=' -Because 'the start outcome is recorded under appxsvc_after_start, not appxsvc_start'
+        $text | Should -Not -Match 'staterepo_start=' -Because 'the start outcome is recorded under staterepo_after_start, not staterepo_start'
     }
 }
 
@@ -1988,15 +1993,15 @@ Describe 'probe.cmd run 50 feature 42537950 override read-back and explorer_end 
         # it landed. StateRepository's only dependency is RpcSs and its
         # appmodel svchost group is defined in the image, so the probe
         # records RpcSs's own state and the group definition in the
-        # running image. Reads only — the sc start experiment stays in
-        # a later round, after probe_done (eval card §34.7).
+        # running image. Reads only in this section — the sc start
+        # experiment runs after probe_done (eval card §34.7, run 51).
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $text | Should -Match 'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps\\explorer\.exe" /v DumpFolder' -Because 'the LocalDumps key is read back from the running image'
         $text | Should -Match 'echo wer_localdumps_folder=%WER_DUMPS%' -Because 'the LocalDumps read-back is recorded'
         $text | Should -Match 'call :probe_svc RpcSs rpcss' -Because 'RpcSs state is recorded (StateRepository depends only on it)'
         $text | Should -Match 'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost" /v appmodel' -Because 'the appmodel group definition is checked in the running image'
         $text | Should -Match 'echo svchost_appmodel=' -Because 'the appmodel group presence is recorded'
-        $text | Should -Not -Match 'sc start RpcSs' -Because 'RpcSs is only queried, not started'
+        $text.IndexOf('call :probe_sc_start RpcSs rpcss') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'RpcSs is started only after probe_done, never in the diagnostics section'
         $text | Should -Not -Match 'reg add' -Because 'the diagnostics are read-only'
         $text | Should -Not -Match 'reg import' -Because 'the diagnostics are read-only'
     }
@@ -2013,5 +2018,61 @@ Describe 'probe.cmd run 50 feature 42537950 override read-back and explorer_end 
         $text | Should -Match 'echo explorer_end=0 >> "%PROBE_LOCAL%"' -Because 'the dead verdict is dual-written too'
         $text.IndexOf('echo explorer_end=') | Should -BeGreaterThan $text.IndexOf('echo dwm_end=') -Because 'explorer_end follows dwm_end in the end snapshot'
         $text.IndexOf('echo explorer_end=') | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'explorer_end is written before probe_done'
+    }
+}
+
+Describe 'probe.cmd run 51 grouped feature override and service start experiment (run 51)' {
+    It 'starts the services detached with a bounded wait and records the after-states' {
+        # Run 51: RpcSs is StateRepository's only dependency and it is
+        # STOPPED in PE (run 50). The experiment starts RpcSs, then
+        # StateRepository, then AppXSVC — but only after probe_done is
+        # already in the LOCAL file (§34.7), where a wedge costs a
+        # delayed shutdown, not a lost conclusion. Each start runs
+        # detached through :probe_sc_start (run 39: two start calls
+        # stalled probe + watchdog within ~15s), and the after-state
+        # is read back with :probe_svc right after each start.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'call :probe_sc_start RpcSs rpcss' -Because 'RpcSs is started through the helper'
+        $text | Should -Match 'call :probe_sc_start StateRepository staterepo' -Because 'StateRepository is started through the helper'
+        $text | Should -Match 'call :probe_sc_start AppXSVC appxsvc' -Because 'AppXSVC is started through the helper'
+        $text | Should -Match 'call :probe_svc RpcSs rpcss_after_start' -Because 'the RpcSs state after the start is recorded'
+        $text | Should -Match 'call :probe_svc StateRepository staterepo_after_rpcss' -Because 'whether StateRepository followed RpcSs is recorded'
+        $text | Should -Match 'call :probe_svc StateRepository staterepo_after_start' -Because 'the StateRepository state after its own start is recorded'
+        $text | Should -Match 'call :probe_svc AppXSVC appxsvc_after_start' -Because 'the AppXSVC state after the start is recorded'
+        $text.IndexOf('call :probe_sc_start RpcSs rpcss') | Should -BeLessThan $text.IndexOf('call :probe_sc_start StateRepository staterepo') -Because 'RpcSs is started before StateRepository'
+        $text.IndexOf('call :probe_sc_start StateRepository staterepo') | Should -BeLessThan $text.IndexOf('call :probe_sc_start AppXSVC appxsvc') -Because 'StateRepository is started before AppXSVC'
+        $text.IndexOf('call :probe_svc RpcSs rpcss_after_start') | Should -BeGreaterThan $text.IndexOf('call :probe_sc_start RpcSs rpcss') -Because 'the after-state is read after the start call'
+    }
+
+    It 'runs each start detached with a bounded wait and a DONE sentinel (:probe_sc_start)' {
+        # The parent never blocks on the start command: the child runs
+        # detached, writes its output to a temp file plus DONE, and the
+        # parent waits for DONE with a bounded spin and 15 one-second
+        # ticks, then taskkills a hung start. Same shape as the
+        # :probe_poll_check detachment (run 47).
+        $helper = & $script:ExtractProbeSub ':probe_sc_start' ':probe_poll_check'
+        ($helper -join "`n") | Should -Match 'start "" /min cmd /c sc start %~1' -Because 'the start runs in a detached child cmd'
+        ($helper -join "`n") | Should -Match 'echo DONE' -Because 'the child writes a DONE sentinel'
+        ($helper -join "`n") | Should -Match 'find /i "DONE"' -Because 'the parent waits for the sentinel, not merely a non-empty file'
+        ($helper -join "`n") | Should -Match 'if %SC_WAIT% geq 15 goto sc_start_timeout' -Because 'the wait is bounded at 15 seconds'
+        ($helper -join "`n") | Should -Match 'taskkill /f /im sc\.exe' -Because 'a hung start is taskkilled'
+        ($helper -join "`n") | Should -Match 'echo scstart_%~2_done=1' -Because 'a finished start is recorded'
+        ($helper -join "`n") | Should -Match 'echo scstart_%~2_timeout=1' -Because 'a timed-out start is recorded'
+    }
+
+    It 're-dumps the AUMID store after the starts and syncs the local file once more' {
+        # If StateRepository came up, the !App subkeys may resolve now
+        # — the cross-check dump runs again with _after keys. Dump to
+        # a file and search the file (never a pipe: CI run 44519361912).
+        # The experiment keys are written after the detached end copy
+        # fired, so the local file is synced once more (fifth sync).
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'micpe-aumid-after\.tmp' -Because 'the re-dump uses its own temp file'
+        $text | Should -Match 'echo aumid_after_calc=' -Because 'the Calculator AUMID is re-checked'
+        $text | Should -Match 'echo aumid_after_photos=' -Because 'the Photos AUMID is re-checked'
+        $text | Should -Match 'echo aumid_after_media=' -Because 'the Media AUMID is re-checked'
+        $text | Should -Match 'echo aumid_after_lines=' -Because 'the re-dump line count is recorded'
+        $text.IndexOf('echo aumid_after_calc=') | Should -BeGreaterThan $text.IndexOf('call :probe_sc_start AppXSVC appxsvc') -Because 'the re-dump runs after the starts'
+        $text.IndexOf('call :probe_sync_local', $text.IndexOf('echo aumid_after_lines=')) | Should -BeGreaterThan $text.IndexOf('echo aumid_after_lines=') -Because 'the fifth sync follows the re-dump'
     }
 }

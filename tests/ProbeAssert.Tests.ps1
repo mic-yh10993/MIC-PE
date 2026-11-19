@@ -91,18 +91,24 @@ Describe 'Get-StageProbeExpect' {
         $expect.Count | Should -Be 7
     }
 
-    It 'm5 and m7 assert the feature override is off and explorer survives to the end (run 50)' {
+    It 'm5 and m7 assert the grouped feature override is off and explorer survives to the end (run 50, run 51)' {
         # Run 50: the CI build imports an override forcing
         # DisableWin10Taskbar (42537950) off; the stage asserts the
         # probe read it back as 0x0, and asserts explorer is still
         # alive at probe end (the old explorer=1 is set while it is
-        # still starting, so it cannot prove the fix worked).
+        # still starting, so it cannot prove the fix worked). Run 51:
+        # the flat entry run 50 wrote was ignored by the loader, so
+        # the override is written grouped and the stage asserts the
+        # three group keys instead of the flat one.
         foreach ($stage in 'm5', 'm7') {
             $expect = Get-StageProbeExpect -Stage $stage
-            $expect['fm_42537950_state'] | Should -Be '0x0'
+            $expect['fm_42537950_group0'] | Should -Be '0x0'
+            $expect['fm_42537950_group15'] | Should -Be '0x0'
+            $expect['fm_42537950_group9'] | Should -Be '0x0'
+            $expect.Keys | Should -Not -Contain 'fm_42537950_state'
             $expect['explorer_end'] | Should -Be '1'
         }
-        (Get-StageProbeExpect -Stage 'm5').Count | Should -Be 13 -Because 'm5 had 11 assertions before run 50'
+        (Get-StageProbeExpect -Stage 'm5').Count | Should -Be 15 -Because 'm5 had 11 assertions before run 50, 13 in run 50, and the flat key is replaced by three group keys in run 51'
     }
 
     It 'm5, m6 and m7 carry the drive-letter keys too' {

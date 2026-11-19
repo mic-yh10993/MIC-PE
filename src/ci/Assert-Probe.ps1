@@ -29,9 +29,9 @@ $script:StageProbeExpect = [ordered]@{
     # machine is verified by the user against docs/test-checklist.md.
     # pe_drive is asserted from m4 on: m1-m3 predate the fix.
     m4 = @{ boot = '1'; share = '1'; ime = '1'; uwp_appx = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0' }
-    m5 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; payload = '1'; brand = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0'; fm_42537950_state = '0x0'; explorer_end = '1' }
+    m5 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; payload = '1'; brand = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0'; fm_42537950_group0 = '0x0'; fm_42537950_group15 = '0x0'; fm_42537950_group9 = '0x0'; explorer_end = '1' }
     m6 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; installer_scan = '1'; installer_deploy = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0' }
-    m7 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1'; uwp_appx = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; uwp_launch_calculator = '1'; payload = '1'; brand = '1'; installer_scan = '1'; installer_deploy = '1'; size_wim = '*'; size_iso = '*'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0'; fm_42537950_state = '0x0'; explorer_end = '1' }
+    m7 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1'; uwp_appx = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; uwp_launch_calculator = '1'; payload = '1'; brand = '1'; installer_scan = '1'; installer_deploy = '1'; size_wim = '*'; size_iso = '*'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0'; fm_42537950_group0 = '0x0'; fm_42537950_group15 = '0x0'; fm_42537950_group9 = '0x0'; explorer_end = '1' }
 }
 
 function Get-StageProbeExpect {

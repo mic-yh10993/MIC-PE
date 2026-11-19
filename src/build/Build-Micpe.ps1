@@ -343,20 +343,27 @@ function Invoke-UwpStep {
         # 40-uwp.reg goes in as SYSTEM: its Appx sideload-policy key gives
         # Administrators only KEY_READ (CI run 44040699722). User decision
         # 2026-11-17 23:43: every registry import happens at CI build time.
-        # 60-werdumps.reg rides the same mount (its WER LocalDumps key is
-        # admin-writable, so it stays on the plain path): it makes WerFault
-        # write explorer's minidump to X:\CrashDumps when it crashes, so
-        # the probe can copy the dump to the share and locate the run 48
-        # BEX64 offset 0x1181ea's call stack. Run 50: its key path was
-        # HKLM\SOFTWARE, which a plain reg.exe import writes into the
-        # RUNNER's live hive — the image never got it (dump_* all 0 in
-        # run 49). It now addresses PE-SOFT (the mounted SOFTWARE hive).
+        # 60-werdumps.reg rides the SYSTEM import too (run 51): it makes
+        # WerFault write explorer's minidump to X:\CrashDumps when it
+        # crashes, so the probe can copy the dump to the share and locate
+        # the run 48 BEX64 offset 0x1181ea's call stack. Run 50: its key
+        # path was HKLM\SOFTWARE, which a plain reg.exe import writes
+        # into the RUNNER's live hive — the image never got it (dump_*
+        # all 0 in run 49). It now addresses PE-SOFT (the mounted
+        # SOFTWARE hive) — and run 50 proved the plain admin path does
+        # not land the key even with the right address
+        # (wer_localdumps_folder=missing while both SYSTEM imports
+        # landed): the "admin-writable" assumption was never verified
+        # against the key's DACL, so SYSTEM is used rather than
+        # risking another silent miss.
         # 70-feature-42537950.reg rides the SYSTEM import too: it forces
         # the DisableWin10Taskbar feature (42537950) off — CTray::Init
         # failfasts while it is enabled (run 49) — and the Overrides key
         # DACL could not be verified offline, so SYSTEM is used rather
-        # than risking an access-denied on the plain path.
-        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '70-feature-42537950.reg')
+        # than risking an access-denied on the plain path. Run 51: the
+        # override is written grouped (Overrides\0, \15 and \9) — the
+        # flat entry run 50 wrote was ignored by the loader (§36.5.1).
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '60-werdumps.reg', '70-feature-42537950.reg')
         Assert-AppxPolicy -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
         Assert-UwpReady -MountDir $paths.Mount
