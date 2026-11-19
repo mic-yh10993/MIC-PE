@@ -507,6 +507,12 @@ Describe 'Invoke-RegImportPrivileged' {
                 # same DACL, without changing it.
                 { Invoke-RegImportPrivileged -RegFile $testReg -HiveKey $keyName } | Should -Not -Throw
 
+                # Diagnostic: show exactly what exists under the group
+                # key after the privileged write, so a read-back miss
+                # says whether the write went elsewhere (or nowhere).
+                $dump = & reg.exe query "HKLM\$keyName\$groupSub" /s 2>&1 | Out-String
+                Write-Host "Overrides subtree after privileged import:`n$dump"
+
                 $values = Get-RegistryKeyValues -KeyName $keyName -SubKey "$groupSub\42537950"
                 $values | Should -Not -BeNullOrEmpty
                 $values['EnabledState'] | Should -Match '^0x0*0$'

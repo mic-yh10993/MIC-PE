@@ -291,6 +291,16 @@ function Invoke-RegImportPrivileged {
             throw [System.InvalidOperationException]::new(
                 "privileged reg import failed with exit code $code for $RegFile : $detail")
         }
+        # The privileged writer prints one line per value it writes;
+        # surface them in the build log so a later read-back can say
+        # exactly what landed (and where), not just that the task
+        # exited 0.
+        if (Test-Path -LiteralPath $logFile) {
+            $logged = (Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue)
+            foreach ($line in $logged) {
+                if ("$line".Trim()) { Write-Host "  [priv-import] $line" }
+            }
+        }
         Write-SubStep "imported $(Split-Path -Leaf $RegFile) as SYSTEM (backup/restore)"
     }
     finally {
