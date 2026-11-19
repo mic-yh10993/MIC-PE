@@ -337,6 +337,7 @@ function Invoke-UwpStep {
         Install-AppxFramework -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
         Install-UwpApps -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot `
             -PackageNames (Get-UwpDefaults)
+        Install-FrameHost -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
         $regFiles = @('40-uwp.reg') |
             ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
         # 40-uwp.reg goes in as SYSTEM: its Appx sideload-policy key gives

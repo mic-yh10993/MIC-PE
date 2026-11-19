@@ -13,7 +13,7 @@ Describe 'whitelists' {
 
     It 'every entry is a relative Windows path without a drive letter' {
         $bad = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost') {
             $entries = Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt")
             foreach ($entry in $entries) {
                 if ($entry -match '^[A-Za-z]:') { $bad.Add("$name drive: $entry") }
@@ -26,7 +26,7 @@ Describe 'whitelists' {
 
     It 'does not carry the winre.wim base image' {
         $found = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost') {
             Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt") |
                 Where-Object { $_ -like '*Recovery\Winre.wim' } |
                 ForEach-Object { $found.Add("$name $_") }
@@ -76,7 +76,7 @@ Describe 'whitelists' {
             'Windows\System32\MLS*.dll'
         )
         $found = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost') {
             Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt") |
                 Where-Object { $stale -contains $_ } |
                 ForEach-Object { $found.Add("$name $_") }
@@ -136,5 +136,20 @@ Describe 'whitelists' {
         $entries.Count | Should -BeGreaterThan 0
         $entries | Should -Contain 'Windows\System32\AppXDeploymentClient.dll'
         $entries | Should -Contain 'Windows\System32\Windows.UI.Xaml.dll'
+    }
+
+    It 'the framehost list contains the UWP frame host chain (run 45)' {
+        # 60-framehost.txt is the same kind of small hand-written list as
+        # 50-uwp.txt. Every entry was verified against the real 25H2
+        # install.wim (wimlib dir listing) before this round.
+        $path = Join-Path $script:ListDir '60-framehost.txt'
+        Test-Path -LiteralPath $path | Should -BeTrue
+        $entries = Read-Whitelist -Path $path
+        $entries.Count | Should -Be 5
+        $entries | Should -Contain 'Windows\System32\ApplicationFrameHost.exe'
+        $entries | Should -Contain 'Windows\System32\RuntimeBroker.exe'
+        $entries | Should -Contain 'Windows\System32\AppReadiness.dll'
+        $entries | Should -Contain 'Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy*'
+        $entries | Should -Contain 'Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy*'
     }
 }

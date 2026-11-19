@@ -19,6 +19,20 @@
        one-shot scheduled task (Invoke-RegImportAsSystem in Registry.ps1);
        user decision 2026-11-17 23:43: every registry import happens at
        CI build time, nothing is ever set inside the running PE.
+    4. The frame host chain (60-framehost.txt, run 45): the processes
+       that display UWP app windows (ApplicationFrameHost.exe,
+       RuntimeBroker.exe), the two SystemApps shell hosts
+       (ShellExperienceHost, StartMenuExperienceHost) and the
+       AppReadiness service DLL, plus the AppReadiness service key in
+       40-uwp.reg (verbatim from the same hive; its key is missing from
+       the boot.wim SYSTEM hive). The StateRepository service DLL is not
+       a new entry: the hive spells it windows.staterepository.dll, but
+       that is the same file as Windows.StateRepository.dll, already
+       extracted by 20-explorer.txt. No Applications entries are written
+       for the two hosts: Install-ExplorerShell swaps the whole
+       SOFTWARE hive from install.wim, which already carries both hosts
+       under AppxAllUserStore\InboxApplications with their manifest
+       paths.
 
     Registration writes only the AppxAllUserStore allow-run keys
     (Applications\<package-full-name> with a Path value). The
@@ -177,6 +191,63 @@ function Install-UwpApps {
     Write-SubStep 'provisioned UWP app packages verified'
 }
 
+function Install-FrameHost {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MountDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $InstallWim,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RepoRoot,
+
+        [string] $WimlibPath = 'wimlib-imagex',
+
+        [int] $InstallIndex = 1
+    )
+
+    Assert-PathExists -Path $MountDir -Label 'boot.wim mount'
+    Assert-PathExists -Path $InstallWim -Label 'install.wim'
+
+    Write-Step 'extracting the UWP frame host chain'
+    $frameHostPatterns = Read-Whitelist -Path (Join-Path $RepoRoot 'src/filelists/60-framehost.txt')
+    Export-WimFiles -WimPath $InstallWim -Index $InstallIndex `
+        -Destination $MountDir -Patterns $frameHostPatterns -WimlibPath $WimlibPath
+
+    # Verify the extraction landed where the shell expects it. The two
+    # SystemApps directory names are verbatim from the install.wim
+    # SOFTWARE hive InboxApplications Path values, and all five entries
+    # were verified present in the real 25H2 install.wim before this
+    # round (wimlib dir listing). AppReadiness.dll is the AppReadiness
+    # service's ServiceDll. The StateRepository service's ServiceDll is
+    # NOT listed here: the hive spells it windows.staterepository.dll,
+    # but that is the same file as Windows.StateRepository.dll (NTFS
+    # names are case-insensitive; the image holds exactly one file of
+    # that name), already extracted by 20-explorer.txt's
+    # Windows.StateRepository* pattern. No Applications entries are
+    # written for the two hosts: Install-ExplorerShell swaps the whole
+    # SOFTWARE hive from install.wim, which already carries both hosts
+    # under AppxAllUserStore\InboxApplications with their manifest
+    # paths, and the build cannot write InboxApplications anyway
+    # (restrictive DACL, CI run 44008629819).
+    $missing = @()
+    foreach ($file in 'Windows\System32\ApplicationFrameHost.exe',
+                     'Windows\System32\RuntimeBroker.exe',
+                     'Windows\System32\AppReadiness.dll',
+                     'Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe',
+                     'Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe') {
+        if (-not (Test-Path -LiteralPath (Join-Path $MountDir $file))) { $missing += $file }
+    }
+    if ($missing.Count -gt 0) {
+        throw [System.InvalidOperationException]::new(
+            "UWP frame host is incomplete. Missing:`n  " + ($missing -join "`n  "))
+    }
+
+    Write-SubStep 'UWP frame host verified (frame host, broker, two SystemApps hosts, AppReadiness service DLL)'
+}
+
 function Register-ProvisionedAppx {
     [CmdletBinding()]
     param(
@@ -332,6 +403,25 @@ function Assert-UwpReady {
     foreach ($dll in 'AppXDeploymentClient.dll', 'Windows.UI.Xaml.dll') {
         if (-not (Test-Path -LiteralPath (Join-Path $system32 $dll))) {
             $missing.Add("System32/$dll")
+        }
+    }
+
+    # Run 45 (UWP frame host): the processes that display UWP app windows
+    # and the AppReadiness service DLL. The two SystemApps hosts are
+    # checked by their executables inside the package directory. The
+    # StateRepository service DLL is not listed here: the hive spells it
+    # windows.staterepository.dll, but that is the same file as
+    # Windows.StateRepository.dll, already covered by the family check
+    # below.
+    foreach ($file in 'ApplicationFrameHost.exe', 'RuntimeBroker.exe', 'AppReadiness.dll') {
+        if (-not (Test-Path -LiteralPath (Join-Path $system32 $file))) {
+            $missing.Add("System32/$file")
+        }
+    }
+    $systemApps = Join-Path $MountDir 'Windows/SystemApps'
+    foreach ($hostExe in 'ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe', 'Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe') {
+        if (-not (Test-Path -LiteralPath (Join-Path $systemApps $hostExe))) {
+            $missing.Add("SystemApps/$hostExe")
         }
     }
 

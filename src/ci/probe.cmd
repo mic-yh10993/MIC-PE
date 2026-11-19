@@ -399,6 +399,17 @@ reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore"
 set "APPXSTORE_MEDIA=%ERRORLEVEL%"
 echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_OUT%"
 if "%APPXSTORE_MEDIA%"=="0" (echo appxstore_media=1 >> "%PROBE_OUT%") else (echo appxstore_media=0 >> "%PROBE_OUT%")
+rem Run 45 (UWP frame host): the two SystemApps hosts are registered in
+rem AppxAllUserStore\InboxApplications by the SOFTWARE hive swap
+rem (Install-ExplorerShell), not by a build-time write — these queries
+rem confirm the swap carried them. No mark_ markers: the three queries
+rem above already proved this pattern does not hang.
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.ShellExperienceHost" >nul
+set "APPXSTORE_SEH=%ERRORLEVEL%"
+if "%APPXSTORE_SEH%"=="0" (echo appxstore_shellexperiencehost=1 >> "%PROBE_OUT%") else (echo appxstore_shellexperiencehost=0 >> "%PROBE_OUT%")
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.StartMenuExperienceHost" >nul
+set "APPXSTORE_SMEH=%ERRORLEVEL%"
+if "%APPXSTORE_SMEH%"=="0" (echo appxstore_startmenuexperiencehost=1 >> "%PROBE_OUT%") else (echo appxstore_startmenuexperiencehost=0 >> "%PROBE_OUT%")
 
 rem --- uwp -------------------------------------------------------------------
 echo mark_uwp_appx=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"
@@ -407,6 +418,19 @@ if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
 ) else (
     echo uwp_appx=0 >> "%PROBE_OUT%"
 )
+rem Run 45 (UWP frame host): the frame host chain is now extracted into
+rem the image; record whether the files are actually in the running
+rem image (file presence, not process presence — the appframehost= key
+rem above says whether the process is running). The build-time assert
+rem already guarantees the files are in boot.wim; these keys confirm
+rem %SystemRoot% resolves to the same files at runtime. The StateRepository
+rem service DLL is checked by its on-disk name Windows.StateRepository.dll
+rem (the hive spells it windows.staterepository.dll — same file, NTFS names
+rem are case-insensitive, and it is already extracted by 20-explorer.txt).
+rem No mark_ markers: the three appxstore queries below already proved this
+rem pattern does not hang, so no freeze bracketing is needed here.
+if exist "%SystemRoot%\System32\ApplicationFrameHost.exe" if exist "%SystemRoot%\System32\RuntimeBroker.exe" if exist "%SystemRoot%\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe" if exist "%SystemRoot%\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe" (echo framehost_files=1 >> "%PROBE_OUT%") else (echo framehost_files=0 >> "%PROBE_OUT%")
+if exist "%SystemRoot%\System32\Windows.StateRepository.dll" if exist "%SystemRoot%\System32\AppReadiness.dll" (echo framehost_dlls=1 >> "%PROBE_OUT%") else (echo framehost_dlls=0 >> "%PROBE_OUT%")
 
 rem Keys are spelled out rather than built from a suffix so the CI-side
 rem assertion table can be grepped against this file literally.
@@ -455,6 +479,15 @@ tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer_after_media=0 >> "%PROBE_LOCAL%" & echo explorer_after_media=0 >> "%PROBE_OUT%") else (echo explorer_after_media=1 >> "%PROBE_LOCAL%" & echo explorer_after_media=1 >> "%PROBE_OUT%")
 call :probe_explorer_cpu media
 endlocal
+rem Run 45 (UWP frame host): the three launches above may have started the
+rem deployment services on demand (AppXSVC is manual-start with trigger
+rem info; StateRepository is automatic but may have failed to start at
+rem boot). Re-check their states after the launches, so a launch that
+rem worked is not misread as "the services never started". The _after
+rem keys are diagnostic only — no stage table asserts them.
+call :probe_svc AppXSVC appxsvc_after
+call :probe_svc StateRepository staterepo_after
+call :probe_svc AppReadiness appreadiness_after
 
 rem --- payload ---------------------------------------------------------------
 echo mark_payload=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_payload=%TIME: =0% >> "%PROBE_OUT%"
@@ -694,18 +727,24 @@ rem %1 = key suffix: shell, preuwp, calculator, photos, media, end
 rem (run 44428428849). Records explorer's CPU time at this point in the
 rem run, so the segments can be compared: a time that never advances
 rem means the process stopped doing work. tasklist /v /fo list prints
-rem one "CPU Time:  0:00:13" line per process; tokens=3 is the time
-rem itself (the table form cannot be parsed — its memory column holds
-rem "31,048 K", whose comma breaks token counting). No /nh: it is only
-rem valid with /fo table or csv (Microsoft docs), and with /fo list it
-rem makes tasklist fail — the error was swallowed by 2>nul, so every
-rem key came back missing in run 44441708839. The list form has no
-rem column headers to suppress. Missing when the process is gone or the
-rem line never appears. The for /f runs in a child cmd, so a missing
-rem tasklist there cannot kill this batch; in the image tasklist is
-rem shipped (10-cmdpe.txt).
+rem one CPU-time line per process ("CPU Time:  0:00:13" in en-US,
+rem "CPU 时间:  0:00:13" in zh-CN); tokens=3 is the time itself (the
+rem table form cannot be parsed — its memory column holds "31,048 K",
+rem whose comma breaks token counting). The match is on "CPU" alone,
+rem not "CPU Time": run 44459251306 proved the zh-CN image prints
+rem "CPU 时间" (tasklist file header bytes CPU \xca\xb1\xbc\xe4), so
+rem "CPU Time" never matches there and every key came back missing.
+rem "CPU" is safe as the match: it is the first token of that line in
+rem both languages, and no other list-form line contains it. No /nh:
+rem it is only valid with /fo table or csv (Microsoft docs), and with
+rem /fo list it makes tasklist fail — the error was swallowed by 2>nul,
+rem so every key came back missing in run 44441708839. The list form
+rem has no column headers to suppress. Missing when the process is gone
+rem or the line never appears. The for /f runs in a child cmd, so a
+rem missing tasklist there cannot kill this batch; in the image
+rem tasklist is shipped (10-cmdpe.txt).
 set "EXPLORER_CPU="
-for /f "tokens=3" %%C in ('tasklist /v /fo list /fi "imagename eq explorer.exe" 2^>nul ^| find /i "CPU Time"') do set "EXPLORER_CPU=%%C"
+for /f "tokens=3" %%C in ('tasklist /v /fo list /fi "imagename eq explorer.exe" 2^>nul ^| find /i "CPU"') do set "EXPLORER_CPU=%%C"
 if defined EXPLORER_CPU (echo explorer_cpu_%~1=%EXPLORER_CPU% >> "%PROBE_LOCAL%" & echo explorer_cpu_%~1=%EXPLORER_CPU% >> "%PROBE_OUT%") else (echo explorer_cpu_%~1=missing >> "%PROBE_LOCAL%" & echo explorer_cpu_%~1=missing >> "%PROBE_OUT%")
 exit /b 0
 

@@ -1,0 +1,24 @@
+# UWP frame host chain (run 45): the processes that display UWP app
+# windows, the two SystemApps packages that provide the shell hosts, and
+# the AppReadiness service DLL the AppReadiness service needs to start.
+# // reuse-check: every entry verified against the real 25H2 install.wim
+# (wimlib dir listing in ~/workspace/micpe-m7fix-wimlib/wim-root-list.txt)
+# and the install.wim SOFTWARE hive InboxApplications Path values
+# (hives/SOFTWARE).
+# NOT listed here, deliberately: windows.staterepository.dll, the
+# StateRepository service's ServiceDll. It is the same file as
+# Windows.StateRepository.dll — NTFS names are case-insensitive, and the
+# image contains exactly one file of that name (canonical casing
+# Windows.StateRepository.dll), already extracted by 20-explorer.txt's
+# Windows.StateRepository* pattern. An earlier reading of the hive took
+# the lowercase spelling for a second, missing file; the wimlib dir
+# listing refutes that (no windows.staterepository.dll anywhere in the
+# image, including WinSxS — the amd64_windows-staterepository component
+# carries only the Windows.StateRepository*.dll family). So the
+# StateRepository service's failure to start is NOT a missing ServiceDll;
+# the probe's post-launch service states will say more.
+Windows\System32\ApplicationFrameHost.exe
+Windows\System32\RuntimeBroker.exe
+Windows\System32\AppReadiness.dll
+Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy*
+Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy*
