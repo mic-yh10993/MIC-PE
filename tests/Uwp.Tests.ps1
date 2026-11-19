@@ -20,6 +20,9 @@ Describe 'Assert-UwpReady' {
         $msg | Should -Match 'AppXDeploymentClient'
         $msg | Should -Match 'Windows.UI.Xaml'
         $msg | Should -Match 'Windows.StateRepository'
+        $msg | Should -Match 'ApplicationFrameHost'
+        $msg | Should -Match 'AppReadiness'
+        $msg | Should -Match 'ShellExperienceHost'
     }
 
     It 'passes when all artifacts exist' {
@@ -30,6 +33,14 @@ Describe 'Assert-UwpReady' {
         1..4 | ForEach-Object {
             Set-Content -LiteralPath "$m/Windows/System32/Windows.StateRepository$_.dll" -Value 'x'
         }
+        # Run 45 (UWP frame host): the frame host chain.
+        Set-Content -LiteralPath "$m/Windows/System32/ApplicationFrameHost.exe" -Value 'x'
+        Set-Content -LiteralPath "$m/Windows/System32/RuntimeBroker.exe" -Value 'x'
+        Set-Content -LiteralPath "$m/Windows/System32/AppReadiness.dll" -Value 'x'
+        New-Item -ItemType Directory -Force -Path "$m/Windows/SystemApps/ShellExperienceHost_cw5n1h2txyewy" | Out-Null
+        Set-Content -LiteralPath "$m/Windows/SystemApps/ShellExperienceHost_cw5n1h2txyewy/ShellExperienceHost.exe" -Value 'x'
+        New-Item -ItemType Directory -Force -Path "$m/Windows/SystemApps/Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy" | Out-Null
+        Set-Content -LiteralPath "$m/Windows/SystemApps/Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy/StartMenuExperienceHost.exe" -Value 'x'
         New-Item -ItemType Directory -Force -Path "$m/ProgramData/Microsoft/Windows/AppRepository" | Out-Null
         foreach ($name in Get-UwpDefaults) {
             New-Item -ItemType Directory -Force -Path "$m/Program Files/WindowsApps/${name}_1.0.0.0_x64__8wekyb3d8bbwe" | Out-Null
@@ -46,6 +57,15 @@ Describe 'Assert-UwpReady' {
         1..4 | ForEach-Object {
             Set-Content -LiteralPath "$m/Windows/System32/Windows.StateRepository$_.dll" -Value 'x'
         }
+        # Run 45: the frame host files exist here, so the only missing
+        # artifact is the Calculator package directory.
+        Set-Content -LiteralPath "$m/Windows/System32/ApplicationFrameHost.exe" -Value 'x'
+        Set-Content -LiteralPath "$m/Windows/System32/RuntimeBroker.exe" -Value 'x'
+        Set-Content -LiteralPath "$m/Windows/System32/AppReadiness.dll" -Value 'x'
+        New-Item -ItemType Directory -Force -Path "$m/Windows/SystemApps/ShellExperienceHost_cw5n1h2txyewy" | Out-Null
+        Set-Content -LiteralPath "$m/Windows/SystemApps/ShellExperienceHost_cw5n1h2txyewy/ShellExperienceHost.exe" -Value 'x'
+        New-Item -ItemType Directory -Force -Path "$m/Windows/SystemApps/Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy" | Out-Null
+        Set-Content -LiteralPath "$m/Windows/SystemApps/Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy/StartMenuExperienceHost.exe" -Value 'x'
         New-Item -ItemType Directory -Force -Path "$m/ProgramData/Microsoft/Windows/AppRepository" | Out-Null
         New-Item -ItemType Directory -Force -Path "$m/Program Files/WindowsApps/Microsoft.Windows.Photos_1.0.0.0_x64__8wekyb3d8bbwe" | Out-Null
         New-Item -ItemType Directory -Force -Path "$m/Program Files/WindowsApps/Microsoft.ZuneMusic_1.0.0.0_x64__8wekyb3d8bbwe" | Out-Null
@@ -97,6 +117,20 @@ Describe 'Install-AppxFramework preconditions' {
     }
 }
 
+Describe 'Install-FrameHost preconditions' {
+    It 'throws when the install.wim is missing' {
+        { Install-FrameHost -MountDir $script:TempRoot `
+                -InstallWim (Join-Path $script:TempRoot 'absent.wim') `
+                -RepoRoot $script:RepoRoot } | Should -Throw '*not found*'
+    }
+
+    It 'throws when the mount directory is missing' {
+        { Install-FrameHost -MountDir (Join-Path $script:TempRoot 'micpe-absent-mount') `
+                -InstallWim (Join-Path $script:TempRoot 'absent.wim') `
+                -RepoRoot $script:RepoRoot } | Should -Throw '*not found*'
+    }
+}
+
 Describe 'Install-UwpApps preconditions' {
     It 'throws when the install.wim is missing' {
         { Install-UwpApps -MountDir $script:TempRoot `
@@ -125,14 +159,34 @@ Describe 'UWP registry patch' {
     It 'registers the StateRepository service verbatim from the 25H2 install.wim (automatic start)' {
         # Generated from the real install.wim SYSTEM hive; Start=2, with
         # ImagePath / parameters / Security. The M4 Start=3 shell is gone.
+        # AppReadiness (run 45) also carries a Start value, but 3, not 2:
+        # exactly one of each, so a future edit cannot silently flip
+        # StateRepository to manual or AppReadiness to automatic.
         $script:reg40 | Should -Match 'Services\\StateRepository\]'
         $script:reg40.Contains('"Start"=dword:00000002') | Should -BeTrue
-        $script:reg40.Contains('"Start"=dword:00000003') | Should -BeFalse
+        ([regex]::Matches($script:reg40, '"Start"=dword:00000002')).Count | Should -Be 1
+        ([regex]::Matches($script:reg40, '"Start"=dword:00000003')).Count | Should -Be 1
         $script:reg40 | Should -Match 'Services\\StateRepository\\parameters\]'
         $script:reg40 | Should -Match 'Services\\StateRepository\\Security\]'
         $script:reg40 | Should -Match '"ImagePath"=hex\(2\)'
         $script:reg40 | Should -Match '"ServiceDll"=hex\(2\)'
         $script:reg40 | Should -Match '"FailureActions"=hex:'
+    }
+
+    It 'registers the AppReadiness service verbatim from the 25H2 install.wim (manual start, run 45)' {
+        # Generated from the real install.wim SYSTEM hive with the
+        # generalised gen-service-reg.py; its key is MISSING from the
+        # boot.wim SYSTEM hive, so the probe reported appreadiness=MISSING.
+        # Start=3 (manual, trigger start); Parameters holds ServiceDLL
+        # (capital DLL, unlike StateRepository's ServiceDll); there is no
+        # Security subkey and no FailureActions in the real hive.
+        $script:reg40 | Should -Match 'Services\\AppReadiness\]'
+        $script:reg40 | Should -Match 'Services\\AppReadiness\\Parameters\]'
+        $script:reg40 | Should -Not -Match 'Services\\AppReadiness\\Security\]'
+        $script:reg40 | Should -Match '"ServiceDLL"=hex\(2\)'
+        $arBlock = $script:reg40.Substring($script:reg40.IndexOf('[HKEY_LOCAL_MACHINE\PE-SYS\ControlSet001\Services\AppReadiness]'))
+        $arBlock.Contains('"Start"=dword:00000003') | Should -BeTrue
+        $arBlock.Contains('"FailureActions"') | Should -BeFalse
     }
 }
 
@@ -196,5 +250,14 @@ Describe 'UWP filelist entries' {
         $all = Read-Whitelist -Path (Join-Path $script:RepoRoot 'src/filelists/50-uwp.txt')
         $all | Should -Contain 'Windows\System32\AppXDeploymentClient.dll'
         $all | Should -Contain 'Windows\System32\Windows.UI.Xaml.dll'
+    }
+
+    It '60-framehost.txt carries the frame host chain (run 45)' {
+        $all = Read-Whitelist -Path (Join-Path $script:RepoRoot 'src/filelists/60-framehost.txt')
+        $all | Should -Contain 'Windows\System32\ApplicationFrameHost.exe'
+        $all | Should -Contain 'Windows\System32\RuntimeBroker.exe'
+        $all | Should -Contain 'Windows\System32\AppReadiness.dll'
+        $all | Should -Contain 'Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy*'
+        $all | Should -Contain 'Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy*'
     }
 }

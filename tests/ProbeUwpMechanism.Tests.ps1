@@ -488,6 +488,30 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         $text | Should -Match 'tasklist /v' -Because 'only the verbose dump shows window titles'
     }
 
+    It 'records the frame host files and host registrations, and re-checks services after the launches (run 45)' {
+        # Run 45: the frame host chain is extracted into the image, so the
+        # probe records whether the files are in the running image (not
+        # just whether the processes run — that is appframehost= and
+        # friends above), whether the SOFTWARE hive swap carried the two
+        # SystemApps hosts' InboxApplications entries, and whether the
+        # launches started the deployment services on demand.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'framehost_files=' -Because 'the frame host binaries and SystemApps hosts are recorded'
+        $text | Should -Match 'framehost_dlls=' -Because 'the service DLLs are recorded'
+        $text | Should -Match 'ApplicationFrameHost\.exe' -Because 'the frame host file check names the binary'
+        $text | Should -Match 'Windows\.StateRepository\.dll' -Because 'the StateRepository service DLL is checked (on-disk name Windows.StateRepository.dll)'
+        $text | Should -Match 'AppReadiness\.dll' -Because 'the AppReadiness ServiceDll is checked'
+        $text | Should -Match 'ShellExperienceHost_cw5n1h2txyewy' -Because 'the shell host directory name is checked'
+        $text | Should -Match 'appxstore_shellexperiencehost=' -Because 'the shell host registration is recorded'
+        $text | Should -Match 'appxstore_startmenuexperiencehost=' -Because 'the Start menu host registration is recorded'
+        $text | Should -Match 'call :probe_svc AppXSVC appxsvc_after' -Because 'the AppXSVC state after the launches is recorded'
+        $text | Should -Match 'call :probe_svc StateRepository staterepo_after' -Because 'the StateRepository state after the launches is recorded'
+        $text | Should -Match 'call :probe_svc AppReadiness appreadiness_after' -Because 'the AppReadiness state after the launches is recorded'
+        $text.IndexOf('framehost_files=') | Should -BeGreaterThan $text.IndexOf('mark_uwp_appx') -Because 'the file checks run in the UWP section'
+        $text.IndexOf('call :probe_svc AppXSVC appxsvc_after') | Should -BeGreaterThan $text.IndexOf('call :probe_explorer_cpu media') -Because 'the after-states are re-checked after the Media launch'
+        $text.IndexOf('call :probe_svc AppXSVC appxsvc_after') | Should -BeLessThan $text.IndexOf('mark_payload') -Because 'the after-states are re-checked before the payload section'
+    }
+
     It 'records the frame-host and shell-host presence the desktop depends on (run 44349189039)' {
         # ApplicationFrameHost.exe displays every UWP app window, and
         # ShellExperienceHost / StartMenuExperienceHost host the modern
@@ -637,11 +661,16 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # Run 44441708839: the parse itself was broken — /nh is only
         # valid with /fo table or csv, so with /fo list tasklist failed
         # and every key came back missing. The exact line below pins
-        # the fix: no /nh, the list form's CPU Time line read with
+        # the fix: no /nh, the list form's CPU-time line read with
         # tokens=3. The preuwp call brackets the network/ime/diagnostics
         # gap between the shell call and the first snapshot.
+        # Run 44459251306: the match is on "CPU" alone, not "CPU Time" —
+        # the zh-CN image prints "CPU 时间", so "CPU Time" never matched
+        # there and every key came back missing again. "CPU" is the first
+        # token of that line in both languages, and no other list-form
+        # line contains it, so tokens=3 still yields the time.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Match 'tasklist /v /fo list /fi "imagename eq explorer\.exe" 2\^>nul \^\| find /i "CPU Time"' -Because 'the list form prints one CPU Time line per process, and /nh must not be there (run 44441708839)'
+        $text | Should -Match 'tasklist /v /fo list /fi "imagename eq explorer\.exe" 2\^>nul \^\| find /i "CPU"' -Because 'the list form prints one CPU-time line per process, the match must be on "CPU" alone for zh-CN (run 44459251306), and /nh must not be there (run 44441708839)'
         $text | Should -Match 'echo explorer_cpu_%~1=%EXPLORER_CPU%' -Because 'the time is recorded under the segment key'
         $text | Should -Match 'echo explorer_cpu_%~1=missing' -Because 'a missing process is recorded, not skipped'
         $text | Should -Match 'call :probe_explorer_cpu shell' -Because 'the shell check records the first CPU time'
@@ -665,7 +694,7 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # /nh absence, not pass vacuously.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $mutated = $text.Replace('tasklist /v /fo list /fi "imagename eq explorer.exe" 2^>nul', 'tasklist /v /fo list /fi "imagename eq explorer.exe" /nh 2>nul')
-        $mutated | Should -Not -Match 'tasklist /v /fo list /fi "imagename eq explorer\.exe" 2\^>nul \^\| find /i "CPU Time"'
+        $mutated | Should -Not -Match 'tasklist /v /fo list /fi "imagename eq explorer\.exe" 2\^>nul \^\| find /i "CPU"'
     }
 
     It 'checks explorer liveness mid-poll to split the death window (run 44428428849)' {
@@ -827,7 +856,12 @@ Describe 'explorer CPU time (run 44428428849)' {
     It 'C1: the CPU-time parse extracts a time from tasklist /v /fo list' -Skip:(-not $IsWindows) {
         # The table form cannot be parsed — its memory column holds
         # "31,048 K", whose comma breaks token counting — so the probe
-        # reads the list form's "CPU Time:  0:00:13" line with tokens=3.
+        # reads the list form's CPU-time line ("CPU Time:  0:00:13" in
+        # en-US, "CPU 时间:  0:00:13" in zh-CN) with tokens=3. The match
+        # is on "CPU" alone: run 44459251306 proved "CPU Time" never
+        # matches on the zh-CN image. "CPU" is the first token of that
+        # line in both languages, and no other list-form line contains
+        # it, so the same snippet parses both.
         # Run 44441708839: the old snippet carried /nh, which is only
         # valid with /fo table or csv — with /fo list tasklist fails,
         # the error is swallowed by 2>nul, and every key came back
@@ -863,7 +897,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                ('for /f "tokens=3" %%C in (''{0} /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
+                ('for /f "tokens=3" %%C in (''{0} /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
@@ -932,7 +966,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
                 'set "EXPLORER_CPU="',
-                ('for /f "tokens=3" %%C in (''{0} /v /fo list /fi "imagename eq cmd.exe" /nh 2^>nul ^| find /i "CPU Time"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
+                ('for /f "tokens=3" %%C in (''{0} /v /fo list /fi "imagename eq cmd.exe" /nh 2^>nul ^| find /i "CPU"'') do set "EXPLORER_CPU=%%C"' -f $script:TasklistExe),
                 ('if defined EXPLORER_CPU (echo explorer_cpu=%EXPLORER_CPU% >> "{0}") else (echo explorer_cpu=missing >> "{0}")' -f $outFile)
             )
             $result = & $script:InvokeCmdTimed $bat $workDir
