@@ -198,6 +198,107 @@ function Invoke-RegImportAsSystem {
     }
 }
 
+function Invoke-RegImportPrivileged {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RegFile,
+
+        [Parameter(Mandatory = $true)]
+        [string] $HiveKey,
+
+        [int] $TimeoutSeconds = 120
+    )
+
+    # Writes a .reg patch into a mounted hive with backup/restore
+    # privileges, through a one-shot scheduled task as SYSTEM.
+    #
+    # Run 51: the FeatureManagement group keys (Overrides\0, \15, \9)
+    # give SYSTEM only KEY_READ (0x00020019), so even the SYSTEM import
+    # above dies with "Error accessing the registry" on them (eval card
+    # §37.4). SYSTEM does hold SeBackupPrivilege and SeRestorePrivilege,
+    # so the import runs the privileged writer script
+    # (Invoke-PrivilegedRegImport.ps1) instead of reg.exe: it enables
+    # both privileges and opens the keys with REG_OPTION_BACKUP_RESTORE,
+    # which skips the key DACL and checks only the privilege. The
+    # shipped image's DACLs are not changed (the new subkey inherits the
+    # group key's stock read-only DACL, like the stock feature entries),
+    # and the write still happens at CI build time while the hive is
+    # mounted (user decision 2026-11-17 23:43).
+    Assert-PathExists -Path $RegFile -Label 'Registry patch'
+
+    if ($null -eq (Get-Command -Name 'schtasks.exe' -ErrorAction SilentlyContinue)) {
+        throw [System.InvalidOperationException]::new(
+            'schtasks.exe is not available: a privileged registry import needs Windows (one-shot scheduled task as SYSTEM)')
+    }
+
+    $pwsh = (Get-Command -Name 'pwsh.exe' -ErrorAction SilentlyContinue).Source
+    if (-not $pwsh) {
+        throw [System.InvalidOperationException]::new(
+            'pwsh.exe is not available: the privileged registry import runs a PowerShell script as SYSTEM')
+    }
+
+    $script = Join-Path $PSScriptRoot 'Invoke-PrivilegedRegImport.ps1'
+    Assert-PathExists -Path $script -Label 'Privileged registry import script'
+
+    $taskName = "MICPE-PrivRegImport-$([guid]::NewGuid().ToString('N'))"
+    $workDir = Join-Path $env:ProgramData $taskName
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    $wrapper = Join-Path $workDir 'import.cmd'
+    $codeFile = Join-Path $workDir 'exitcode.txt'
+    $logFile = Join-Path $workDir 'import.log'
+    try {
+        @(
+            '@echo off',
+            "`"$pwsh`" -NoProfile -ExecutionPolicy Bypass -File `"$script`" -RegFile `"$RegFile`" -HiveKey `"$HiveKey`" > `"$logFile`" 2>&1",
+            "echo %ERRORLEVEL% > `"$codeFile`""
+        ) | Set-Content -LiteralPath $wrapper -Encoding ascii
+
+        # A /sc once task needs a start time; use two minutes in the
+        # future (local time, same clock schtasks reads) and trigger it
+        # immediately with /run -- the schedule itself never fires.
+        $startAt = (Get-Date).AddMinutes(2).ToString('HH:mm')
+        $create = & schtasks.exe /create /tn $taskName /tr "`"$wrapper`"" /sc once /st $startAt /ru SYSTEM /rl highest /f 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "failed to create privileged import task $taskName : $($create.Trim())")
+        }
+
+        $run = & schtasks.exe /run /tn $taskName 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "failed to start privileged import task $taskName : $($run.Trim())")
+        }
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while (-not (Test-Path -LiteralPath $codeFile)) {
+            if ((Get-Date) -gt $deadline) {
+                throw [System.InvalidOperationException]::new(
+                    "privileged registry import did not finish within $TimeoutSeconds seconds for $RegFile (task $taskName)")
+            }
+            Start-Sleep -Seconds 1
+        }
+        Start-Sleep -Milliseconds 200
+        $code = (Get-Content -LiteralPath $codeFile -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($null -eq $code) { $code = '' }
+        $code = "$code".Trim()
+        if ($code -ne '0') {
+            $detail = '(the privileged import printed nothing)'
+            if (Test-Path -LiteralPath $logFile) {
+                $logged = (Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue)
+                if ($logged) { $detail = "$logged".Trim() }
+            }
+            throw [System.InvalidOperationException]::new(
+                "privileged reg import failed with exit code $code for $RegFile : $detail")
+        }
+        Write-SubStep "imported $(Split-Path -Leaf $RegFile) as SYSTEM (backup/restore)"
+    }
+    finally {
+        $null = & schtasks.exe /delete /tn $taskName /f 2>&1
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function ConvertFrom-RegQueryOutput {
     [CmdletBinding()]
     param(
@@ -305,11 +406,20 @@ function Invoke-RegistryScript {
         # 44040699722). Those files are imported as SYSTEM through a
         # one-shot scheduled task (Invoke-RegImportAsSystem) instead of a
         # plain reg import; everything else keeps the admin path.
-        [string[]] $SystemRegFiles = @()
+        [string[]] $SystemRegFiles = @(),
+
+        # Leaf names of .reg files whose keys even SYSTEM cannot write
+        # (FeatureManagement group keys give SYSTEM only KEY_READ, run 51).
+        # Those files are written with backup/restore privileges
+        # (Invoke-RegImportPrivileged) instead of a reg import; a file
+        # belongs in exactly one of SystemRegFiles and PrivilegedRegFiles.
+        [string[]] $PrivilegedRegFiles = @()
     )
 
     $configDir = Join-Path $MountDir 'Windows/System32/config'
     Assert-PathExists -Path $configDir -Label 'config directory'
+
+    $systemHiveKey = ($script:HiveMap | Where-Object { $_.File -eq 'SYSTEM' }).Key
 
     $loaded = [System.Collections.Generic.List[string]]::new()
     try {
@@ -331,7 +441,10 @@ function Invoke-RegistryScript {
                 Write-Warn "registry patch not found, skipping: $regFile"
                 continue
             }
-            if ($SystemRegFiles -contains (Split-Path -Leaf $regFile)) {
+            if ($PrivilegedRegFiles -contains (Split-Path -Leaf $regFile)) {
+                Invoke-RegImportPrivileged -RegFile $regFile -HiveKey $systemHiveKey
+            }
+            elseif ($SystemRegFiles -contains (Split-Path -Leaf $regFile)) {
                 Invoke-RegImportAsSystem -RegFile $regFile
             }
             else {

@@ -356,14 +356,18 @@ function Invoke-UwpStep {
         # landed): the "admin-writable" assumption was never verified
         # against the key's DACL, so SYSTEM is used rather than
         # risking another silent miss.
-        # 70-feature-42537950.reg rides the SYSTEM import too: it forces
-        # the DisableWin10Taskbar feature (42537950) off — CTray::Init
-        # failfasts while it is enabled (run 49) — and the Overrides key
-        # DACL could not be verified offline, so SYSTEM is used rather
-        # than risking an access-denied on the plain path. Run 51: the
-        # override is written grouped (Overrides\0, \15 and \9) — the
-        # flat entry run 50 wrote was ignored by the loader (§36.5.1).
-        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '60-werdumps.reg', '70-feature-42537950.reg')
+        # 70-feature-42537950.reg rides the privileged write, not the
+        # SYSTEM import: run 51 proved even SYSTEM cannot write the
+        # FeatureManagement group keys (Overrides\0, \15, \9 give SYSTEM
+        # only KEY_READ, 0x00020019 — no SET_VALUE, no CREATE_SUB_KEY;
+        # eval card §37.4). The privileged writer enables
+        # SeBackup/SeRestorePrivilege and opens the keys with
+        # REG_OPTION_BACKUP_RESTORE, which skips the DACL without
+        # changing it; the write still happens at CI build time while
+        # the hive is mounted. Run 51: the override is written grouped
+        # (Overrides\0, \15 and \9) — the flat entry run 50 wrote was
+        # ignored by the loader (§36.5.1).
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '60-werdumps.reg') -PrivilegedRegFiles @('70-feature-42537950.reg')
         Assert-AppxPolicy -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
         Assert-UwpReady -MountDir $paths.Mount
