@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 rem ---------------------------------------------------------------------------
 rem MICPE in-PE self check.
 rem
@@ -414,17 +414,17 @@ echo mark_appxstore_calc_query=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxsto
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.WindowsCalculator" >nul
 set "APPXSTORE_CALC=%ERRORLEVEL%"
 echo mark_appxstore_calc_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_calc_after=%TIME: =0% >> "%PROBE_OUT%"
-if "%APPXSTORE_CALC%"=="0" (echo appxstore_calc=1 >> "%PROBE_OUT%") else (echo appxstore_calc=0 >> "%PROBE_OUT%")
+if "%APPXSTORE_CALC%"=="0" (echo appxstore_calc=1 >> "%PROBE_LOCAL%" & echo appxstore_calc=1 >> "%PROBE_OUT%") else (echo appxstore_calc=0 >> "%PROBE_LOCAL%" & echo appxstore_calc=0 >> "%PROBE_OUT%")
 echo mark_appxstore_photos_query=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_photos_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.Photos" >nul
 set "APPXSTORE_PHOTOS=%ERRORLEVEL%"
 echo mark_appxstore_photos_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_photos_after=%TIME: =0% >> "%PROBE_OUT%"
-if "%APPXSTORE_PHOTOS%"=="0" (echo appxstore_photos=1 >> "%PROBE_OUT%") else (echo appxstore_photos=0 >> "%PROBE_OUT%")
+if "%APPXSTORE_PHOTOS%"=="0" (echo appxstore_photos=1 >> "%PROBE_LOCAL%" & echo appxstore_photos=1 >> "%PROBE_OUT%") else (echo appxstore_photos=0 >> "%PROBE_LOCAL%" & echo appxstore_photos=0 >> "%PROBE_OUT%")
 echo mark_appxstore_media_query=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_media_query=%TIME: =0% >> "%PROBE_OUT%"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.ZuneMusic" >nul
 set "APPXSTORE_MEDIA=%ERRORLEVEL%"
 echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_appxstore_media_after=%TIME: =0% >> "%PROBE_OUT%"
-if "%APPXSTORE_MEDIA%"=="0" (echo appxstore_media=1 >> "%PROBE_OUT%") else (echo appxstore_media=0 >> "%PROBE_OUT%")
+if "%APPXSTORE_MEDIA%"=="0" (echo appxstore_media=1 >> "%PROBE_LOCAL%" & echo appxstore_media=1 >> "%PROBE_OUT%") else (echo appxstore_media=0 >> "%PROBE_LOCAL%" & echo appxstore_media=0 >> "%PROBE_OUT%")
 rem Run 45 (UWP frame host): the two SystemApps hosts are registered in
 rem AppxAllUserStore\InboxApplications by the SOFTWARE hive swap
 rem (Install-ExplorerShell), not by a build-time write — these queries
@@ -432,10 +432,10 @@ rem confirm the swap carried them. No mark_ markers: the three queries
 rem above already proved this pattern does not hang.
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.ShellExperienceHost" >nul
 set "APPXSTORE_SEH=%ERRORLEVEL%"
-if "%APPXSTORE_SEH%"=="0" (echo appxstore_shellexperiencehost=1 >> "%PROBE_OUT%") else (echo appxstore_shellexperiencehost=0 >> "%PROBE_OUT%")
+if "%APPXSTORE_SEH%"=="0" (echo appxstore_shellexperiencehost=1 >> "%PROBE_LOCAL%" & echo appxstore_shellexperiencehost=1 >> "%PROBE_OUT%") else (echo appxstore_shellexperiencehost=0 >> "%PROBE_LOCAL%" & echo appxstore_shellexperiencehost=0 >> "%PROBE_OUT%")
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s 2>nul | find /i "Microsoft.Windows.StartMenuExperienceHost" >nul
 set "APPXSTORE_SMEH=%ERRORLEVEL%"
-if "%APPXSTORE_SMEH%"=="0" (echo appxstore_startmenuexperiencehost=1 >> "%PROBE_OUT%") else (echo appxstore_startmenuexperiencehost=0 >> "%PROBE_OUT%")
+if "%APPXSTORE_SMEH%"=="0" (echo appxstore_startmenuexperiencehost=1 >> "%PROBE_LOCAL%" & echo appxstore_startmenuexperiencehost=1 >> "%PROBE_OUT%") else (echo appxstore_startmenuexperiencehost=0 >> "%PROBE_LOCAL%" & echo appxstore_startmenuexperiencehost=0 >> "%PROBE_OUT%")
 rem Run 46 (explorer breakpoint, §31.9 #3): in run 45 explorer died
 rem during the diagnostics — last alive evidence the second tasklist
 rem snapshot, first dead evidence the Calculator guard — so the death
@@ -446,6 +446,16 @@ tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer_mid_diag=0 >> "%PROBE_OUT%") else (echo explorer_mid_diag=1 >> "%PROBE_OUT%")
 call :probe_explorer_cpu diag
 
+
+rem Run 47 (explorer breakpoint, §32.12 #1): the run-46 WER/evtx/dump
+rem capture lived in the end snapshot, so the guest wedging in the
+rem Media poll took all of it — the breakpoint evidence stayed blank.
+rem Take the same snapshot here, in the diagnostics, so the evidence
+rem survives even if the probe dies in the launches. The end snapshot
+rem keeps its own unsuffixed copy; these early ones carry the suffix.
+call :probe_wer_snapshot diag
+call :probe_sync_local
+
 rem --- uwp -------------------------------------------------------------------
 echo mark_uwp_appx=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_appx=%TIME: =0% >> "%PROBE_OUT%"
 if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
@@ -453,6 +463,59 @@ if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" (
 ) else (
     echo uwp_appx=0 >> "%PROBE_OUT%"
 )
+
+rem --- activation (run 47) ---------------------------------------------------
+rem Sits in the uwp section opening, right after the appx check and
+rem still before any launch — NOT in the diagnostics above: the
+rem activation_files line names AppXDeploymentClient.dll, and a
+rem marker test pins mark_uwp_appx before the first occurrence of
+rem that name, so the check cannot sit above the marker.
+rem Run 46: the package is in the store (appxstore_media=1) but the
+rem shell namespace cannot resolve its AUMID — Media's launch died
+rem with a "Windows cannot find the file" dialog. These checks say
+rem which link of the activation chain is broken, before the launches:
+rem the shell:AppsFolder class registration, the per-app AUMID entries
+rem in AppxAllUserStore (a package entry without its Applications
+rem subkey cannot resolve), the activation DLLs, the deployment
+rem services' config, and the volume table (mountvol lists volumes
+rem even without a drive letter — the mirror volume question from
+rem run 46: QEMU attached it, the guest never lettered it).
+rem The AUMID lookups run with delayed expansion off (the bang in the
+rem AppUserModelId would be stripped otherwise, U3); the result is
+rem echoed inside the block so endlocal cannot lose it.
+reg query "HKLM\SOFTWARE\Classes\CLSID\{4234d49b-0245-4df3-b780-3893943456e1}" >nul 2>&1
+if errorlevel 1 (echo appsfolder_clsid=0 >> "%PROBE_LOCAL%" & echo appsfolder_clsid=0 >> "%PROBE_OUT%") else (echo appsfolder_clsid=1 >> "%PROBE_LOCAL%" & echo appsfolder_clsid=1 >> "%PROBE_OUT%")
+setlocal DisableDelayedExpansion
+rem Dump the store once, then search the file: the AUMID carries a
+rem bang, and a piped `find "...!App"` dies in the pipe child (CI
+rem run 44519361912: the batch died on the reg-query line with exit
+rem 255 and no stderr — the pipe child parses the bang with delayed
+rem expansion on, and the unterminated !...! swallows the rest of
+rem the batch looking for its closing bang). A file search keeps the
+rem bang in the parent, where delayed expansion is off; one dump
+rem also replaces three full-store enumerations.
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore" /s > "%SystemDrive%\micpe-aumid.tmp" 2>nul
+find /i "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" "%SystemDrive%\micpe-aumid.tmp" >nul
+set "AUMID_CALC=%ERRORLEVEL%"
+if "%AUMID_CALC%"=="0" (echo aumid_calc=1 >> "%PROBE_LOCAL%" & echo aumid_calc=1 >> "%PROBE_OUT%") else (echo aumid_calc=0 >> "%PROBE_LOCAL%" & echo aumid_calc=0 >> "%PROBE_OUT%")
+find /i "Microsoft.Windows.Photos_8wekyb3d8bbwe!App" "%SystemDrive%\micpe-aumid.tmp" >nul
+set "AUMID_PHOTOS=%ERRORLEVEL%"
+if "%AUMID_PHOTOS%"=="0" (echo aumid_photos=1 >> "%PROBE_LOCAL%" & echo aumid_photos=1 >> "%PROBE_OUT%") else (echo aumid_photos=0 >> "%PROBE_LOCAL%" & echo aumid_photos=0 >> "%PROBE_OUT%")
+find /i "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic" "%SystemDrive%\micpe-aumid.tmp" >nul
+set "AUMID_MEDIA=%ERRORLEVEL%"
+if "%AUMID_MEDIA%"=="0" (echo aumid_media=1 >> "%PROBE_LOCAL%" & echo aumid_media=1 >> "%PROBE_OUT%") else (echo aumid_media=0 >> "%PROBE_LOCAL%" & echo aumid_media=0 >> "%PROBE_OUT%")
+del "%SystemDrive%\micpe-aumid.tmp" >nul 2>&1
+endlocal
+if exist "%SystemRoot%\System32\twinapi.appcore.dll" if exist "%SystemRoot%\System32\Windows.UI.Xaml.dll" if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" if exist "%SystemRoot%\System32\Windows.StateRepository.dll" (echo activation_files=1 >> "%PROBE_LOCAL%" & echo activation_files=1 >> "%PROBE_OUT%") else (echo activation_files=0 >> "%PROBE_LOCAL%" & echo activation_files=0 >> "%PROBE_OUT%")
+echo --- sc qc AppXSVC --- >> "%TASKLIST_OUT%"
+sc qc AppXSVC >> "%TASKLIST_OUT%" 2>&1
+echo --- sc qc StateRepository --- >> "%TASKLIST_OUT%"
+sc qc StateRepository >> "%TASKLIST_OUT%" 2>&1
+echo --- sc qc AppReadiness --- >> "%TASKLIST_OUT%"
+sc qc AppReadiness >> "%TASKLIST_OUT%" 2>&1
+echo --- mountvol --- >> "%TASKLIST_OUT%"
+mountvol >> "%TASKLIST_OUT%" 2>nul
+echo mountvol_dump=1 >> "%PROBE_LOCAL%" & echo mountvol_dump=1 >> "%PROBE_OUT%"
 rem Run 45 (UWP frame host): the frame host chain is now extracted into
 rem the image; record whether the files are actually in the running
 rem image (file presence, not process presence — the appframehost= key
@@ -464,8 +527,8 @@ rem (the hive spells it windows.staterepository.dll — same file, NTFS names
 rem are case-insensitive, and it is already extracted by 20-explorer.txt).
 rem No mark_ markers: the three appxstore queries below already proved this
 rem pattern does not hang, so no freeze bracketing is needed here.
-if exist "%SystemRoot%\System32\ApplicationFrameHost.exe" if exist "%SystemRoot%\System32\RuntimeBroker.exe" if exist "%SystemRoot%\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe" if exist "%SystemRoot%\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe" (echo framehost_files=1 >> "%PROBE_OUT%") else (echo framehost_files=0 >> "%PROBE_OUT%")
-if exist "%SystemRoot%\System32\Windows.StateRepository.dll" if exist "%SystemRoot%\System32\AppReadiness.dll" (echo framehost_dlls=1 >> "%PROBE_OUT%") else (echo framehost_dlls=0 >> "%PROBE_OUT%")
+if exist "%SystemRoot%\System32\ApplicationFrameHost.exe" if exist "%SystemRoot%\System32\RuntimeBroker.exe" if exist "%SystemRoot%\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe" if exist "%SystemRoot%\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe" (echo framehost_files=1 >> "%PROBE_LOCAL%" & echo framehost_files=1 >> "%PROBE_OUT%") else (echo framehost_files=0 >> "%PROBE_LOCAL%" & echo framehost_files=0 >> "%PROBE_OUT%")
+if exist "%SystemRoot%\System32\Windows.StateRepository.dll" if exist "%SystemRoot%\System32\AppReadiness.dll" (echo framehost_dlls=1 >> "%PROBE_LOCAL%" & echo framehost_dlls=1 >> "%PROBE_OUT%") else (echo framehost_dlls=0 >> "%PROBE_LOCAL%" & echo framehost_dlls=0 >> "%PROBE_OUT%")
 
 rem Keys are spelled out rather than built from a suffix so the CI-side
 rem assertion table can be grepped against this file literally.
@@ -490,7 +553,7 @@ rem three calls below; nothing in this section needs delayed expansion.
 setlocal DisableDelayedExpansion
 echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
-if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo uwp_launch_calculator=0 >> "%PROBE_LOCAL%" & echo uwp_launch_calculator=0 >> "%PROBE_OUT%") else (echo uwp_launch_calculator=1 >> "%PROBE_LOCAL%" & echo uwp_launch_calculator=1 >> "%PROBE_OUT%")
 rem Run 44410311576: explorer died inside the run, so the launch after
 rem each poll says whether it was still alive then. The guard of the
 rem NEXT launch only says so one launch later; this check splits the
@@ -502,14 +565,14 @@ call :probe_explorer_cpu calculator
 
 echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
-if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo uwp_launch_photos=0 >> "%PROBE_LOCAL%" & echo uwp_launch_photos=0 >> "%PROBE_OUT%") else (echo uwp_launch_photos=1 >> "%PROBE_LOCAL%" & echo uwp_launch_photos=1 >> "%PROBE_OUT%")
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer_after_photos=0 >> "%PROBE_LOCAL%" & echo explorer_after_photos=0 >> "%PROBE_OUT%") else (echo explorer_after_photos=1 >> "%PROBE_LOCAL%" & echo explorer_after_photos=1 >> "%PROBE_OUT%")
 call :probe_explorer_cpu photos
 
 echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_uwp_launch_media=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_uwp Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
-if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo uwp_launch_media=0 >> "%PROBE_LOCAL%" & echo uwp_launch_media=0 >> "%PROBE_OUT%") else (echo uwp_launch_media=1 >> "%PROBE_LOCAL%" & echo uwp_launch_media=1 >> "%PROBE_OUT%")
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer_after_media=0 >> "%PROBE_LOCAL%" & echo explorer_after_media=0 >> "%PROBE_OUT%") else (echo explorer_after_media=1 >> "%PROBE_LOCAL%" & echo explorer_after_media=1 >> "%PROBE_OUT%")
 call :probe_explorer_cpu media
@@ -523,6 +586,12 @@ rem keys are diagnostic only — no stage table asserts them.
 call :probe_svc AppXSVC appxsvc_after
 call :probe_svc StateRepository staterepo_after
 call :probe_svc AppReadiness appreadiness_after
+
+rem Run 47: second WER/evtx snapshot, after the launches — an
+rem explorer death in the UWP section leaves its report here even if
+rem the probe wedges in the cross-check below.
+call :probe_wer_snapshot uwp
+call :probe_sync_local
 
 rem --- cross-check (run 46) ------------------------------------------------
 rem Run 45's three uwp_launch_*=0 are NOT a cross-validation: all three
@@ -545,22 +614,27 @@ rem Truth checks use the System32 tasklist by full path (C1/C1b): a
 rem bare tasklist is shadowed by the harness copy on the runner,
 rem whose /fi is rejected, so a bare check would always read 0.
 "%SystemRoot%\System32\tasklist.exe" /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
-if errorlevel 1 (echo xcheck_explorer_before=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_before=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo xcheck_explorer_before=0 >> "%PROBE_LOCAL%" & echo xcheck_explorer_before=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_before=1 >> "%PROBE_LOCAL%" & echo xcheck_explorer_before=1 >> "%PROBE_OUT%")
 setlocal DisableDelayedExpansion
 echo mark_xcheck_launch_calculator=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_launch_calculator=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_xcheck CalculatorApp "shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
-if errorlevel 1 (echo xcheck_launch_calculator=0 >> "%PROBE_OUT%") else (echo xcheck_launch_calculator=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo xcheck_launch_calculator=0 >> "%PROBE_LOCAL%" & echo xcheck_launch_calculator=0 >> "%PROBE_OUT%") else (echo xcheck_launch_calculator=1 >> "%PROBE_LOCAL%" & echo xcheck_launch_calculator=1 >> "%PROBE_OUT%")
 echo mark_xcheck_launch_photos=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_launch_photos=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_xcheck Microsoft.Lightbox "shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App"
-if errorlevel 1 (echo xcheck_launch_photos=0 >> "%PROBE_OUT%") else (echo xcheck_launch_photos=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo xcheck_launch_photos=0 >> "%PROBE_LOCAL%" & echo xcheck_launch_photos=0 >> "%PROBE_OUT%") else (echo xcheck_launch_photos=1 >> "%PROBE_LOCAL%" & echo xcheck_launch_photos=1 >> "%PROBE_OUT%")
 echo mark_xcheck_launch_media=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_launch_media=%TIME: =0% >> "%PROBE_OUT%"
 call :probe_xcheck Microsoft.Media.Player "shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"
-if errorlevel 1 (echo xcheck_launch_media=0 >> "%PROBE_OUT%") else (echo xcheck_launch_media=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo xcheck_launch_media=0 >> "%PROBE_LOCAL%" & echo xcheck_launch_media=0 >> "%PROBE_OUT%") else (echo xcheck_launch_media=1 >> "%PROBE_LOCAL%" & echo xcheck_launch_media=1 >> "%PROBE_OUT%")
 endlocal
 "%SystemRoot%\System32\tasklist.exe" /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
-if errorlevel 1 (echo xcheck_explorer_after=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_after=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo xcheck_explorer_after=0 >> "%PROBE_LOCAL%" & echo xcheck_explorer_after=0 >> "%PROBE_OUT%") else (echo xcheck_explorer_after=1 >> "%PROBE_LOCAL%" & echo xcheck_explorer_after=1 >> "%PROBE_OUT%")
 "%SystemRoot%\System32\tasklist.exe" /fi "imagename eq ApplicationFrameHost.exe" /nh 2>nul | find /i "ApplicationFrameHost.exe" >nul
-if errorlevel 1 (echo xcheck_framehost_after=0 >> "%PROBE_OUT%") else (echo xcheck_framehost_after=1 >> "%PROBE_OUT%")
+if errorlevel 1 (echo xcheck_framehost_after=0 >> "%PROBE_LOCAL%" & echo xcheck_framehost_after=0 >> "%PROBE_OUT%") else (echo xcheck_framehost_after=1 >> "%PROBE_LOCAL%" & echo xcheck_framehost_after=1 >> "%PROBE_OUT%")
+
+rem Run 47: third WER/evtx snapshot, after the cross-check — the last
+rem breakpoint evidence before the payload/brand/installer stretch.
+call :probe_wer_snapshot xcheck
+call :probe_sync_local
 
 rem --- payload ---------------------------------------------------------------
 echo mark_payload=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_payload=%TIME: =0% >> "%PROBE_OUT%"
@@ -573,7 +647,7 @@ for %%F in (
 ) do (
     if not exist %%F set "PAYLOAD=0"
 )
-echo payload=%PAYLOAD% >> "%PROBE_OUT%"
+echo payload=%PAYLOAD% >> "%PROBE_LOCAL%" & echo payload=%PAYLOAD% >> "%PROBE_OUT%"
 
 rem --- brand ----------------------------------------------------------------
 echo mark_brand=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_brand=%TIME: =0% >> "%PROBE_OUT%"
@@ -583,7 +657,8 @@ if errorlevel 1 set "BRAND=0"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation" /v SupportURL 2>nul | find /i "space.bilibili.com/1978487514" >nul
 if errorlevel 1 set "BRAND=0"
 if not exist "%SystemRoot%\System32\oemlogo.bmp" set "BRAND=0"
-echo brand=%BRAND% >> "%PROBE_OUT%"
+echo brand=%BRAND% >> "%PROBE_LOCAL%" & echo brand=%BRAND% >> "%PROBE_OUT%"
+call :probe_sync_local
 
 rem --- installer -------------------------------------------------------------
 echo mark_installer=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer=%TIME: =0% >> "%PROBE_OUT%"
@@ -605,7 +680,7 @@ set "MICPE_PROBE_FILE=%PROBE_OUT%"
 if exist "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" (
     pecmd.exe "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" -cli -discoveronly
 ) else (
-    echo installer_scan=0 >> "%PROBE_OUT%"
+    echo installer_scan=0 >> "%PROBE_LOCAL%" & echo installer_scan=0 >> "%PROBE_OUT%"
 )
 echo mark_installer_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_installer_after=%TIME: =0% >> "%PROBE_OUT%"
 
@@ -633,7 +708,7 @@ set "DEPLOY_TARGET="
 for /f "usebackq delims=" %%T in (`powershell.exe -NoProfile -Command "Get-PSDrive -PSProvider FileSystem ^| Where-Object { $_.Free -gt 0 -and $_.Root -ne '%PROBE_DIR%' -and $_.Root -ne 'X:\' -and $_.Root.Substring(0,1) -ne '%DEPLOY_SRC:~0,1%' } ^| Sort-Object Free -Descending ^| Select-Object -First 1 -ExpandProperty Name"`) do set "DEPLOY_TARGET=%%T"
 if not defined DEPLOY_TARGET goto :skip_deploy
 pecmd.exe "%SystemDrive%\Program Files\MICPE\MICPE-Setup\MICPE-Setup.wcs" -cli -deploy "%DEPLOY_SRC%" %DEPLOY_TARGET%
-if exist "%DEPLOY_TARGET%:\EFI\Microsoft\Boot\BCD" echo installer_boot=1 >> "%PROBE_OUT%"
+if exist "%DEPLOY_TARGET%:\EFI\Microsoft\Boot\BCD" echo installer_boot=1 >> "%PROBE_LOCAL%" & echo installer_boot=1 >> "%PROBE_OUT%"
 :skip_deploy
 
 rem Run 44386689307: the deploy section is bracketed the same way as the
@@ -750,6 +825,8 @@ set "DUMP_MEMORY=0"
 if exist "%SystemRoot%\MEMORY.dmp" set "DUMP_MEMORY=1"
 echo dump_memory=%DUMP_MEMORY% >> "%PROBE_OUT%"
 
+rem Run 47: final sync so the share copy holds the end snapshot too.
+call :probe_sync_local
 echo probe_done=1 >> "%PROBE_LOCAL%" & echo probe_done=1 >> "%PROBE_OUT%"
 
 if "%MICPE_HOLD%"=="1" (
@@ -806,7 +883,7 @@ if defined EXPLORER_PID (echo explorer_pid=%EXPLORER_PID% >> "%PROBE_LOCAL%" & e
 set "UWP_PROC=%~1"
 set "UWP_TARGET=%~2"
 
-tasklist /fi "imagename eq %UWP_PROC%.exe" /nh 2>nul | find /i "%UWP_PROC%.exe" >nul
+call :probe_poll_check %UWP_PROC%
 if not errorlevel 1 (
     rem Already running, relaunching would be a no-op.
     exit /b 0
@@ -838,7 +915,7 @@ set "UWP_WAIT=0"
 echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_before=%TIME: =0% >> "%PROBE_OUT%"
 choice /c Y /d Y /t 1 >nul
 echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_wait_after=%TIME: =0% >> "%PROBE_OUT%"
-tasklist /fi "imagename eq %UWP_PROC%.exe" /nh 2>nul | find /i "%UWP_PROC%.exe" >nul
+call :probe_poll_check %UWP_PROC%
 if not errorlevel 1 exit /b 0
 echo mark_uwp_poll_%UWP_PROC%_r%UWP_WAIT%_check_after=%TIME: =0% >> "%PROBE_OUT%"
 rem Run 44428428849: in both death rounds explorer died ~25-30 s after a
@@ -849,7 +926,7 @@ rem liveness once mid-poll (round 5) to split the death window in half:
 rem alive at r5 and dead at the after-check means it died in the second
 rem half of the poll, not at the start.
 if %UWP_WAIT%==5 (
-    tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
+    call :probe_poll_check explorer
     if errorlevel 1 (echo explorer_midpoll_%UWP_PROC%=0 >> "%PROBE_LOCAL%" & echo explorer_midpoll_%UWP_PROC%=0 >> "%PROBE_OUT%") else (echo explorer_midpoll_%UWP_PROC%=1 >> "%PROBE_LOCAL%" & echo explorer_midpoll_%UWP_PROC%=1 >> "%PROBE_OUT%")
 )
 set /a UWP_WAIT+=1
@@ -873,7 +950,7 @@ rem it must be called with delayed expansion off.
 echo mark_xcheck_enter=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_enter=%TIME: =0% >> "%PROBE_OUT%"
 set "XCHECK_PROC=%~1"
 set "XCHECK_TARGET=%~2"
-tasklist /fi "imagename eq %XCHECK_PROC%.exe" /nh 2>nul | find /i "%XCHECK_PROC%.exe" >nul
+call :probe_poll_check %XCHECK_PROC%
 if not errorlevel 1 exit /b 0
 echo mark_xcheck_start_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_start_before=%TIME: =0% >> "%PROBE_OUT%"
 rem Detached start (run 46 fix): a bare `start "" "shell:..."` for
@@ -895,9 +972,15 @@ set "XCHECK_WAIT=0"
 echo mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_wait_before=%TIME: =0% >> "%PROBE_OUT%"
 choice /c Y /d Y /t 1 >nul
 echo mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_wait_after=%TIME: =0% >> "%PROBE_OUT%"
-tasklist /fi "imagename eq %XCHECK_PROC%.exe" /nh 2>nul | find /i "%XCHECK_PROC%.exe" >nul
+call :probe_poll_check %XCHECK_PROC%
 if not errorlevel 1 exit /b 0
 echo mark_xcheck_poll_%XCHECK_PROC%_r%XCHECK_WAIT%_check_after=%TIME: =0% >> "%PROBE_OUT%"
+rem Run 47: same mid-poll liveness split as :probe_uwp_poll — if the
+rem cross-check launch kills the shell, r5 says which half it died in.
+if %XCHECK_WAIT%==5 (
+    call :probe_poll_check explorer
+    if errorlevel 1 (echo explorer_xcheck_midpoll_%XCHECK_PROC%=0 >> "%PROBE_LOCAL%" & echo explorer_xcheck_midpoll_%XCHECK_PROC%=0 >> "%PROBE_OUT%") else (echo explorer_xcheck_midpoll_%XCHECK_PROC%=1 >> "%PROBE_LOCAL%" & echo explorer_xcheck_midpoll_%XCHECK_PROC%=1 >> "%PROBE_OUT%")
+)
 set /a XCHECK_WAIT+=1
 if %XCHECK_WAIT% lss 10 goto :probe_xcheck_poll
 exit /b 1
@@ -948,4 +1031,120 @@ if not errorlevel 1 (
     echo %~2=STOPPED >> "%PROBE_OUT%"
     if not "%~3"=="" echo %~2=STOPPED >> "%~3"
 )
+exit /b 0
+
+:probe_wer_snapshot
+rem %1 = suffix: diag, uwp or xcheck. Run 47: the same WER/evtx/dump
+rem capture the end snapshot does, but taken mid-run so a wedge in a
+rem later section cannot take the breakpoint evidence with it. Every
+rem key carries the suffix, so the three snapshots do not collide and
+rem the end snapshot keeps its unsuffixed keys (static tests pin the
+rem end block's positions and names — do not rename them here).
+rem A crash report is only evidence about a death if its queue time is
+rem on or after the probe started, so the times are recorded with the
+rem names; the host side compares them against the probe markers.
+echo mark_wer_%~1=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_wer_%~1=%TIME: =0% >> "%PROBE_OUT%"
+set "WER_SNAP_EXPLORER=0"
+set "WER_SNAP_REPORTS=0"
+if exist "%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*" (
+    set "WER_SNAP_EXPLORER=1"
+    for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*") do (
+        echo wer_%~1_explorer_name=%%~nxD >> "%PROBE_LOCAL%" & echo wer_%~1_explorer_name=%%~nxD >> "%PROBE_OUT%"
+        echo wer_%~1_explorer_time=%%~tD >> "%PROBE_LOCAL%" & echo wer_%~1_explorer_time=%%~tD >> "%PROBE_OUT%"
+        if defined TASKLIST_OUT (
+            echo --- WER %~1 ReportQueue %%~nxD --- >> "%TASKLIST_OUT%"
+            type "%%D\Report.wer" >> "%TASKLIST_OUT%" 2>nul
+        )
+        set /a WER_SNAP_REPORTS+=1
+    )
+)
+if exist "%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*" (
+    set "WER_SNAP_EXPLORER=1"
+    for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*") do (
+        echo wer_%~1_explorer_archive_name=%%~nxD >> "%PROBE_LOCAL%" & echo wer_%~1_explorer_archive_name=%%~nxD >> "%PROBE_OUT%"
+        echo wer_%~1_explorer_archive_time=%%~tD >> "%PROBE_LOCAL%" & echo wer_%~1_explorer_archive_time=%%~tD >> "%PROBE_OUT%"
+    )
+)
+echo wer_%~1_explorer=%WER_SNAP_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_%~1_explorer=%WER_SNAP_EXPLORER% >> "%PROBE_OUT%"
+echo wer_%~1_reports=%WER_SNAP_REPORTS% >> "%PROBE_LOCAL%" & echo wer_%~1_reports=%WER_SNAP_REPORTS% >> "%PROBE_OUT%"
+if exist "%SystemRoot%\System32\winevt\Logs\System.evtx" (
+    echo evtx_%~1_system=1 >> "%PROBE_LOCAL%" & echo evtx_%~1_system=1 >> "%PROBE_OUT%"
+    for %%F in ("%SystemRoot%\System32\winevt\Logs\System.evtx") do echo evtx_%~1_system_size=%%~zF >> "%PROBE_LOCAL%" & echo evtx_%~1_system_size=%%~zF >> "%PROBE_OUT%"
+    if defined PROBE_DIR copy /y "%SystemRoot%\System32\winevt\Logs\System.evtx" "%PROBE_DIR%micpe-system-%~1.evtx" >nul 2>&1
+    if defined PROBE_DIR if exist "%PROBE_DIR%micpe-system-%~1.evtx" (echo evtx_%~1_system_copy=1 >> "%PROBE_LOCAL%" & echo evtx_%~1_system_copy=1 >> "%PROBE_OUT%") else (echo evtx_%~1_system_copy=0 >> "%PROBE_LOCAL%" & echo evtx_%~1_system_copy=0 >> "%PROBE_OUT%")
+) else (
+    echo evtx_%~1_system=0 >> "%PROBE_LOCAL%" & echo evtx_%~1_system=0 >> "%PROBE_OUT%"
+)
+if exist "%SystemRoot%\System32\winevt\Logs\Application.evtx" (
+    echo evtx_%~1_app=1 >> "%PROBE_LOCAL%" & echo evtx_%~1_app=1 >> "%PROBE_OUT%"
+    for %%F in ("%SystemRoot%\System32\winevt\Logs\Application.evtx") do echo evtx_%~1_app_size=%%~zF >> "%PROBE_LOCAL%" & echo evtx_%~1_app_size=%%~zF >> "%PROBE_OUT%"
+    if defined PROBE_DIR copy /y "%SystemRoot%\System32\winevt\Logs\Application.evtx" "%PROBE_DIR%micpe-application-%~1.evtx" >nul 2>&1
+    if defined PROBE_DIR if exist "%PROBE_DIR%micpe-application-%~1.evtx" (echo evtx_%~1_app_copy=1 >> "%PROBE_LOCAL%" & echo evtx_%~1_app_copy=1 >> "%PROBE_OUT%") else (echo evtx_%~1_app_copy=0 >> "%PROBE_LOCAL%" & echo evtx_%~1_app_copy=0 >> "%PROBE_OUT%")
+) else (
+    echo evtx_%~1_app=0 >> "%PROBE_LOCAL%" & echo evtx_%~1_app=0 >> "%PROBE_OUT%"
+)
+if exist "%SystemRoot%\Minidump\*.dmp" (echo dump_%~1_minidump=1 >> "%PROBE_LOCAL%" & echo dump_%~1_minidump=1 >> "%PROBE_OUT%") else (echo dump_%~1_minidump=0 >> "%PROBE_LOCAL%" & echo dump_%~1_minidump=0 >> "%PROBE_OUT%")
+if exist "%SystemRoot%\MEMORY.DMP" (echo dump_%~1_memory=1 >> "%PROBE_LOCAL%" & echo dump_%~1_memory=1 >> "%PROBE_OUT%") else (echo dump_%~1_memory=0 >> "%PROBE_LOCAL%" & echo dump_%~1_memory=0 >> "%PROBE_OUT%")
+exit /b 0
+
+:probe_poll_check
+rem %1 = process image name (no .exe). Run 47: run 46 died between a
+rem poll round's wait_after and check_after — the only step in between
+rem is the tasklist|find pipeline, so a hung tasklist enumeration
+rem kills the probe outright. Run tasklist detached in a child cmd
+rem writing to a temp file on the PE system drive, then wait for the
+rem child to finish with a bounded spin plus two one-second choice
+rem ticks; on timeout record tasklist_timeout_<proc>=1 (dual-written),
+rem try to kill the hung tasklist, and return 1 (not found) so the
+rem poll loop continues instead of dying with the probe. The parent
+rem never pipes from tasklist directly, so a wedged enumeration cannot
+rem hang the probe. Returns errorlevel 0 when the process is listed.
+rem The temp file lives on %SystemDrive% (X: in PE, the RAM disk) so
+rem it never touches the share and never waits on the network.
+rem The child appends a DONE sentinel after tasklist exits, and the
+rem parent waits for the file to be NON-EMPTY, not merely to exist:
+rem the redirection creates the file the moment the child starts, so
+rem existence alone proves nothing — a blocked child leaves an empty
+rem file behind, and an existence check would read it as "answered"
+rem at once (CI run 44517188618 P3: the timeout key never got
+rem written because the empty file short-circuited the wait).
+set "POLL_TMP=%SystemDrive%\micpe-poll.tmp"
+del "%POLL_TMP%" >nul 2>&1
+start "" /min cmd /c tasklist /fi "imagename eq %~1.exe" /nh ^> "%POLL_TMP%" 2^>nul ^& echo DONE ^>^> "%POLL_TMP%"
+set /a POLL_SPIN=0
+:poll_check_spin
+if exist "%POLL_TMP%" for %%F in ("%POLL_TMP%") do if %%~zF gtr 0 goto poll_check_found
+set /a POLL_SPIN+=1
+if %POLL_SPIN% lss 20000 goto poll_check_spin
+set /a POLL_WAIT=0
+:poll_check_wait
+if exist "%POLL_TMP%" for %%F in ("%POLL_TMP%") do if %%~zF gtr 0 goto poll_check_found
+if %POLL_WAIT% geq 2 goto poll_check_timeout
+choice /c Y /d Y /t 1 >nul
+set /a POLL_WAIT+=1
+goto poll_check_wait
+:poll_check_found
+find /i "%~1.exe" "%POLL_TMP%" >nul
+if not errorlevel 1 (
+    del "%POLL_TMP%" >nul 2>&1
+    exit /b 0
+)
+del "%POLL_TMP%" >nul 2>&1
+exit /b 1
+:poll_check_timeout
+echo tasklist_timeout_%~1=1 >> "%PROBE_LOCAL%" & echo tasklist_timeout_%~1=1 >> "%PROBE_OUT%"
+taskkill /f /im tasklist.exe >nul 2>&1
+del "%POLL_TMP%" >nul 2>&1
+exit /b 1
+
+:probe_sync_local
+rem Run 47: the share probe file is written through the vvfat share,
+rem which run 46 proved can silently zero-fill a whole stretch (724
+rem NUL bytes, 14 lines lost, uwp_launch_calculator among them). The
+rem local file on the PE system drive (X:, RAM disk) never goes
+rem through the share, so copy it to the share at the end of every
+rem section — the harness uploads that copy, and a NUL hole in the
+rem live probe file no longer eats a conclusion. A no-op when
+rem PROBE_DIR is unset (local test runs).
+if defined PROBE_DIR copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
 exit /b 0

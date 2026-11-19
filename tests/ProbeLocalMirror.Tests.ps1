@@ -401,8 +401,13 @@ Describe 'probe local mirror (static)' {
         # share-only; the section markers bracket the freeze points.
         # Run 46 adds the cross-check poll markers (mark_xcheck_poll_):
         # same rule as the uwp poll markers, share-only by design.
+        # Run 47 adds the WER snapshot marker (mark_wer_): it is one
+        # parameterized line inside :probe_wer_snapshot (%~1 is the
+        # segment), so it cannot be pinned as a fixed marker here and
+        # is left out of the count; it is pinned by pattern in
+        # ProbeUwpMechanism.Tests.ps1 instead.
         $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
-        $markers = @($lines | Where-Object { $_ -match '^echo mark_' -and $_ -notmatch 'mark_uwp_poll_' -and $_ -notmatch 'mark_xcheck_poll_' })
+        $markers = @($lines | Where-Object { $_ -match '^echo mark_' -and $_ -notmatch 'mark_uwp_poll_' -and $_ -notmatch 'mark_xcheck_poll_' -and $_ -notmatch 'mark_wer_' })
         $markers.Count | Should -Be 38 -Because '27 section markers plus the 4 installer before/after markers plus the 7 run-46 cross-check markers'
         foreach ($line in $markers) {
             $line | Should -Match '^echo mark_\w+=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_\w+=%TIME: =0% >> "%PROBE_OUT%"$'

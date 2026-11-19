@@ -115,8 +115,10 @@ Describe 'probe.cmd progress markers (run 44181949882)' {
         # ProbeUwpMechanism.Tests.ps1 instead. They are column-0 lines
         # too, so they are checked the same way right below. Run 46
         # adds the cross-check poll markers (mark_xcheck_poll_): same
-        # rule, same treatment.
-        $markerLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_' -and $_ -notmatch 'mark_uwp_poll_' -and $_ -notmatch 'mark_xcheck_poll_' })
+        # rule, same treatment. Run 47 adds the WER snapshot marker
+        # (mark_wer_): one parameterized line inside the subroutine,
+        # same rule, same treatment.
+        $markerLines = @($script:probeLines | Where-Object { $_ -match 'echo mark_' -and $_ -notmatch 'mark_uwp_poll_' -and $_ -notmatch 'mark_xcheck_poll_' -and $_ -notmatch 'mark_wer_' })
         $markerLines.Count | Should -Be $script:markers.Count
         foreach ($line in $markerLines) {
             $line | Should -Match '^echo mark_' -Because "marker must be a top-level line, not block content: $line"

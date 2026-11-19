@@ -314,6 +314,37 @@ function Send-QemuBootKey {
     }
 }
 
+function Save-QemuBlockInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Port
+    )
+
+    # Run 47 (mirror): the harness attaches a second vvfat volume for
+    # the mirror, yet the guest enumerates only C/D/X and the mirror
+    # probe key reads 0 — the probe is reporting truthfully, so the gap
+    # is between QEMU and the guest. Ask the monitor which block devices
+    # QEMU actually attached (info block lists the ide0-hd0/ide0-hd1/
+    # ide1-cd0 devices with their tray state), so the next round can
+    # tell a QEMU-side attach failure from a guest-side enumeration
+    # failure. Never fails the run: the monitor may be gone by the time
+    # this runs, and a missing reply is itself evidence.
+    try {
+        $response = Invoke-MonitorCommand -Port $Port -Command 'info block' -ReadResponse
+        $flat = Format-MonitorReply -Reply $response -MaxLength 2000
+        if ($flat) {
+            Write-Host "    qemu block devices: $flat"
+        }
+        else {
+            Write-Host '    qemu block devices: (no reply)'
+        }
+    }
+    catch {
+        Write-Host "    qemu block devices query failed: $($_.Exception.Message)"
+    }
+}
+
 function Find-OvmfCode {
     [CmdletBinding()]
     param(
@@ -725,6 +756,9 @@ function Invoke-QemuVerify {
     Write-Host "    $QemuPath $qemuArgString"
 
     $process = Start-Process -FilePath $QemuPath -ArgumentList $qemuArgString -PassThru -NoNewWindow
+    # Run 47 (mirror): log what QEMU actually attached, once, right
+    # after start — before the guest has any chance to enumerate.
+    Save-QemuBlockInfo -Port $MonitorPort
     $deadline = (Get-Date).AddMinutes($TimeoutMin)
     $shotIndex = 0
     $prevShotHash = $null

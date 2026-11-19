@@ -1354,3 +1354,353 @@ Describe 'explorer CPU time (run 44428428849)' {
         }
     }
 }
+
+Describe 'probe.cmd wedge and activation diagnostics (run 47)' {
+    BeforeAll {
+        # Extract one subroutine from probe.cmd by content (label to the
+        # next label), so the mechanism tests run the real code, not a
+        # hand copy that can drift silently.
+        $script:ExtractProbeSub = {
+            param([string] $Label, [string] $StopLabel)
+            $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+            $start = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match "^$Label") { $start = $i; break }
+            }
+            if ($start -lt 0) { throw "subroutine $Label not found in probe.cmd" }
+            $end = $lines.Count - 1
+            for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+                if ($StopLabel -and ($lines[$i] -match "^$StopLabel")) { $end = $i - 1; break }
+            }
+            return ,@($lines[$start..$end])
+        }
+    }
+
+    It 'takes a WER/evtx snapshot in the diagnostics, after the launches, and after the cross-check' {
+        # Run 46: the WER/evtx/dump capture lived in the end snapshot,
+        # so the guest wedging in the Media poll took all of it — the
+        # breakpoint evidence stayed blank. Three mid-run snapshots now
+        # bound the evidence to the section that produced it.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $calls = @([regex]::Matches($text, 'call :probe_wer_snapshot'))
+        $calls.Count | Should -Be 3 -Because 'exactly three mid-run snapshots: diag, uwp, xcheck'
+        $text.IndexOf('call :probe_wer_snapshot diag') | Should -BeGreaterThan $text.IndexOf('call :probe_explorer_cpu diag') -Because 'the diag snapshot comes after the mid-diagnosis liveness check'
+        $text.IndexOf('call :probe_wer_snapshot diag') | Should -BeLessThan $text.IndexOf('rem --- uwp ---') -Because 'the diag snapshot is taken before the launches'
+        $text.IndexOf('call :probe_wer_snapshot uwp') | Should -BeGreaterThan $text.IndexOf('call :probe_svc AppReadiness appreadiness_after') -Because 'the uwp snapshot comes after the launches and the re-check'
+        $text.IndexOf('call :probe_wer_snapshot uwp') | Should -BeLessThan $text.IndexOf('rem --- cross-check') -Because 'the uwp snapshot is taken before the cross-check'
+        $text.IndexOf('call :probe_wer_snapshot xcheck') | Should -BeGreaterThan $text.IndexOf('xcheck_framehost_after=') -Because 'the xcheck snapshot comes after the cross-check'
+        $text.IndexOf('call :probe_wer_snapshot xcheck') | Should -BeLessThan $text.IndexOf('rem --- payload') -Because 'the xcheck snapshot is taken before the payload section'
+    }
+
+    It 'the WER snapshot subroutine records suffixed keys and suffixed evtx copies' {
+        $snap = & $script:ExtractProbeSub ':probe_wer_snapshot' ':probe_poll_check'
+        $body = $snap -join "`n"
+        $body | Should -Match 'mark_wer_%~1=' -Because 'each snapshot marks its section with its suffix'
+        $body | Should -Match 'wer_%~1_explorer=' -Because 'each snapshot names its explorer WER state with its suffix'
+        $body | Should -Match 'wer_%~1_reports=' -Because 'each snapshot counts the copied reports with its suffix'
+        $body | Should -Match 'wer_%~1_explorer_name=' -Because 'the report name is recorded with its suffix'
+        $body | Should -Match 'wer_%~1_explorer_time=' -Because 'the report time is recorded with its suffix'
+        $body | Should -Match 'evtx_%~1_system=' -Because 'each snapshot records its System log state with its suffix'
+        $body | Should -Match 'micpe-system-%~1\.evtx' -Because 'each snapshot copies the System log under a suffixed name'
+        $body | Should -Match 'micpe-application-%~1\.evtx' -Because 'each snapshot copies the Application log under a suffixed name'
+        $body | Should -Match 'dump_%~1_minidump=' -Because 'each snapshot records its minidump state with its suffix'
+        $body | Should -Match 'Report\.wer' -Because 'each snapshot types the explorer Report.wer into the tasklist file'
+    }
+
+    It 'checks the poll through a detached tasklist, never a direct pipe' {
+        # Run 46 died between a poll round's wait_after and check_after
+        # — the only step in between is the tasklist|find pipeline, so
+        # a hung tasklist enumeration kills the probe outright. The
+        # poll now runs tasklist detached in a child cmd and waits on
+        # its output file with a bounded spin plus two one-second
+        # ticks; a timeout is recorded and the poll continues.
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $helper = & $script:ExtractProbeSub ':probe_poll_check' ':probe_sync_local'
+        $helperBody = $helper -join "`n"
+        $helperBody | Should -Match 'start "" /min cmd /c tasklist' -Because 'tasklist runs detached in a child cmd'
+        $helperBody | Should -Match 'echo DONE' -Because 'the child appends a DONE sentinel after tasklist exits'
+        $helperBody | Should -Match '%%~zF gtr 0' -Because 'the parent waits for the file to be non-empty, not merely to exist (the redirection creates it at once)'
+        $helperBody | Should -Match 'tasklist_timeout_%~1=1' -Because 'a hung enumeration is recorded, not swallowed'
+        $helperBody | Should -Match 'taskkill /f /im tasklist\.exe' -Because 'the helper tries to kill the hung tasklist before returning'
+        $helperBody | Should -Match 'exit /b 0' -Because 'the helper returns 0 when the process is listed'
+        $helperBody | Should -Match 'exit /b 1' -Because 'the helper returns 1 when the process is absent or the check times out'
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        @([regex]::Matches($text, 'call :probe_poll_check %UWP_PROC%')).Count | Should -Be 2 -Because 'the uwp pre-check and the uwp poll both go through the helper'
+        @([regex]::Matches($text, 'call :probe_poll_check %XCHECK_PROC%')).Count | Should -Be 2 -Because 'the xcheck pre-check and the xcheck poll both go through the helper'
+        @([regex]::Matches($text, 'call :probe_poll_check explorer')).Count | Should -Be 2 -Because 'both mid-poll liveness checks go through the helper'
+        # Neither poll loop may call tasklist directly any more: take
+        # each loop from its label to its final exit and require no
+        # line starting with tasklist.
+        foreach ($label in @(':probe_uwp_poll', ':probe_xcheck_poll')) {
+            $start = -1
+            for ($i = 0; $i -lt $probe.Count; $i++) {
+                if ($probe[$i] -match "^$label") { $start = $i; break }
+            }
+            $start | Should -BeGreaterThan -1 -Because "probe.cmd must still carry $label"
+            $end = $start
+            for ($i = $start + 1; $i -lt $probe.Count; $i++) {
+                if ($probe[$i] -match '^exit /b 1') { $end = $i; break }
+            }
+            $section = $probe[$start..$end] -join "`n"
+            $section | Should -Not -Match '(?m)^tasklist /fi' -Because "$label must not call tasklist directly"
+        }
+    }
+
+    It 'adds no new tasklist /v snapshot lines' {
+        # The three full snapshots (diagnosis, folder-window test, end)
+        # are pinned by the stage table; the helper uses tasklist /fi
+        # only, and the new diagnostics add sc/mountvol dumps, not
+        # tasklist /v lines.
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        ($probe | Where-Object { $_ -match '^tasklist /v' }).Count | Should -Be 3
+    }
+
+    It 'dual-writes the launch and verdict keys to the local probe file' {
+        # Run 46: a 724-byte NUL hole in the share probe file ate the
+        # Calculator launch result. The local file never goes through
+        # the share, so the keys a verdict depends on are written to
+        # both files.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        foreach ($key in @('uwp_launch_calculator', 'uwp_launch_photos', 'uwp_launch_media',
+                'xcheck_launch_calculator', 'xcheck_launch_photos', 'xcheck_launch_media')) {
+            $text.Contains("echo $key=1 >> `"%PROBE_LOCAL%`" & echo $key=1 >> `"%PROBE_OUT%`"") | Should -Be $true -Because "$key must be written to the local file as well as the share file"
+        }
+        $text.Contains('echo payload=%PAYLOAD% >> "%PROBE_LOCAL%" & echo payload=%PAYLOAD% >> "%PROBE_OUT%"') | Should -Be $true -Because 'payload must survive a NUL hole in the share file'
+        $text.Contains('echo brand=%BRAND% >> "%PROBE_LOCAL%" & echo brand=%BRAND% >> "%PROBE_OUT%"') | Should -Be $true -Because 'brand must survive a NUL hole in the share file'
+    }
+
+    It 'diagnoses the UWP activation chain in the uwp section opening' {
+        # Run 46: the package is in the store (appxstore_media=1) but
+        # the shell namespace cannot resolve its AUMID — Media died
+        # with a "Windows cannot find the file" dialog. These checks
+        # say which link of the activation chain is broken, before
+        # the launches. They sit after mark_uwp_appx, not in the
+        # diagnostics above: the activation_files line names
+        # AppXDeploymentClient.dll, and a marker test pins
+        # mark_uwp_appx before the first occurrence of that name.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $appx = $text.IndexOf('mark_uwp_appx=')
+        $launch = $text.IndexOf('call :probe_uwp CalculatorApp')
+        $appx | Should -BeGreaterThan -1
+        $launch | Should -BeGreaterThan $appx
+        foreach ($key in @('appsfolder_clsid=', 'aumid_calc=', 'aumid_photos=', 'aumid_media=', 'activation_files=', 'mountvol_dump=')) {
+            $pos = $text.IndexOf($key)
+            $pos | Should -BeGreaterThan $appx -Because "$key is a uwp-section check, after the appx marker"
+            $pos | Should -BeLessThan $launch -Because "$key is recorded before the launches"
+        }
+        # Pin the =1 branch, dual-written — a key name alone is not
+        # enough: the 0 branch carries the same name, so a mutation
+        # that deletes the 1 branch would otherwise pass unnoticed.
+        foreach ($key in @('appsfolder_clsid', 'aumid_calc', 'aumid_photos', 'aumid_media', 'activation_files', 'mountvol_dump')) {
+            $text.Contains("echo $key=1 >> `"%PROBE_LOCAL%`" & echo $key=1 >> `"%PROBE_OUT%`"") | Should -Be $true -Because "$key must record 1 to the local file as well as the share file"
+        }
+        $text | Should -Match 'reg query "HKLM\\SOFTWARE\\Classes\\CLSID\\\{4234d49b-0245-4df3-b780-3893943456e1\}' -Because 'the shell:AppsFolder class registration is checked'
+        $text | Should -Match 'Microsoft\.WindowsCalculator_8wekyb3d8bbwe!App' -Because 'the Calculator AUMID is looked up in AppxAllUserStore'
+        $text | Should -Match 'Microsoft\.ZuneMusic_8wekyb3d8bbwe!Microsoft\.ZuneMusic' -Because 'the Media AUMID is looked up in AppxAllUserStore'
+        $text | Should -Match 'twinapi\.appcore\.dll' -Because 'the activation DLLs are checked'
+        $text | Should -Match 'sc qc AppXSVC' -Because 'the deployment services config is dumped'
+        $text | Should -Match 'sc qc StateRepository'
+        $text | Should -Match 'sc qc AppReadiness'
+        $text | Should -Match '(?m)^mountvol' -Because 'the volume table is dumped (the mirror volume question)'
+    }
+
+    It 'never pipes a bang-carrying pattern through find' {
+        # CI run 44519361912: the batch died on the piped AUMID
+        # reg-query line with exit 255 and no stderr — the pipe
+        # child parses the bang with delayed expansion on, and the
+        # unterminated !...! swallows the rest of the batch. The
+        # AUMID lookups dump the store to a file and search the file
+        # instead; pin that shape here so the pipe never comes back.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Not -Match '\| find /i "[^"]*!' -Because 'a piped find must never carry a bang in its pattern'
+        $text | Should -Match 'micpe-aumid\.tmp' -Because 'the AUMID lookups search a dumped file instead of a pipe'
+    }
+
+    It 'copies the local probe file to the share at the end of every section' {
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $calls = @([regex]::Matches($text, 'call :probe_sync_local'))
+        $calls.Count | Should -Be 5 -Because 'diag, uwp, xcheck, brand, and the end each sync the local file'
+        $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot diag')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot diag') -Because 'the diag section syncs after its snapshot'
+        $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot uwp')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot uwp') -Because 'the uwp section syncs after its snapshot'
+        $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot xcheck')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot xcheck') -Because 'the xcheck section syncs after its snapshot'
+        $text.IndexOf('call :probe_sync_local', $text.IndexOf('echo brand=')) | Should -BeGreaterThan $text.IndexOf('echo brand=') -Because 'the brand section syncs after the brand verdict'
+        $text.IndexOf('call :probe_sync_local', $text.IndexOf('echo dump_memory=')) | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the end sync happens before probe_done'
+        $sync = & $script:ExtractProbeSub ':probe_sync_local' ''
+        ($sync -join "`n") | Should -Match 'copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local\.txt"' -Because 'the sync copies the local file onto the share'
+    }
+
+    It 'the poll-check pin fails when the uwp poll goes back to a direct tasklist (reverse control)' {
+        # Proves the static pin above would catch the regression: put
+        # the direct call back into the poll and the "no direct
+        # tasklist" assertion must fire.
+        $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $start = -1
+        for ($i = 0; $i -lt $probe.Count; $i++) {
+            if ($probe[$i] -match '^:probe_uwp_poll') { $start = $i; break }
+        }
+        $start | Should -BeGreaterThan -1
+        $end = $start
+        for ($i = $start + 1; $i -lt $probe.Count; $i++) {
+            if ($probe[$i] -match '^exit /b 1') { $end = $i; break }
+        }
+        $section = $probe[$start..$end] -join "`n"
+        $mutated = $section -replace 'call :probe_poll_check %UWP_PROC%', 'tasklist /fi "imagename eq %UWP_PROC%.exe" /nh 2>nul | find /i "%UWP_PROC%.exe" >nul'
+        $mutated | Should -Match '(?m)^tasklist /fi' -Because 'the mutation must actually restore the direct call'
+        $section | Should -Not -Match '(?m)^tasklist /fi' -Because 'the real poll must not call tasklist directly'
+    }
+
+    It 'P1: the poll helper returns 0 fast when the process is listed' -Skip:(-not $IsWindows) {
+        $workDir = & $script:NewWorkDir
+        Remove-Item -LiteralPath (Join-Path $workDir 'tasklist.exe') -Force
+        & $script:WriteBatchCrlf (Join-Path $workDir 'tasklist.bat') @('@echo off', 'echo %*')
+        $outFile = Join-Path $workDir 'poll-out.txt'
+        $bat = Join-Path $workDir 'poll-check.bat'
+        $helper = & $script:ExtractProbeSub ':probe_poll_check' ':probe_sync_local'
+        try {
+            & $script:WriteBatchCrlf $bat (@(
+                '@echo off',
+                ('set "SystemDrive={0}"' -f $workDir),
+                ('set "PROBE_OUT={0}"' -f $outFile),
+                ('set "PROBE_LOCAL={0}"' -f $outFile),
+                'call :probe_poll_check CalculatorApp',
+                'echo poll_rc=%ERRORLEVEL% >> "%PROBE_OUT%"',
+                'exit /b 0'
+            ) + $helper)
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "poll found: [$text]"
+            $text | Should -Match 'poll_rc=0' -Because 'the stub lists the process, so the helper returns 0'
+            $text | Should -Not -Match 'tasklist_timeout_' -Because 'a fast answer must not be recorded as a timeout'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'P2: the poll helper returns 1 with no timeout when the process is absent' -Skip:(-not $IsWindows) {
+        $workDir = & $script:NewWorkDir
+        Remove-Item -LiteralPath (Join-Path $workDir 'tasklist.exe') -Force
+        & $script:WriteBatchCrlf (Join-Path $workDir 'tasklist.bat') @('@echo off', 'exit /b 0')
+        $outFile = Join-Path $workDir 'poll-out.txt'
+        $bat = Join-Path $workDir 'poll-check.bat'
+        $helper = & $script:ExtractProbeSub ':probe_poll_check' ':probe_sync_local'
+        try {
+            & $script:WriteBatchCrlf $bat (@(
+                '@echo off',
+                ('set "SystemDrive={0}"' -f $workDir),
+                ('set "PROBE_OUT={0}"' -f $outFile),
+                ('set "PROBE_LOCAL={0}"' -f $outFile),
+                'call :probe_poll_check CalculatorApp',
+                'echo poll_rc=%ERRORLEVEL% >> "%PROBE_OUT%"',
+                'exit /b 0'
+            ) + $helper)
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "poll absent: [$text]"
+            $text | Should -Match 'poll_rc=1' -Because 'an empty listing means the process is absent'
+            $text | Should -Not -Match 'tasklist_timeout_' -Because 'an empty answer is not a timeout'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'P3: the poll helper times out, records tasklist_timeout, and returns 1 when tasklist never answers' -Skip:(-not $IsWindows) {
+        # The run-46 wedge: the child tasklist never writes its file,
+        # so the parent must give up after a bounded wait and let the
+        # poll continue instead of dying with the probe. The blocking
+        # stub lingers in the background after the batch exits (its
+        # choice runs 30 s); the work-dir cleanup tolerates that.
+        $workDir = & $script:NewWorkDir
+        Remove-Item -LiteralPath (Join-Path $workDir 'tasklist.exe') -Force
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\taskkill.exe') -Destination (Join-Path $workDir 'taskkill.exe')
+        & $script:WriteBatchCrlf (Join-Path $workDir 'tasklist.bat') @('@echo off', 'choice /c Y /d Y /t 30 >nul')
+        $outFile = Join-Path $workDir 'poll-out.txt'
+        $bat = Join-Path $workDir 'poll-check.bat'
+        $helper = & $script:ExtractProbeSub ':probe_poll_check' ':probe_sync_local'
+        try {
+            & $script:WriteBatchCrlf $bat (@(
+                '@echo off',
+                ('set "SystemDrive={0}"' -f $workDir),
+                ('set "PROBE_OUT={0}"' -f $outFile),
+                ('set "PROBE_LOCAL={0}"' -f $outFile),
+                'call :probe_poll_check CalculatorApp',
+                'echo poll_rc=%ERRORLEVEL% >> "%PROBE_OUT%"',
+                'exit /b 0'
+            ) + $helper)
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
+            $result.TimedOut | Should -Be $false -Because 'a hung tasklist must not hang the probe'
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "poll timeout: [$text]"
+            $text | Should -Match 'poll_rc=1' -Because 'no answer means not found'
+            $text | Should -Match 'tasklist_timeout_CalculatorApp=1' -Because 'the timeout is recorded for the host to see'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'W4: the WER snapshot subroutine records a suffixed snapshot from a fake tree' -Skip:(-not $IsWindows) {
+        $workDir = & $script:NewWorkDir
+        $werRoot = Join-Path $workDir 'ProgramData'
+        $queue = Join-Path $werRoot 'Microsoft\Windows\WER\ReportQueue'
+        $archive = Join-Path $werRoot 'Microsoft\Windows\WER\ReportArchive'
+        $queueEntry = Join-Path $queue 'AppCrash_explorer.exe_9f2a1c'
+        New-Item -ItemType Directory -Path $queueEntry -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $archive 'AppHang_explorer.exe_7b3e9d') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $queueEntry 'Report.wer'), "Fault Module: test.dll`r`n", [System.Text.Encoding]::ASCII)
+        $fakeWin = Join-Path $workDir 'Windows'
+        $logs = Join-Path $fakeWin 'System32\winevt\Logs'
+        New-Item -ItemType Directory -Path $logs -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $logs 'System.evtx'), 'fake-system-evtx', [System.Text.Encoding]::ASCII)
+        [System.IO.File]::WriteAllText((Join-Path $logs 'Application.evtx'), 'fake-app-evtx', [System.Text.Encoding]::ASCII)
+        $shareDir = Join-Path $workDir 'share'
+        New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+        $outFile = Join-Path $workDir 'wer-out.txt'
+        $tasklistFile = Join-Path $workDir 'tasklist.txt'
+        $bat = Join-Path $workDir 'wer-snapshot.bat'
+        $snap = & $script:ExtractProbeSub ':probe_wer_snapshot' ':probe_poll_check'
+        try {
+            & $script:WriteBatchCrlf $bat (@(
+                '@echo off',
+                ('set "ProgramData={0}"' -f $werRoot),
+                ('set "SystemRoot={0}"' -f $fakeWin),
+                ('set "PROBE_DIR={0}\"' -f $shareDir),
+                ('set "PROBE_OUT={0}"' -f $outFile),
+                ('set "PROBE_LOCAL={0}"' -f $outFile),
+                ('set "TASKLIST_OUT={0}"' -f $tasklistFile),
+                'call :probe_wer_snapshot diag',
+                'exit /b 0'
+            ) + $snap)
+            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $outFile -Raw
+            Write-Host "wer snapshot: [$text]"
+            $text | Should -Match 'mark_wer_diag=' -Because 'the snapshot marks its section'
+            $text | Should -Match 'wer_diag_explorer=1' -Because 'an explorer entry exists in the queue'
+            $text | Should -Match 'wer_diag_explorer_name=AppCrash_explorer\.exe_9f2a1c' -Because 'the queue entry name is copied with the suffix'
+            $text | Should -Match 'wer_diag_explorer_time=[0-9]' -Because 'the queue entry time is copied with the suffix'
+            $text | Should -Match 'wer_diag_reports=1' -Because 'one report was copied'
+            $text | Should -Match 'wer_diag_explorer_archive_name=AppHang_explorer\.exe_7b3e9d' -Because 'the archive entry name is copied too'
+            $text | Should -Match 'evtx_diag_system=1' -Because 'the fake System log exists'
+            $text | Should -Match 'evtx_diag_system_size=[0-9]' -Because 'the System log size is recorded'
+            $text | Should -Match 'evtx_diag_system_copy=1' -Because 'the System log copy landed on the share'
+            $text | Should -Match 'evtx_diag_app_copy=1' -Because 'the Application log copy landed on the share'
+            $text | Should -Match 'dump_diag_minidump=0' -Because 'no minidump exists in the fake tree'
+            $text | Should -Match 'dump_diag_memory=0' -Because 'no full memory dump exists in the fake tree'
+            (Test-Path -LiteralPath (Join-Path $shareDir 'micpe-system-diag.evtx')) | Should -Be $true -Because 'the suffixed System log copy must be on the share'
+            (Test-Path -LiteralPath (Join-Path $shareDir 'micpe-application-diag.evtx')) | Should -Be $true -Because 'the suffixed Application log copy must be on the share'
+            $tasklist = Get-Content -LiteralPath $tasklistFile -Raw
+            $tasklist | Should -Match 'Fault Module: test\.dll' -Because 'the explorer Report.wer is typed into the tasklist file'
+        }
+        finally {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

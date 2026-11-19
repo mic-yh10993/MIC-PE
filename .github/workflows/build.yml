@@ -322,10 +322,17 @@ jobs:
           name: micpe-verify-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
           path: |
             verify-out/share/micpe-probe.txt
+            verify-out/share/micpe-probe-local.txt
             verify-out/share/micpe-watchdog-heartbeat.txt
             verify-out/share/micpe-tasklist.txt
             verify-out/share/micpe-system.evtx
             verify-out/share/micpe-application.evtx
+            verify-out/share/micpe-system-diag.evtx
+            verify-out/share/micpe-application-diag.evtx
+            verify-out/share/micpe-system-uwp.evtx
+            verify-out/share/micpe-application-uwp.evtx
+            verify-out/share/micpe-system-xcheck.evtx
+            verify-out/share/micpe-application-xcheck.evtx
             verify-out/mirror/micpe-probe-local.txt
             verify-out/shots/*.ppm
             verify-out/qemu.log
