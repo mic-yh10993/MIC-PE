@@ -865,23 +865,35 @@ Describe 'explorer CPU time (run 44428428849)' {
         }
     }
 
-    It 'C1diag: full tasklist dump inside the batch (run 44453963285)' -Skip:(-not $IsWindows) {
-        # C1diag v3 proved the work-dir copy is byte-identical to the
-        # System32 original and lists 841 lines with no args, yet the
-        # diagnostic batch exited 1 (find saw no CPU Time line). This
-        # version dumps everything the batch sees — full list, filtered
-        # list, /v /fo list, the for /f parse, and the batch's own
-        # exit code — and reads the dump BEFORE asserting anything, so
-        # a failing pipeline cannot hide the evidence again.
+    It 'C1diag: filter test, native and in-batch with markers (run 44454612133)' -Skip:(-not $IsWindows) {
+        # C1diag v4 proved: the full list shows cmd.exe (PID 7356), yet
+        # the /fi filter is rejected once ("The search filter cannot be
+        # recognized.") and no CPU Time line ever appears. Attribution
+        # was ambiguous (one error for two filtered commands), so this
+        # version (a) tests the filter NATIVELY with a live cmd.exe
+        # held open, for cmd.exe and for pwsh.exe, and (b) re-runs the
+        # batch with a marker line before each section so each command's
+        # output is attributable. All -f elements parenthesised.
         $workDir = & $script:NewWorkDir
         $outFile = Join-Path $workDir 'tasklist-batch.txt'
         $bat = Join-Path $workDir 'tasklist-batch.bat'
+        $heldCmd = $null
         try {
+            $heldCmd = Start-Process -FilePath $script:CmdExe -ArgumentList '/k', 'title held-for-c1diag' -PassThru -NoNewWindow
+            Start-Sleep -Seconds 2
+            $fCmd = & $script:TasklistExe /fi "imagename eq cmd.exe" 2>&1 | Out-String
+            Write-Host "native fi cmd.exe exit $($LASTEXITCODE) [$fCmd]"
+            $fPwsh = & $script:TasklistExe /fi "imagename eq pwsh.exe" 2>&1 | Out-String
+            Write-Host "native fi pwsh.exe exit $($LASTEXITCODE) [$fPwsh]"
             & $script:WriteBatchCrlf $bat @(
                 '@echo off',
-                ('tasklist > "{0}" 2>&1' -f $outFile),
+                ('echo ===SEC1 plain=== > "{0}"' -f $outFile),
+                ('tasklist >> "{0}" 2>&1' -f $outFile),
+                ('echo ===SEC2 fi=== >> "{0}"' -f $outFile),
                 ('tasklist /fi "imagename eq cmd.exe" >> "{0}" 2>&1' -f $outFile),
+                ('echo ===SEC3 v-fi=== >> "{0}"' -f $outFile),
                 ('tasklist /v /fo list /fi "imagename eq cmd.exe" >> "{0}" 2>&1' -f $outFile),
+                ('echo ===SEC4 for=== >> "{0}"' -f $outFile),
                 ('for /f "tokens=3" %%C in (''tasklist /v /fo list /fi "imagename eq cmd.exe" 2^>nul ^| find /i "CPU Time"'') do echo PARSED=%%C >> "{0}"' -f $outFile),
                 ('echo BATCH_EXIT=%ERRORLEVEL% >> "{0}"' -f $outFile)
             )
@@ -892,6 +904,7 @@ Describe 'explorer CPU time (run 44428428849)' {
             $text | Should -Not -BeNullOrEmpty -Because 'the batch dump must exist for the diagnosis'
         }
         finally {
+            if ($heldCmd -and -not $heldCmd.HasExited) { Stop-Process -Id $heldCmd.Id -Force -ErrorAction SilentlyContinue }
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
