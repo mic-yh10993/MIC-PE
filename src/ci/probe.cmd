@@ -860,7 +860,7 @@ exit /b 1
 rem %1 = process image name, %2 = shell target. No explorer guard: this
 rem is the cross-validation — the launch is attempted whether or not a
 rem shell is alive. Returns errorlevel 0 when the process is running
-rem after the attempt. The launch is a plain ShellExecute of the
+rem after the attempt. The launch is a ShellExecute of the
 rem shell:AppsFolder target (no explorer.exe in the command): on full
 rem Windows this opens the app from cmd, and the parsing/activation
 rem runs in-process. In PE with a dead shell it may fail outright; the
@@ -876,7 +876,19 @@ set "XCHECK_TARGET=%~2"
 tasklist /fi "imagename eq %XCHECK_PROC%.exe" /nh 2>nul | find /i "%XCHECK_PROC%.exe" >nul
 if not errorlevel 1 exit /b 0
 echo mark_xcheck_start_before=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_start_before=%TIME: =0% >> "%PROBE_OUT%"
-start "" "%XCHECK_TARGET%"
+rem Detached start (run 46 fix): a bare `start "" "shell:..."` for
+rem an app that cannot activate BLOCKS the caller indefinitely —
+rem CI run 44502105340 X1 sat in this start for 300 s with no
+rem start_after (Server has no such app; the activation never
+rem returns in a non-interactive session). So the ShellExecute
+rem runs inside a child cmd: the outer start returns at once (cmd
+rem is a real process), the child absorbs the block, and the probe
+rem keeps polling — if the app ever appears the poll finds it, if
+rem not the poll gives up after ten rounds and the probe completes.
+rem The child cmd lingers while blocked; it is harmless in PE and
+rem the runner is discarded after the job. The launch still does
+rem not go through explorer.exe.
+start "" cmd /c start "" "%XCHECK_TARGET%"
 echo mark_xcheck_start_after=%TIME: =0% >> "%PROBE_LOCAL%" & echo mark_xcheck_start_after=%TIME: =0% >> "%PROBE_OUT%"
 set "XCHECK_WAIT=0"
 :probe_xcheck_poll

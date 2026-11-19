@@ -137,7 +137,7 @@ BeforeAll {
     # runs only the tail. Section headers after the uwp header must
     # NOT start with `rem --- uwp`.
     $script:BuildUwpBatch = {
-        param([string] $Path, [string] $ProbeOut, [switch] $StubStart, [switch] $StubXcheckStart)
+        param([string] $Path, [string] $ProbeOut, [switch] $StubStart)
         $probeLines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
         $uwpStart = -1; $payloadStart = -1; $subStart = -1
         for ($i = 0; $i -lt $probeLines.Count; $i++) {
@@ -163,20 +163,6 @@ BeforeAll {
                 if ($_ -match '^\s*start "" explorer\.exe') { 'rem start stubbed for the bisection test' } else { $_ }
             })
         }
-        if ($StubXcheckStart) {
-            # Run 46: a bare `start "" "shell:AppsFolder\..."` for an
-            # app that is absent on Server blocks on activation
-            # (CI run 44497333624: every section test that ran the
-            # real start timed out at 150 s; U5, whose stubbed
-            # tasklist short-circuits before the start, took 0.18 s).
-            # The start itself is exercised by X1 (real start, 300 s
-            # timeout) and in PE, where the apps exist; the other
-            # section tests verify the poll/return/marker logic, so
-            # they stub it the same way U2 stubs the guarded start.
-            $lines = @($lines | ForEach-Object {
-                if ($_ -match '^\s*start "" "%XCHECK_TARGET%"') { 'rem xcheck start stubbed for the harness (Server has no such app)' } else { $_ }
-            })
-        }
         & $script:WriteBatchCrlf $Path $lines
     }
 
@@ -198,7 +184,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
         try {
             $explorerBefore = & $script:TestExplorerRunning
             Write-Host "explorer running before: $explorerBefore"
-            & $script:BuildUwpBatch $bat $probeOut -StubXcheckStart
+            & $script:BuildUwpBatch $bat $probeOut
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
@@ -227,7 +213,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
                 }
             }
             Write-Host "explorer running before: $(& $script:TestExplorerRunning) (was running: $explorerWasRunning)"
-            & $script:BuildUwpBatch $bat $probeOut -StubXcheckStart
+            & $script:BuildUwpBatch $bat $probeOut
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
@@ -254,7 +240,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
         $probeOut = Join-Path $workDir 'micpe-probe.txt'
         $bat = Join-Path $workDir 'probe-uwp.bat'
         try {
-            & $script:BuildUwpBatch $bat $probeOut -StubStart -StubXcheckStart
+            & $script:BuildUwpBatch $bat $probeOut -StubStart
             $result = & $script:InvokeCmdTimed $bat $workDir
             Write-Host "cmd output: [$($result.Output)]"
             Write-Host "timed out: $($result.TimedOut); exit code: $($result.ExitCode)"
@@ -348,7 +334,7 @@ Describe 'probe.cmd uwp section stall (run 44161901638)' {
         $probeOut = Join-Path $workDir 'micpe-probe.txt'
         $bat = Join-Path $workDir 'probe-uwp.bat'
         try {
-            & $script:BuildUwpBatch $bat $probeOut -StubXcheckStart
+            & $script:BuildUwpBatch $bat $probeOut
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 60
             $sw.Stop()
@@ -924,6 +910,11 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # The whole point of the cross-check is a launch path that
         # does not need a running shell. :probe_xcheck must contain
         # no explorer guard and no explorer.exe in its start line.
+        # The start is detached (outer start launches a child cmd
+        # that runs the ShellExecute): a bare start blocks the probe
+        # indefinitely when the app cannot activate (CI run
+        # 44502105340 X1: 300 s with no start_after), so the child
+        # cmd absorbs the block and the probe keeps polling.
         $probe = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
         $sub = -1; $start = -1
         for ($i = 0; $i -lt $probe.Count; $i++) {
@@ -932,7 +923,7 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         }
         $sub | Should -BeGreaterThan -1 -Because 'probe.cmd must carry the :probe_xcheck subroutine'
         $start | Should -BeGreaterThan $sub -Because 'the subroutine must launch the app'
-        $probe[$start] | Should -Match 'start "" "%XCHECK_TARGET%"' -Because 'the launch is a plain ShellExecute of the shell:AppsFolder target'
+        $probe[$start] | Should -Match 'start "" cmd /c start "" "%XCHECK_TARGET%"' -Because 'the launch is detached: the outer start returns at once, the child cmd runs the ShellExecute'
         $probe[$start] | Should -Not -Match 'explorer\.exe' -Because 'the launch must not go through the explorer.exe process'
         $head = $probe[$sub..($start - 1)] -join "`n"
         $head | Should -Not -Match 'explorer_guard=0' -Because 'there is no explorer guard in the cross-check'
@@ -1069,17 +1060,16 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
         # absent on Server, so every launch is an honest 0 — but the
         # section must complete, the cross-check must attempt all three
         # apps without the guard, and the frame host must stay 0.
-        # This is the one section test that runs the REAL cross-check
-        # start (the others stub it): a bare ShellExecute for an app
-        # that is absent on Server can block on activation, so the
-        # timeout is 300 s and the probe file, not the clock, is the
-        # evidence if it ever stalls.
+        # The cross-check start is detached (a child cmd absorbs the
+        # block), so the section completes in ~35 s even though the
+        # apps are absent on Server; a bare start would block here
+        # for 300 s with no start_after (CI run 44502105340 X1).
         $workDir = & $script:NewWorkDir
         $probeOut = Join-Path $workDir 'micpe-probe.txt'
         $bat = Join-Path $workDir 'probe-uwp.bat'
         try {
             & $script:BuildUwpBatch $bat $probeOut
-            $result = & $script:InvokeCmdTimed $bat $workDir -TimeoutSec 300
+            $result = & $script:InvokeCmdTimed $bat $workDir
             $text = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
             Write-Host "probe file: [$text]"
             $result.TimedOut | Should -Be $false -Because 'a stall must surface as a timeout, not a hang of CI'
@@ -1152,12 +1142,12 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
             Write-Host "wer dump probe: [$text]"
             Write-Host "wer dump tasklist: [$task]"
             $text | Should -Match 'wer_reports=2' -Because 'one queue report plus one archive report'
-            $task | Should -Match 'WER ReportQueue AppCrash_explorer\\.exe_9f2a1c' -Because 'the queue report is headed with its entry name'
-            $task | Should -Match 'EXPLORERFRAME\\.DLL' -Because 'the queue Report.wer text is copied'
+            $task | Should -Match 'WER ReportQueue AppCrash_explorer\.exe_9f2a1c' -Because 'the queue report is headed with its entry name'
+            $task | Should -Match 'EXPLORERFRAME\.DLL' -Because 'the queue Report.wer text is copied'
             $task | Should -Match 'c0000005' -Because 'the exception code line is copied too'
-            $task | Should -Match 'WER ReportArchive AppCrash_explorer\\.exe_7b3e9d' -Because 'the archive report is headed the same way'
-            $task | Should -Match 'SHELL32\\.DLL' -Because 'the archive Report.wer text is copied'
-            $task | Should -Not -Match 'NOTEPAD\\.EXE' -Because 'a non-explorer entry must not be copied'
+            $task | Should -Match 'WER ReportArchive AppCrash_explorer\.exe_7b3e9d' -Because 'the archive report is headed the same way'
+            $task | Should -Match 'SHELL32\.DLL' -Because 'the archive Report.wer text is copied'
+            $task | Should -Not -Match 'NOTEPAD\.EXE' -Because 'a non-explorer entry must not be copied'
         }
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -1209,7 +1199,7 @@ Describe 'probe.cmd uwp guard and bang fix (static)' {
             Write-Host "mirror count probe: [$text]"
             $text | Should -Match 'mirror_root_files=3' -Because 'the temp mirror holds exactly three files'
             $text | Should -Match 'mirror_root_drive=' -Because 'the listed drive is recorded'
-            $task | Should -Match 'micpe-mirror\\.txt' -Because 'the root listing is dumped into the tasklist file'
+            $task | Should -Match 'micpe-mirror\.txt' -Because 'the root listing is dumped into the tasklist file'
             # Empty directory: 0, not missing.
             Remove-Item -LiteralPath (Join-Path $mirrorDir 'micpe-mirror.txt') -Force
             Remove-Item -LiteralPath (Join-Path $mirrorDir 'a.txt') -Force
