@@ -73,6 +73,39 @@ function Read-ProbeFile {
     return $result
 }
 
+function Merge-ProbeFiles {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $SharePath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $LocalPath
+    )
+
+    # Run 48: neither probe file alone holds every key. The share file
+    # carries the early share-only keys (explorer, shell_ready, dwm,
+    # the service states, the exit codes) that were never dual-written,
+    # while the local copy carries the late keys (payload, brand, the
+    # end snapshot) a stalled vvfat host view never saw — run 47's
+    # share file stopped at 12:43:48 with 55 keys the local copy lacks
+    # and 39 keys only the local copy has. The merge is the union:
+    # the share file is the base, the local copy overwrites on
+    # conflict, because its values are the newest write of each key
+    # (the probe echoes every key to both files; the local copy is
+    # refreshed by a whole-file copy at every section sync). A missing
+    # file contributes nothing — Read-ProbeFile returns empty for it.
+    # Read-ProbeFile trims values, so the trailing-space difference
+    # between the two files' copies of one line is irrelevant.
+    $merged = Read-ProbeFile -Path $SharePath
+    $local = Read-ProbeFile -Path $LocalPath
+    foreach ($key in $local.Keys) {
+        $merged[$key] = $local[$key]
+    }
+
+    return $merged
+}
+
 function Assert-ProbeResult {
     [CmdletBinding()]
     param(

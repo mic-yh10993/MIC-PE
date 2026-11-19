@@ -418,7 +418,17 @@ Describe 'probe local mirror (static)' {
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $text | Should -Match '> "%PROBE_LOCAL%" echo boot=1 & > "%PROBE_OUT%" echo boot=1'
         $text | Should -Match '>> "%PROBE_LOCAL%" echo share=%SHARE% & >> "%PROBE_OUT%" echo share=%SHARE%'
-        $text | Should -Match 'echo probe_done=1 >> "%PROBE_LOCAL%" & echo probe_done=1 >> "%PROBE_OUT%"'
+        # Run 48: probe_done goes to the local file FIRST and reaches
+        # the share by a detached whole-file copy, never by a share
+        # append — run 47 died between the end snapshot and shutdown,
+        # most likely on the share append of this very line, and the
+        # host then waited out the full timeout for a line the guest
+        # had already written.
+        $text | Should -Match 'echo probe_done=1 >> "%PROBE_LOCAL%"'
+        $text | Should -Not -Match 'echo probe_done=1 >> "%PROBE_OUT%"' -Because 'no share append of probe_done any more: the copy is the channel that survived run 47'
+        $text | Should -Match 'start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local\.txt"' -Because 'the detached copy refreshes the share copy without blocking the shutdown'
+        $text.IndexOf('echo probe_done=1 >> "%PROBE_LOCAL%"') | Should -BeLessThan $text.IndexOf('start "" /min cmd /c copy /y "%PROBE_LOCAL%"') -Because 'the local write comes before the copy that carries it'
+        $text.IndexOf('start "" /min cmd /c copy /y "%PROBE_LOCAL%"') | Should -BeLessThan $text.IndexOf('shutdown /s /t 5 /f') -Because 'the copy is fired before the shutdown that flushes the share'
     }
 
     It 'probe.cmd starts probe-sync.cmd right after the watchdog' {
@@ -452,13 +462,22 @@ Describe 'probe local mirror (static)' {
         # the volume mounted but the sentinel is invisible (vvfat
         # quirk); a letter absent means the volume never enumerated.
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
-        $text | Should -Match 'for %%D in \(C D E F G H I J K L M N O P Q R S T U V W X Y Z\) do if exist "%%D:\\" set "DRIVES=!DRIVES!%%D"' -Because 'every letter is probed for a visible root'
+        $text | Should -Match 'for %%D in \(A B C D E F G H I J K L M N O P Q R S T U V W X Y Z\) do if exist "%%D:\\" set "DRIVES=!DRIVES!%%D"' -Because 'every letter is probed for a visible root'
         $text | Should -Match 'echo drives=%DRIVES% >> "%PROBE_LOCAL%"' -Because 'the list is mirrored to the local file'
         $text | Should -Match 'echo drives=%DRIVES% >> "%PROBE_OUT%"' -Because 'and to the share'
         # Right after the mirror scan, so it answers the mirror=0
         # question in the same breath, and before the serial test.
         $text.IndexOf('echo drives=') | Should -BeGreaterThan $text.IndexOf('echo mirror_drive=')
         $text.IndexOf('echo drives=') | Should -BeLessThan $text.IndexOf('echo sync_test=')
+    }
+
+    It 'the mirror sentinel scan covers A: and B: (run 48)' {
+        # Run 47: the mirror volume mounted as A: (mountvol showed
+        # C:/X:/A:/D:) and the old C-first scan never saw it, so
+        # mirror=0 was a probe miss, not a missing volume.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'for %%D in \(A B C D E F G H I J K L M N O P Q R S T U V W Y Z\) do \(' -Because 'the sentinel scan starts at A:, not C:'
+        $text | Should -Match 'if exist "%%D:\\micpe-mirror\.txt" set "MIRROR_DIR=%%D:\\"' -Because 'the mirror drive is still found by sentinel, never by letter'
     }
 
     It 'reverse control: without the drives echo the enumeration test fails' {

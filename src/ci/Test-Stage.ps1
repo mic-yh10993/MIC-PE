@@ -104,7 +104,10 @@ $result = Invoke-QemuVerify -Iso $Iso -ShareDir $shareDir -TimeoutMin $TimeoutMi
 # cannot be found on this object" here under Set-StrictMode). Guard first:
 # anything that is not the result object is a clean probe timeout, not a
 # crash -- exit 2 with the same "never wrote a probe file" message.
-if ($null -eq $result -or $result -isnot [pscustomobject] -or -not $result.ProbeSeen) {
+# Run 48: either probe file counts — the share file alone went missing
+# in run 47 while the local copy held the whole run, so a run with
+# only the local copy is still a run worth judging, not a timeout.
+if ($null -eq $result -or $result -isnot [pscustomobject] -or (-not $result.ProbeSeen -and -not $result.LocalProbeSeen)) {
     Write-Host ''
     Write-Warn 'the PE never wrote a probe file'
     # .ProbePath is only safe on the result object itself: on an Object[]
@@ -119,7 +122,7 @@ if ($null -eq $result -or $result -isnot [pscustomobject] -or -not $result.Probe
     exit 2
 }
 
-$probe = Read-ProbeFile -Path $result.ProbePath
+$probe = Merge-ProbeFiles -SharePath $result.ProbePath -LocalPath $result.ProbeLocalPath
 $expected = Get-StageProbeExpect -Stage $Stage
 
 Write-Host ''

@@ -77,7 +77,10 @@ rem after the boot=1 line above: that line truncates both probe files
 rem with a single >, so a mirror line written before it would be wiped
 rem (CI run 44440362261 proved it: mirror=0 never landed).
 set "MIRROR_DIR="
-for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+rem Run 48: A: and B: are in the scan now — run 47 proved the mirror
+rem volume mounts as A: and the old C-first scan never saw it, so
+rem mirror=0 was a probe miss, not a missing volume.
+for %%D in (A B C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
     if exist "%%D:\micpe-mirror.txt" set "MIRROR_DIR=%%D:\"
 )
 if defined MIRROR_DIR (echo mirror=1 >> "%PROBE_LOCAL%" & echo mirror=1 >> "%PROBE_OUT%") else (echo mirror=0 >> "%PROBE_LOCAL%" & echo mirror=0 >> "%PROBE_OUT%")
@@ -91,7 +94,10 @@ rem mounted but the sentinel is invisible (vvfat quirk); a letter absent
 rem means the volume never enumerated. Written right after the mirror
 rem scan, so it lands in both probe files even if the probe dies later.
 set "DRIVES="
-for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist "%%D:\" set "DRIVES=!DRIVES!%%D"
+rem Run 48: A: and B: are enumerated too — run 47 mounted the mirror
+rem as A: and the old list hid it from drives= as well as from the
+rem sentinel scan, so both keys blamed the volume instead of the scan.
+for %%D in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist "%%D:\" set "DRIVES=!DRIVES!%%D"
 echo drives=%DRIVES% >> "%PROBE_LOCAL%" & echo drives=%DRIVES% >> "%PROBE_OUT%"
 
 rem Serial channel test (run 44410311576): probe-sync.cmd wrote zero sync
@@ -385,10 +391,17 @@ echo --- sc queryex StateRepository --- >> "%TASKLIST_OUT%"
 sc queryex StateRepository >> "%TASKLIST_OUT%" 2>&1
 set "APPXSVC_EXIT="
 for /f "tokens=3" %%A in ('sc queryex AppXSVC 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "APPXSVC_EXIT=%%A"
-if defined APPXSVC_EXIT (echo appxsvc_exitcode=%APPXSVC_EXIT% >> "%PROBE_OUT%") else (echo appxsvc_exitcode=missing >> "%PROBE_OUT%")
+rem Run 48: the exit codes are dual-written now — they are verdict keys
+rem for the activation chain, and run 47 proved a share-only key can
+rem go missing when the host view stalls. AppReadiness gets the same
+rem read: its exit code was never recorded before.
+if defined APPXSVC_EXIT (echo appxsvc_exitcode=%APPXSVC_EXIT% >> "%PROBE_LOCAL%" & echo appxsvc_exitcode=%APPXSVC_EXIT% >> "%PROBE_OUT%") else (echo appxsvc_exitcode=missing >> "%PROBE_LOCAL%" & echo appxsvc_exitcode=missing >> "%PROBE_OUT%")
 set "STATEREPO_EXIT="
 for /f "tokens=3" %%A in ('sc queryex StateRepository 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "STATEREPO_EXIT=%%A"
-if defined STATEREPO_EXIT (echo staterepo_exitcode=%STATEREPO_EXIT% >> "%PROBE_OUT%") else (echo staterepo_exitcode=missing >> "%PROBE_OUT%")
+if defined STATEREPO_EXIT (echo staterepo_exitcode=%STATEREPO_EXIT% >> "%PROBE_LOCAL%" & echo staterepo_exitcode=%STATEREPO_EXIT% >> "%PROBE_OUT%") else (echo staterepo_exitcode=missing >> "%PROBE_LOCAL%" & echo staterepo_exitcode=missing >> "%PROBE_OUT%")
+set "APPREADY_EXIT="
+for /f "tokens=3" %%A in ('sc queryex AppReadiness 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "APPREADY_EXIT=%%A"
+if defined APPREADY_EXIT (echo appready_exitcode=%APPREADY_EXIT% >> "%PROBE_LOCAL%" & echo appready_exitcode=%APPREADY_EXIT% >> "%PROBE_OUT%") else (echo appready_exitcode=missing >> "%PROBE_LOCAL%" & echo appready_exitcode=missing >> "%PROBE_OUT%")
 if exist "%ProgramData%\Microsoft\Windows\AppRepository\StateRepository-Machine.srd" (
     echo staterepo_db=1 >> "%PROBE_OUT%"
 ) else (
@@ -504,15 +517,39 @@ if "%AUMID_PHOTOS%"=="0" (echo aumid_photos=1 >> "%PROBE_LOCAL%" & echo aumid_ph
 find /i "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic" "%SystemDrive%\micpe-aumid.tmp" >nul
 set "AUMID_MEDIA=%ERRORLEVEL%"
 if "%AUMID_MEDIA%"=="0" (echo aumid_media=1 >> "%PROBE_LOCAL%" & echo aumid_media=1 >> "%PROBE_OUT%") else (echo aumid_media=0 >> "%PROBE_LOCAL%" & echo aumid_media=0 >> "%PROBE_OUT%")
+rem Run 48: the dump's line count says whether the store enumeration
+rem itself was empty — appxstore_*=1 proves the package keys exist,
+rem so aumid_*=0 with a rich dump means the !App subkeys are missing,
+rem while a near-empty dump would blame the enumeration instead.
+set "AUMID_LINES=0"
+if exist "%SystemDrive%\micpe-aumid.tmp" for /f %%A in (%SystemDrive%\micpe-aumid.tmp) do set /a AUMID_LINES+=1
+echo aumid_lines=%AUMID_LINES% >> "%PROBE_LOCAL%" & echo aumid_lines=%AUMID_LINES% >> "%PROBE_OUT%"
 del "%SystemDrive%\micpe-aumid.tmp" >nul 2>&1
 endlocal
 if exist "%SystemRoot%\System32\twinapi.appcore.dll" if exist "%SystemRoot%\System32\Windows.UI.Xaml.dll" if exist "%SystemRoot%\System32\AppXDeploymentClient.dll" if exist "%SystemRoot%\System32\Windows.StateRepository.dll" (echo activation_files=1 >> "%PROBE_LOCAL%" & echo activation_files=1 >> "%PROBE_OUT%") else (echo activation_files=0 >> "%PROBE_LOCAL%" & echo activation_files=0 >> "%PROBE_OUT%")
+rem Run 48: AppXDeploymentServer.dll is the in-process deployment
+rem server the activation path loads (the client DLL above is only
+rem the caller side) — its absence would break activation even with
+rem the client present.
+if exist "%SystemRoot%\System32\AppXDeploymentServer.dll" (echo activation_appxdeployserver=1 >> "%PROBE_LOCAL%" & echo activation_appxdeployserver=1 >> "%PROBE_OUT%") else (echo activation_appxdeployserver=0 >> "%PROBE_LOCAL%" & echo activation_appxdeployserver=0 >> "%PROBE_OUT%")
 echo --- sc qc AppXSVC --- >> "%TASKLIST_OUT%"
 sc qc AppXSVC >> "%TASKLIST_OUT%" 2>&1
 echo --- sc qc StateRepository --- >> "%TASKLIST_OUT%"
 sc qc StateRepository >> "%TASKLIST_OUT%" 2>&1
 echo --- sc qc AppReadiness --- >> "%TASKLIST_OUT%"
 sc qc AppReadiness >> "%TASKLIST_OUT%" 2>&1
+rem Run 48: the raw sc qc dumps above name the config, but the stage
+rem cannot assert on a tasklist dump — record the parsed values as
+rem keys: the Start type (3 = manual, so nothing ever starts the
+rem service unless asked), the ServiceDll the SCM would load, whether
+rem that file exists, and the account it would run as. Together with
+rem the queryex exit codes above, these say WHY a deployment service
+rem never runs. Reads only — the run 39 control (no sc start in this
+rem probe) stays in force; starting the services is a separate
+rem experiment, not this round.
+call :probe_svc_reg AppXSVC appxsvc
+call :probe_svc_reg StateRepository staterepo
+call :probe_svc_reg AppReadiness appready
 echo --- mountvol --- >> "%TASKLIST_OUT%"
 mountvol >> "%TASKLIST_OUT%" 2>nul
 echo mountvol_dump=1 >> "%PROBE_LOCAL%" & echo mountvol_dump=1 >> "%PROBE_OUT%"
@@ -776,6 +813,10 @@ for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*") do 
     if exist "%%D\Report.wer" (
         echo --- WER ReportQueue %%~nxD --- >> "%TASKLIST_OUT%"
         type "%%D\Report.wer" >> "%TASKLIST_OUT%" 2>nul
+        rem Run 48: direct copy to the share, same reason as the
+        rem mid-run snapshots — the tasklist transcription did not
+        rem survive run 47. This is the unsuffixed end-snapshot copy.
+        if defined PROBE_DIR copy /y "%%D\Report.wer" "%PROBE_DIR%micpe-wer-explorer.wer" >nul 2>&1
         set /a WER_REPORTS+=1
     )
 )
@@ -787,6 +828,7 @@ for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*") d
     )
 )
 echo wer_reports=%WER_REPORTS% >> "%PROBE_LOCAL%" & echo wer_reports=%WER_REPORTS% >> "%PROBE_OUT%"
+if defined PROBE_DIR if exist "%PROBE_DIR%micpe-wer-explorer.wer" (echo wer_wer_copy=1 >> "%PROBE_LOCAL%" & echo wer_wer_copy=1 >> "%PROBE_OUT%") else (echo wer_wer_copy=0 >> "%PROBE_LOCAL%" & echo wer_wer_copy=0 >> "%PROBE_OUT%")
 echo wer_explorer=%WER_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_explorer=%WER_EXPLORER% >> "%PROBE_OUT%"
 
 rem Run 46 (explorer breakpoint): a silent exit writes no Event
@@ -825,9 +867,20 @@ set "DUMP_MEMORY=0"
 if exist "%SystemRoot%\MEMORY.dmp" set "DUMP_MEMORY=1"
 echo dump_memory=%DUMP_MEMORY% >> "%PROBE_OUT%"
 
-rem Run 47: final sync so the share copy holds the end snapshot too.
-call :probe_sync_local
-echo probe_done=1 >> "%PROBE_LOCAL%" & echo probe_done=1 >> "%PROBE_OUT%"
+rem Run 48: probe_done goes to the local file FIRST, then the share
+rem copy is refreshed by a detached copy — never by a share append.
+rem Run 47 died between the end snapshot and shutdown, most likely on
+rem the share append of this very line, and the host then waited out
+rem the full timeout for a line the guest had already written. The
+rem copy is the channel that survived run 47 (the local copy reached
+rem the host complete at every section sync); the detached copy plus
+rem a fixed 3-second wait means a wedged share write can delay the
+rem copy but can no longer stop the shutdown that flushes the share.
+rem The watchdog and the harness both read the share copy, so a copy
+rem that lands in under 3 seconds still ends the wait the fast way.
+echo probe_done=1 >> "%PROBE_LOCAL%"
+if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
+choice /c Y /d Y /t 3 >nul
 
 if "%MICPE_HOLD%"=="1" (
     echo.
@@ -1055,6 +1108,17 @@ if exist "%ProgramData%\Microsoft\Windows\WER\ReportQueue\*explorer*" (
             echo --- WER %~1 ReportQueue %%~nxD --- >> "%TASKLIST_OUT%"
             type "%%D\Report.wer" >> "%TASKLIST_OUT%" 2>nul
         )
+        rem Run 48: the tasklist copy of Report.wer never reached the
+        rem host in run 47 — the share view stopped at 12:41, before
+        rem the end snapshot typed it. Copy the file itself to the
+        rem share: a fresh create+write+close is the channel that
+        rem survived run 47 (the local probe copy landed complete at
+        rem every section sync), while an append into the live probe
+        rem file stalled. The _copy key says whether it landed.
+        if defined PROBE_DIR if exist "%%D\Report.wer" (
+            copy /y "%%D\Report.wer" "%PROBE_DIR%micpe-wer-explorer-%~1.wer" >nul 2>&1
+            if exist "%PROBE_DIR%micpe-wer-explorer-%~1.wer" (echo wer_%~1_wer_copy=1 >> "%PROBE_LOCAL%" & echo wer_%~1_wer_copy=1 >> "%PROBE_OUT%") else (echo wer_%~1_wer_copy=0 >> "%PROBE_LOCAL%" & echo wer_%~1_wer_copy=0 >> "%PROBE_OUT%")
+        )
         set /a WER_SNAP_REPORTS+=1
     )
 )
@@ -1063,6 +1127,13 @@ if exist "%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*" (
     for /d %%D in ("%ProgramData%\Microsoft\Windows\WER\ReportArchive\*explorer*") do (
         echo wer_%~1_explorer_archive_name=%%~nxD >> "%PROBE_LOCAL%" & echo wer_%~1_explorer_archive_name=%%~nxD >> "%PROBE_OUT%"
         echo wer_%~1_explorer_archive_time=%%~tD >> "%PROBE_LOCAL%" & echo wer_%~1_explorer_archive_time=%%~tD >> "%PROBE_OUT%"
+        rem Run 48: same direct copy as the queue loop above — an
+        rem archived report is the same breakpoint evidence, and the
+        rem tasklist transcription is not a reliable channel.
+        if defined PROBE_DIR if exist "%%D\Report.wer" (
+            copy /y "%%D\Report.wer" "%PROBE_DIR%micpe-wer-explorer-%~1-archive.wer" >nul 2>&1
+            if exist "%PROBE_DIR%micpe-wer-explorer-%~1-archive.wer" (echo wer_%~1_archive_wer_copy=1 >> "%PROBE_LOCAL%" & echo wer_%~1_archive_wer_copy=1 >> "%PROBE_OUT%") else (echo wer_%~1_archive_wer_copy=0 >> "%PROBE_LOCAL%" & echo wer_%~1_archive_wer_copy=0 >> "%PROBE_OUT%")
+        )
     )
 )
 echo wer_%~1_explorer=%WER_SNAP_EXPLORER% >> "%PROBE_LOCAL%" & echo wer_%~1_explorer=%WER_SNAP_EXPLORER% >> "%PROBE_OUT%"
@@ -1147,4 +1218,34 @@ rem section — the harness uploads that copy, and a NUL hole in the
 rem live probe file no longer eats a conclusion. A no-op when
 rem PROBE_DIR is unset (local test runs).
 if defined PROBE_DIR copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
+exit /b 0
+
+:probe_svc_reg
+rem %1 = service name, %2 = key prefix. Run 48: read the service's
+rem start config straight from the SCM and the registry so the stage
+rem can say WHY a deployment service never runs — the Start type
+rem (3 = manual: nothing ever starts it unless asked), the ServiceDll
+rem the SCM would load, whether that file exists, and the account it
+rem would run as. Together with the queryex exit codes, these keys
+rem separate "never asked to start" from "asked and failed".
+rem Reads only; never starts anything — the run 39 control (no
+rem sc start in this probe) stays in force. The goto avoids a
+rem parenthesised block: %SVC_REG_DLL_X% would expand at block-parse
+rem time, before the call set line runs.
+set "SVC_REG_START=missing"
+set "SVC_REG_DLL=missing"
+set "SVC_REG_DLL_EXISTS=0"
+set "SVC_REG_OBJ=missing"
+set "SVC_REG_DLL_X="
+for /f "tokens=3" %%A in ('sc qc %1 2^>nul ^| find /i "START_TYPE"') do set "SVC_REG_START=%%A"
+for /f "tokens=2,*" %%A in ('sc qc %1 2^>nul ^| find /i "SERVICE_START_NAME"') do set "SVC_REG_OBJ=%%B"
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Services\%1\Parameters" /v ServiceDll 2^>nul ^| find /i "ServiceDll"') do set "SVC_REG_DLL=%%B"
+if "%SVC_REG_DLL%"=="missing" goto :svc_reg_write
+call set "SVC_REG_DLL_X=%SVC_REG_DLL%"
+if exist "%SVC_REG_DLL_X%" set "SVC_REG_DLL_EXISTS=1"
+:svc_reg_write
+echo svc_%2_start=%SVC_REG_START% >> "%PROBE_LOCAL%" & echo svc_%2_start=%SVC_REG_START% >> "%PROBE_OUT%"
+echo svc_%2_dll=%SVC_REG_DLL% >> "%PROBE_LOCAL%" & echo svc_%2_dll=%SVC_REG_DLL% >> "%PROBE_OUT%"
+echo svc_%2_dll_exists=%SVC_REG_DLL_EXISTS% >> "%PROBE_LOCAL%" & echo svc_%2_dll_exists=%SVC_REG_DLL_EXISTS% >> "%PROBE_OUT%"
+echo svc_%2_obj=%SVC_REG_OBJ% >> "%PROBE_LOCAL%" & echo svc_%2_obj=%SVC_REG_OBJ% >> "%PROBE_OUT%"
 exit /b 0

@@ -584,6 +584,28 @@ Describe 'Test-ScreenshotFrozen' {
     It 'is false when the probe already completed' {
         Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nprobe_done=1`r`n" | Should -BeFalse
     }
+
+    It 'is false when the watchdog heartbeat grew between screenshots (run 48)' {
+        # Run 47: identical screenshots and a share probe that had
+        # not grown since the last shot — but the guest was alive and
+        # the watchdog was still ticking (quiet=0 the whole run). A
+        # growing heartbeat vetoes the frozen verdict.
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nexplorer=1`r`n" -PreviousHeartbeatLength 100 -CurrentHeartbeatLength 150 -HeartbeatExists $true | Should -BeFalse
+    }
+
+    It 'is true when the screen is frozen, the probe is silent, and the heartbeat is silent too (run 48)' {
+        # Run 46, the true freeze: the guest wedged so hard the
+        # watchdog died with it, so the heartbeat stops growing as
+        # well. All three signals still together means frozen.
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nexplorer=1`r`n" -PreviousHeartbeatLength 100 -CurrentHeartbeatLength 100 -HeartbeatExists $true | Should -BeTrue
+    }
+
+    It 'falls back to the old behaviour when no heartbeat file exists yet (run 48)' {
+        # The watchdog starts mid-run, so early screenshots have no
+        # heartbeat file at all — the frozen verdict then rests on
+        # the screenshots and the probe alone, as before.
+        Test-ScreenshotFrozen -PreviousHash 'aaa' -CurrentHash 'aaa' -PreviousProbeLength 100 -CurrentProbeLength 100 -ProbeExists $true -ProbeContent "boot=1`r`nexplorer=1`r`n" -HeartbeatExists $false | Should -BeTrue
+    }
 }
 
 Describe 'dot-sourcing the helper' {

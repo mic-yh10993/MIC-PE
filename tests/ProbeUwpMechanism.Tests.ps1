@@ -1519,12 +1519,13 @@ Describe 'probe.cmd wedge and activation diagnostics (run 47)' {
     It 'copies the local probe file to the share at the end of every section' {
         $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
         $calls = @([regex]::Matches($text, 'call :probe_sync_local'))
-        $calls.Count | Should -Be 5 -Because 'diag, uwp, xcheck, brand, and the end each sync the local file'
+        $calls.Count | Should -Be 4 -Because 'diag, uwp, xcheck, and brand each sync the local file; the end uses a detached copy now (run 48)'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot diag')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot diag') -Because 'the diag section syncs after its snapshot'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot uwp')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot uwp') -Because 'the uwp section syncs after its snapshot'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('call :probe_wer_snapshot xcheck')) | Should -BeGreaterThan $text.IndexOf('call :probe_wer_snapshot xcheck') -Because 'the xcheck section syncs after its snapshot'
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('echo brand=')) | Should -BeGreaterThan $text.IndexOf('echo brand=') -Because 'the brand section syncs after the brand verdict'
-        $text.IndexOf('call :probe_sync_local', $text.IndexOf('echo dump_memory=')) | Should -BeLessThan $text.IndexOf('echo probe_done=1') -Because 'the end sync happens before probe_done'
+        $text.IndexOf('start "" /min cmd /c copy /y "%PROBE_LOCAL%"', $text.IndexOf('echo dump_memory=')) | Should -BeGreaterThan $text.IndexOf('echo dump_memory=') -Because 'the end copy happens after the end snapshot, in place of the fifth sync'
+        $text.IndexOf('start "" /min cmd /c copy /y "%PROBE_LOCAL%"') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'the end copy is fired after probe_done is written to the local file'
         $sync = & $script:ExtractProbeSub ':probe_sync_local' ''
         ($sync -join "`n") | Should -Match 'copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local\.txt"' -Because 'the sync copies the local file onto the share'
     }
@@ -1702,5 +1703,125 @@ Describe 'probe.cmd wedge and activation diagnostics (run 47)' {
         finally {
             Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+Describe 'probe.cmd run 48 harness liveness and activation diagnostics (run 48)' {
+    BeforeAll {
+        # Same subroutine extractor as the run 47 Describe: extract by
+        # content (label to the next label), so the tests run against
+        # the real code, not a hand copy that can drift silently.
+        $script:ExtractProbeSub48 = {
+            param([string] $Label, [string] $StopLabel)
+            $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+            $start = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match "^$Label") { $start = $i; break }
+            }
+            if ($start -lt 0) { throw "subroutine $Label not found in probe.cmd" }
+            $end = $lines.Count - 1
+            for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+                if ($StopLabel -and ($lines[$i] -match "^$StopLabel")) { $end = $i - 1; break }
+            }
+            return ,@($lines[$start..$end])
+        }
+    }
+
+    It 'copies each WER Report.wer straight to the share in the mid-run snapshot' {
+        # Run 47: the WER report NAME and time reached the host, but
+        # the Report.wer CONTENT never did — the share view stopped at
+        # 12:41, before the end snapshot typed it into the tasklist
+        # file, so the faulting module is still blank. A fresh
+        # create+write+close copy is the channel that survived run 47
+        # (the local probe copy landed complete at every section
+        # sync); the tasklist transcription is not a reliable channel.
+        $snap = & $script:ExtractProbeSub48 ':probe_wer_snapshot' ':probe_poll_check'
+        $body = $snap -join "`n"
+        $body | Should -Match 'micpe-wer-explorer-%~1\.wer' -Because 'the queue report is copied under a suffixed name'
+        $body | Should -Match 'wer_%~1_wer_copy=' -Because 'the queue copy landing is recorded with its suffix'
+        $body | Should -Match 'micpe-wer-explorer-%~1-archive\.wer' -Because 'the archive report is copied under its own suffixed name'
+        $body | Should -Match 'wer_%~1_archive_wer_copy=' -Because 'the archive copy landing is recorded with its suffix'
+        $body | Should -Match 'copy /y "%%D\\Report\.wer" "%PROBE_DIR%micpe-wer-explorer-%~1\.wer"' -Because 'the copy is a whole-file copy, not an append into the live probe file'
+    }
+
+    It 'copies the end-snapshot WER report straight to the share too' {
+        # The end snapshot keeps its unsuffixed keys; the copy lands
+        # under the unsuffixed name so build.yml can upload it with
+        # one glob.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'copy /y "%%D\\Report\.wer" "%PROBE_DIR%micpe-wer-explorer\.wer"' -Because 'the end snapshot copies its report the same way'
+        $text | Should -Match 'wer_wer_copy=' -Because 'the end copy landing is recorded'
+        $text.IndexOf('wer_wer_copy=') | Should -BeGreaterThan $text.IndexOf('wer_reports=') -Because 'the copy key is written after the report count'
+        $text.IndexOf('wer_wer_copy=') | Should -BeLessThan $text.IndexOf('rem Run 46 (explorer breakpoint): a silent exit writes no Event') -Because 'the copy key belongs to the WER block, not the evtx block'
+    }
+
+    It 'diagnoses the deployment services start config without starting them' {
+        # Run 48: AppXSVC/StateRepository/AppReadiness sit STOPPED
+        # with Start=0x3 (manual) and nothing ever starts them — the
+        # launches need them running, so the probe records WHY they
+        # never run: the Start type, the ServiceDll the SCM would
+        # load, whether that file exists, and the account. Reads only.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        foreach ($svc in @('AppXSVC', 'StateRepository', 'AppReadiness')) {
+            $text | Should -Match "call :probe_svc_reg $svc" -Because "the $svc start config is recorded in the activation block"
+        }
+        $text.IndexOf('call :probe_svc_reg AppXSVC') | Should -BeGreaterThan $text.IndexOf('sc qc AppReadiness') -Because 'the reg reads come after the raw qc dumps'
+        $text.IndexOf('call :probe_svc_reg AppReadiness') | Should -BeLessThan $text.IndexOf('echo --- mountvol ---') -Because 'the reg reads come before the volume dump'
+        $reg = & $script:ExtractProbeSub48 ':probe_svc_reg' $null
+        $regBody = $reg -join "`n"
+        $regBody | Should -Match 'sc qc %1' -Because 'the Start type and the account come from sc qc'
+        $regBody | Should -Match 'START_TYPE' -Because 'the Start type is parsed from the qc output'
+        $regBody | Should -Match 'SERVICE_START_NAME' -Because 'the account is parsed from the qc output'
+        $regBody | Should -Match 'ServiceDll' -Because 'the ServiceDll comes from the service Parameters key'
+        $regBody | Should -Match 'svc_%2_start=' -Because 'the Start type is recorded under the service prefix'
+        $regBody | Should -Match 'svc_%2_dll=' -Because 'the ServiceDll literal is recorded under the service prefix'
+        $regBody | Should -Match 'svc_%2_dll_exists=' -Because 'the ServiceDll file existence is recorded under the service prefix'
+        $regBody | Should -Match 'svc_%2_obj=' -Because 'the account is recorded under the service prefix'
+        $regBody | Should -Match 'exit /b 0' -Because 'the subroutine returns cleanly'
+    }
+
+    It 'still does NOT start the AppX services (run 39 control stays in force)' {
+        # The run 39 control: the probe and the watchdog both stopped
+        # within ~15 seconds of two sc start calls, so sc start is the
+        # prime suspect for a guest-wide wedge — and a detached sc.exe
+        # would not protect against the service start itself wedging
+        # the guest. Runs 41/44/45/47 proved the probe runs through
+        # WITHOUT starting them, so the start attempt is a separate
+        # experiment (after probe_done, where a wedge costs nothing),
+        # not this round.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Not -Match 'sc start AppXSVC' -Because 'the control run must not start AppXSVC'
+        $text | Should -Not -Match 'sc start StateRepository' -Because 'the control run must not start StateRepository'
+        $text | Should -Not -Match 'sc start AppReadiness' -Because 'AppReadiness is only queried, not started'
+        $text | Should -Not -Match 'appxsvc_start=' -Because 'no start attempt means no start outcome to record'
+        $text | Should -Not -Match 'staterepo_start=' -Because 'no start attempt means no start outcome to record'
+    }
+
+    It 'counts the AUMID dump lines and checks the deployment server DLL' {
+        # Run 47: aumid_*=0 with appxstore_*=1 — the package keys
+        # exist, the !App subkeys do not resolve. The dump line count
+        # says whether the enumeration itself was empty; the
+        # AppXDeploymentServer.dll check closes the last gap in the
+        # activation-files list (the client DLL alone is not the
+        # whole activation path).
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'aumid_lines=' -Because 'the dump size is recorded'
+        $text.IndexOf('aumid_lines=') | Should -BeLessThan $text.IndexOf('del "%SystemDrive%\micpe-aumid.tmp"') -Because 'the count is taken before the dump is deleted'
+        $text | Should -Match 'activation_appxdeployserver=' -Because 'the deployment server DLL is recorded'
+        $text.IndexOf('activation_appxdeployserver=') | Should -BeGreaterThan $text.IndexOf('activation_files=1') -Because 'the server check sits with the activation file checks'
+        $text.IndexOf('activation_appxdeployserver=') | Should -BeLessThan $text.IndexOf('call :probe_uwp CalculatorApp') -Because 'the server check runs before the launches'
+    }
+
+    It 'dual-writes the service exit codes and adds the AppReadiness one' {
+        # Run 47 proved a share-only key can go missing when the host
+        # view stalls; the exit codes are verdict keys for the
+        # activation chain, so they are dual-written now. AppReadiness
+        # never had its exit code recorded before.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'echo appxsvc_exitcode=%APPXSVC_EXIT% >> "%PROBE_LOCAL%"' -Because 'the AppXSVC exit code survives a stalled share view'
+        $text | Should -Match 'echo staterepo_exitcode=%STATEREPO_EXIT% >> "%PROBE_LOCAL%"' -Because 'the StateRepository exit code survives a stalled share view'
+        $text | Should -Match 'sc queryex AppReadiness' -Because 'the AppReadiness exit code is read too'
+        $text | Should -Match 'echo appready_exitcode=%APPREADY_EXIT% >> "%PROBE_LOCAL%"' -Because 'the AppReadiness exit code is dual-written like the others'
+        $text.IndexOf('appready_exitcode=') | Should -BeGreaterThan $text.IndexOf('staterepo_exitcode=') -Because 'the AppReadiness read follows the StateRepository read'
     }
 }
