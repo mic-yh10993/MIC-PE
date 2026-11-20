@@ -89,8 +89,8 @@ Describe 'WER local dumps registry patch (run 49)' {
         # import only (user decision 2026-11-17 23:43); nothing is
         # written to the registry inside PE.
         $script:reg60 | Should -Match 'Windows Error Reporting\\LocalDumps\\explorer\.exe\]' -Because 'the entry is scoped to explorer.exe'
-        $script:reg60.Contains('"DumpFolder"="X:\CrashDumps"') | Should -BeTrue -Because 'the dump folder is the PE system drive'
-        $script:reg60.Contains('"DumpFolder"="X:\\CrashDumps"') | Should -BeFalse -Because 'a doubled backslash would point at a literal backslash folder'
+        $script:reg60.Contains('"DumpFolder"="X:\\CrashDumps"') | Should -BeTrue -Because '.reg string syntax needs a doubled backslash for a literal backslash — a lone backslash makes reg.exe silently skip the value while exiting 0 (run 55)'
+        $script:reg60.Contains('"DumpFolder"="X:\CrashDumps"') | Should -BeFalse -Because 'a lone backslash is an invalid .reg escape: reg.exe drops the DumpFolder value and the DWORDs land alone (run 55 repro: key existed with DumpCount, DumpType, no DumpFolder)'
         $script:reg60.Contains('"DumpType"=dword:00000001') | Should -BeTrue -Because 'DumpType 1 is a mini dump'
         $script:reg60.Contains('"DumpCount"=dword:00000003') | Should -BeTrue -Because 'DumpCount 3 keeps at most three dumps on the RAM disk'
     }
@@ -379,11 +379,16 @@ Describe 'SYSTEM import of the real 60-werdumps.reg lands the values (run 55 rep
 
     It 'imports the real 60-werdumps.reg as SYSTEM into a scratch hive and reads all three values back' -Skip:(-not $IsWindows) {
         # Run 54: the import exited 0 while the values never landed
-        # (key existed, DumpFolder did not). This is the same call
-        # shape the Build makes — a snapshot of the runner SOFTWARE
-        # hive mounted as PE-SOFT, LocalDumps removed first so the
-        # import must create the intermediate keys, exactly like the
-        # stock image where LocalDumps does not exist.
+        # (key existed, DumpFolder did not). Run 55 reproduced it
+        # here and pinned the mechanism: the file's DumpFolder line
+        # had a lone backslash ("X:\CrashDumps"), which reg.exe
+        # silently skips while writing the DWORDs and exiting 0.
+        # The file now doubles the backslash, so this test is the
+        # regression test that the fixed file lands all three values.
+        # Same call shape the Build makes — a snapshot of the runner
+        # SOFTWARE hive mounted as PE-SOFT, LocalDumps removed first
+        # so the import must create the intermediate keys, exactly
+        # like the stock image where LocalDumps does not exist.
         $work = Join-Path $script:TempRoot "wer-sys-$(Get-Random)"
         New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
         $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
@@ -502,6 +507,52 @@ Describe 'SYSTEM import of the real 60-werdumps.reg lands the values (run 55 rep
                 $values['DumpFolder'] | Should -Be 'X:\CrashDumps'
                 $values['DumpCount'] | Should -Match '^0x0*3$'
                 $values['DumpType'] | Should -Match '^0x0*1$'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'PE-SOFT'
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'a lone backslash in a REG_SZ value is silently dropped by reg.exe (mechanism, run 55)' -Skip:(-not $IsWindows) {
+        # The rule the repro pinned: in .reg string values a
+        # backslash must be doubled for a literal backslash. A file
+        # with a lone backslash ("X:\CrashDumps") imports with exit
+        # 0, writes the DWORDs, and silently drops the string value
+        # — the read-back in Invoke-RegImportAsSystem is what turns
+        # that into a loud failure instead of a silent miss.
+        $work = Join-Path $script:TempRoot "wer-bs-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        $singleReg = Join-Path $work 'single-bs.reg'
+        $regText = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            '[HKEY_LOCAL_MACHINE\PE-SOFT\Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe]',
+            '"DumpFolder"="X:\CrashDumps"',
+            '"DumpCount"=dword:00000003',
+            '"DumpType"=dword:00000001',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($singleReg, $regText, [System.Text.Encoding]::Unicode)
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'PE-SOFT'
+            try {
+                $null = & reg.exe delete "HKLM\PE-SOFT\$($script:werParent)" /f 2>&1
+                { Invoke-RegImportAsSystem -RegFile $singleReg } | Should -Throw '*DumpFolder*missing*'
+                # The DWORDs still land — only the string is dropped,
+                # which is why the miss stayed silent until the
+                # read-back existed.
+                $values = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey $script:werSub
+                $values | Should -Not -BeNullOrEmpty
+                $values['DumpCount'] | Should -Match '^0x0*3$'
+                $values['DumpType'] | Should -Match '^0x0*1$'
+                $values.Contains('DumpFolder') | Should -BeFalse
             }
             finally {
                 Dismount-RegistryHive -KeyName 'PE-SOFT'
