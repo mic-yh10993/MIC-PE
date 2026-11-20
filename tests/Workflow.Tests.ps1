@@ -113,11 +113,15 @@ Describe 'build.yml verify wiring' {
         # the FeatureManagement group keys (SYSTEM has only KEY_READ on
         # Overrides\0, \15, \9), so the feature patch goes through the
         # privileged backup/restore write instead. CI-time import only
-        # (user decision 2026-11-17 23:43).
-        $script:buildScript | Should -Match "'40-uwp\.reg', '60-werdumps\.reg', '70-feature-42537950\.reg'" -Because 'the feature patch is imported with the UWP patch'
+        # (user decision 2026-11-17 23:43). Run 58 adds
+        # 80-etc-42537950.reg to the privileged write: the active
+        # EnterpriseTempControls config also gives SYSTEM only
+        # KEY_READ, so it rides the same DACL save/write/restore flow.
+        $script:buildScript | Should -Match "'40-uwp\.reg', '60-werdumps\.reg', '70-feature-42537950\.reg', '80-etc-42537950\.reg'" -Because 'the ETC patch is imported with the UWP patch'
         $script:buildScript.Contains("-SystemRegFiles @('40-uwp.reg', '60-werdumps.reg')") | Should -BeTrue -Because '40-uwp.reg and 60-werdumps.reg go through the SYSTEM import'
-        $script:buildScript.Contains("-PrivilegedRegFiles @('70-feature-42537950.reg')") | Should -BeTrue -Because '70-feature-42537950.reg goes through the privileged backup/restore write'
+        $script:buildScript.Contains("-PrivilegedRegFiles @('70-feature-42537950.reg', '80-etc-42537950.reg')") | Should -BeTrue -Because '70-feature-42537950.reg and 80-etc-42537950.reg go through the privileged backup/restore write'
         $script:buildScript | Should -Not -Match "SystemRegFiles @\([^)]*70-feature" -Because 'the feature patch must not ride the SYSTEM import anymore'
+        $script:buildScript | Should -Not -Match "SystemRegFiles @\([^)]*80-etc" -Because 'the ETC patch must not ride the SYSTEM import either'
     }
 
     It 'derives the mirror dir from the work dir in Test-Stage.ps1 (run 44428428849)' {

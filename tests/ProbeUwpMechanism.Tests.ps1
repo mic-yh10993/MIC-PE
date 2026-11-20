@@ -2172,3 +2172,95 @@ Describe 'probe.cmd run 57 sc start experiment entry markers (run 57)' {
         $text.IndexOf('copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt"', $entered) | Should -BeGreaterThan $entered -Because 'the entered marker is followed by its own detached copy'
     }
 }
+
+Describe 'probe.cmd run 58 sc start experiment finish (run 58)' {
+    It 'replaces the choice wait after entered with a pure-cmd wait and brackets the start call with a calling marker' {
+        # Run 57 narrowed the wedge to entered's downstream: the
+        # choice /t 1, the call, or the subroutine's first lines.
+        # The choice is replaced by :probe_wait_1s (pure cmd, no
+        # external binary — choice is the suspect, ping was the
+        # run-44319967017 suspect, timeout.exe is not in the image),
+        # and a calling marker brackets the call itself: calling
+        # present means the wait returned and the stall is in the
+        # call or the subroutine; calling absent means the wait
+        # itself stuck. The run-57 choices (after_copy /t 1, /t 3)
+        # are proven good — entered came back — so they stay.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $entered = $text.IndexOf('echo sc_experiment_entered=1')
+        $calling = $text.IndexOf('echo sc_experiment_calling=1')
+        $firstStart = $text.IndexOf('call :probe_sc_start RpcSs rpcss')
+        $calling | Should -BeGreaterThan $entered -Because 'the calling marker is written after entered'
+        $calling | Should -BeLessThan $firstStart -Because 'the calling marker is written before the first start call'
+        $text | Should -Match 'echo sc_experiment_calling=1 >> \"%PROBE_LOCAL%\"' -Because 'the calling marker goes to the local file'
+        $text | Should -Match 'echo sc_experiment_calling=1 >> \"%PROBE_OUT%\"' -Because 'the calling marker goes to the share file too'
+        $text.IndexOf('copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt"', $calling) | Should -BeGreaterThan $calling -Because 'the calling marker is followed by its own detached copy'
+        $wait = $text.IndexOf('call :probe_wait_1s', $entered)
+        $wait | Should -BeGreaterThan $entered -Because 'the wait after entered is the pure-cmd helper'
+        $wait | Should -BeLessThan $calling -Because 'the wait runs before the calling marker'
+        $segment = $text.Substring($entered, $firstStart - $entered)
+        $segment | Should -Not -Match 'choice /c Y /d Y /t 1' -Because 'no choice wait remains between entered and the first start call'
+        $text.IndexOf('choice /c Y /d Y /t 1', $text.IndexOf('echo sc_experiment_after_copy=1')) | Should -BeGreaterThan $text.IndexOf('echo sc_experiment_after_copy=1') -Because 'the proven after-copy choice /t 1 is kept'
+        $text.IndexOf('choice /c Y /d Y /t 3', $text.IndexOf('echo sc_experiment_after_copy=1')) | Should -BeGreaterThan $text.IndexOf('echo sc_experiment_after_copy=1') -Because 'the proven /t 3 choice is kept'
+    }
+
+    It 'the one-second wait helper is pure cmd, polls %TIME% with a bounded cap, and sits right before :probe_sc_start' {
+        # timeout.exe is not in the image (run 27 boot.wim System32
+        # listing), waitfor.exe is not either, and choice and ping
+        # are both suspects — so the wait polls %TIME% until the
+        # seconds field advances. The iteration cap (200) bounds a
+        # stuck clock; returning early just polls more often, so it
+        # is a pacing tick, not a precise sleep. %TIME% is already
+        # the probe's clock (every mark_* timestamp), so no new
+        # dependency is introduced. The binary checks run over the
+        # executable lines only: the helper's own comments name the
+        # binaries they explain away.
+        $helper = & $script:ExtractProbeSub ':probe_wait_1s' ':probe_sc_start'
+        $body = $helper -join "`n"
+        $body | Should -Match '%TIME: =0%' -Because 'the helper polls the clock'
+        $body | Should -Match 'if %PW_N% geq 200 exit /b 0' -Because 'the poll is bounded so a stuck clock still returns'
+        $execLines = @($helper | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('rem') })
+        $execBody = $execLines -join "`n"
+        $execBody | Should -Not -Match 'choice' -Because 'the helper must not wait on the suspect binary'
+        $execBody | Should -Not -Match 'ping' -Because 'the helper must not wait on the run-44319967017 suspect'
+        $execBody | Should -Not -Match 'timeout' -Because 'timeout.exe is not in the image'
+        $execBody | Should -Not -Match 'waitfor' -Because 'waitfor.exe is not in the image'
+        $lines = Get-Content -LiteralPath $script:ProbePath -Encoding utf8
+        $helperLabel = -1
+        $startLabel = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -eq ':probe_wait_1s') { $helperLabel = $i }
+            if ($lines[$i] -eq ':probe_sc_start') { $startLabel = $i; break }
+        }
+        $helperLabel | Should -BeGreaterThan -1 -Because 'the helper label exists'
+        $startLabel | Should -BeGreaterThan $helperLabel -Because ':probe_sc_start follows the helper'
+        $startLabel - $helperLabel | Should -Be ($helper.Count) -Because 'the helper sits immediately before :probe_sc_start, with nothing between them'
+    }
+
+    It 'the start subroutine writes entered first, copies after started, and waits without choice (:probe_sc_start)' {
+        # entered as the first executable line proves the call itself
+        # returned; the started key gets its own detached copy right
+        # after the echo, so it reaches the share even if the
+        # subroutine wedges later (the fifth sync only runs after
+        # the whole experiment finishes); the two waits inside are
+        # :probe_wait_1s, not choice. The subroutine ends at
+        # :probe_poll_check, the next label.
+        $helper = & $script:ExtractProbeSub ':probe_sc_start' ':probe_poll_check'
+        $body = $helper -join "`n"
+        $enteredLine = -1
+        for ($i = 0; $i -lt $helper.Count; $i++) {
+            if ($helper[$i] -match 'echo scstart_%~2_entered=1') { $enteredLine = $i; break }
+        }
+        $enteredLine | Should -BeGreaterThan 0 -Because 'the entered echo exists in the subroutine'
+        $before = @($helper[1..($enteredLine - 1)] | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('rem') })
+        $before.Count | Should -Be 0 -Because 'entered is the first executable line in the subroutine (only comments precede it)'
+        $startedIdx = $body.IndexOf('echo scstart_%~2_started=1')
+        $enteredIdx = $body.IndexOf('echo scstart_%~2_entered=1')
+        $startedIdx | Should -BeGreaterThan $enteredIdx -Because 'started is written after entered'
+        $body.IndexOf('copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt"', $startedIdx) | Should -BeGreaterThan $startedIdx -Because 'the started key is followed by its own detached copy'
+        $body.IndexOf('copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt"', $startedIdx) | Should -BeLessThan $body.IndexOf('start "" /min cmd /c sc start') -Because 'the copy runs before the child is launched'
+        $execLines = @($helper | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('rem') })
+        $execBody = $execLines -join "`n"
+        $execBody | Should -Not -Match 'choice /c Y /d Y /t' -Because 'no choice wait remains inside the start subroutine'
+        $execBody | Should -Match 'call :probe_wait_1s' -Because 'the subroutine waits with the pure-cmd helper'
+    }
+}

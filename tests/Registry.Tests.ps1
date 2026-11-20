@@ -886,3 +886,167 @@ Describe 'Invoke-RegImportPrivileged' {
         }
     }
 }
+
+Describe 'EnterpriseTempControls 42537950 patch (run 58)' {
+    BeforeAll {
+        $script:etcReg = Join-Path $PSScriptRoot '../src/registry/80-etc-42537950.reg'
+        $script:etcSub = 'ControlSet001\Control\FeatureManagement\EnterpriseTempControls\2208259724'
+    }
+
+    It 'parses the real 80-etc patch into one entry: feature 42537950 = 1 (Disabled) in the active temp config' {
+        # The .reg file is the single source of truth for the privileged
+        # writer: it parses the patch instead of duplicating the values
+        # in code, so a drift between file and writer cannot land half
+        # a patch. One entry only — the active config 2208259724 is
+        # empty in the stock image, so this feature has no entry there
+        # until the writer adds it. Value 1 = Disabled per
+        # FEATURE_ENABLED_STATE (0 = Default, 1 = Disabled,
+        # 2 = Enabled — run 54, Microsoft Learn); the enum match is
+        # the best-supported hypothesis, and the Build result
+        # (fm_etc_feature read-back + explorer's fate) is the test.
+        $entries = ConvertFrom-RegFile -Path $script:etcReg -HiveKey 'PE-SYS'
+        $entries.Count | Should -Be 1 -Because 'the patch writes exactly one value into the active temp config'
+        $entries[0].KeyPath | Should -Be "PE-SYS\ControlSet001\Control\FeatureManagement\EnterpriseTempControls\2208259724"
+        $entries[0].Values.Count | Should -Be 1 -Because 'one value only; no string values, so no lone-backslash risk (run 55)'
+        $entries[0].Values['42537950'] | Should -Be 1 -Because '42537950 = 1 disables DisableWin10Taskbar in the temp layer'
+    }
+
+    It 'the DACL save/write/restore API is compiled (GetKeySecurityDacl / SetKeySecurityDacl / SetTransientSystemDacl)' {
+        # The C# only declares DllImports and methods; compiling it on
+        # Linux proves the signatures are well-formed without needing a
+        # Windows host or the privileges. The actual write is proven by
+        # the Windows-only test below and by the Build verification.
+        Initialize-PrivilegedRegistryApi
+        $apiType = ([System.Management.Automation.PSTypeName]'MicpePrivilegedRegistry').Type
+        $apiType.GetMethod('GetKeySecurityDacl') | Should -Not -BeNullOrEmpty -Because 'the save step reads the stock DACL'
+        $apiType.GetMethod('SetKeySecurityDacl') | Should -Not -BeNullOrEmpty -Because 'the restore step writes the saved DACL back'
+        $apiType.GetMethod('SetTransientSystemDacl') | Should -Not -BeNullOrEmpty -Because 'the transient step grants SYSTEM while the value is written'
+    }
+
+    It 'Test-RegistryDaclEqual ignores the auto-inherited flag but not ACEs or protection' {
+        # Pure string logic, runs on Linux. CI run 44709227930: the
+        # kernel cleared AI when it stored a protected DACL (saved
+        # D:PAI, restored D:P, same ACEs) — that restore is identical.
+        # A different ACE, or a dropped protection flag, is not.
+        Test-RegistryDaclEqual -SavedSddl 'D:PAI(A;;KR;;;SY)(A;;KR;;;BA)' -RestoredSddl 'D:P(A;;KR;;;SY)(A;;KR;;;BA)' | Should -BeTrue -Because 'only the auto-inherited flag differs; the policy is the same'
+        Test-RegistryDaclEqual -SavedSddl 'D:P(A;;KR;;;SY)(A;;KR;;;BA)' -RestoredSddl 'D:P(A;;KR;;;SY)' | Should -BeFalse -Because 'a missing ACE changes the policy'
+        Test-RegistryDaclEqual -SavedSddl 'D:P(A;;KR;;;SY)(A;;KR;;;BA)' -RestoredSddl 'D:AI(A;;KR;;;SY)(A;;KR;;;BA)' | Should -BeFalse -Because 'dropping protection would let the key inherit its parent DACL'
+        Test-RegistryDaclEqual -SavedSddl 'D:P(A;;KR;;;SY)(A;;KR;;;BA)' -RestoredSddl 'D:P(A;;KR;;;BA)(A;;KR;;;SY)' | Should -BeFalse -Because 'ACE order is part of the policy'
+    }
+
+    It 'writes the value into a SYSTEM ReadKey-only ETC key through the DACL flow and restores the stock DACL (same ACEs and protection)' -Skip:(-not $IsWindows) {
+        # Mirror of the run 51 privileged test, with the run 58 ETC
+        # shape: the active temp config key gives SYSTEM only ReadKey
+        # (0x00020019, verified against the stock SYSTEM hive), so
+        # both the plain admin import and the SYSTEM import must fail,
+        # and only the DACL save/write/restore flow lands the value.
+        # The real 80-etc file runs here, against a scratch hive
+        # mounted as PE-SYS — the production key name — so the file,
+        # the writer and the read-back assert all take the production
+        # path. The DACL is compared before and after as SDDL: the
+        # shipped image must keep the stock DACL, with only the one
+        # DWORD new.
+        $work = Join-Path $script:TempRoot "etc-priv-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        $keyName = 'PE-SYS'
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName $keyName
+            try {
+                $addOut = & reg.exe add "HKLM\$keyName\$($script:etcSub)" /f 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "reg add ETC key failed: $addOut" }
+
+                $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+                    "$keyName\$($script:etcSub)",
+                    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                    [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+                $acl = New-Object System.Security.AccessControl.RegistrySecurity
+                $acl.SetAccessRuleProtection($true, $false)
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
+                    'NT AUTHORITY\SYSTEM',
+                    [System.Security.AccessControl.RegistryRights]::ReadKey,
+                    [System.Security.AccessControl.InheritanceFlags]::None,
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow)))
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
+                    'BUILTIN\Administrators',
+                    [System.Security.AccessControl.RegistryRights]::ReadKey,
+                    [System.Security.AccessControl.InheritanceFlags]::None,
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow)))
+                $regKey.SetAccessControl($acl)
+                $sddlBefore = $regKey.GetAccessControl().GetSecurityDescriptorSddlForm('Access')
+                $regKey.Close()
+
+                # Admin import must fail on the restricted key (the
+                # stock ETC key gives nobody a write right except the
+                # Feature Management service account).
+                $null = & reg.exe import $script:etcReg 2>&1
+                $LASTEXITCODE | Should -Not -Be 0 -Because 'the restricted DACL must block the admin import, or this test proves nothing'
+
+                # SYSTEM import must fail the same way (run 51 repro:
+                # SYSTEM has only KEY_READ on the ETC key).
+                { Invoke-RegImportAsSystem -RegFile $script:etcReg } | Should -Throw '*Error accessing the registry*'
+
+                # The DACL save/write/restore flow must succeed
+                # through the same DACL, and the read-back assert
+                # inside the privileged import must pass.
+                { Invoke-RegImportPrivileged -RegFile $script:etcReg -HiveKey $keyName } | Should -Not -Throw
+
+                $dump = & reg.exe query "HKLM\$keyName\$($script:etcSub)" /s 2>&1 | Out-String
+                Write-Host "ETC key after privileged import:`n$dump"
+
+                $values = Get-RegistryKeyValues -KeyName $keyName -SubKey $script:etcSub
+                $values | Should -Not -BeNullOrEmpty -Because 'the active temp config must carry the value after the import'
+                $values['42537950'] | Should -Match '^0x0*1$' -Because '42537950 = 1 disables the feature'
+
+                $regKeyAfter = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+                    "$keyName\$($script:etcSub)",
+                    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree,
+                    [System.Security.AccessControl.RegistryRights]::ReadPermissions)
+                $sddlAfter = $regKeyAfter.GetAccessControl().GetSecurityDescriptorSddlForm('Access')
+                $regKeyAfter.Close()
+                # Same comparison the writer uses: the ACE list plus
+                # the protection flag. A raw SDDL string comparison
+                # would fail on the auto-inherited flag the kernel
+                # clears when it stores a protected DACL (CI run
+                # 44709227930: saved D:PAI, restored D:P, same ACEs).
+                (Test-RegistryDaclEqual -SavedSddl $sddlBefore -RestoredSddl $sddlAfter) | Should -BeTrue -Because 'the DACL save/write/restore flow must leave the stock DACL identical; only the value is new'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName $keyName
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Invoke-RegistryScript privileged routing for the ETC patch (run 58)' {
+    It 'routes the 80-etc file to the privileged writer' {
+        # Mock the hive mount and all three import paths; the routing
+        # decision is the unit under test, not reg.exe itself.
+        Mock Mount-RegistryHive { }
+        Mock Dismount-RegistryHive { }
+        Mock Import-RegFile { }
+        Mock Invoke-RegImportAsSystem { }
+        Mock Invoke-RegImportPrivileged { }
+
+        $mount = Join-Path $script:TempRoot "regpriv-etc-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$mount/Windows/System32/config" | Out-Null
+        $regEtc = Join-Path $mount '80-etc-42537950.reg'
+        Set-Content -LiteralPath $regEtc -Value 'Windows Registry Editor Version 5.00'
+        try {
+            Invoke-RegistryScript -MountDir $mount -RegFiles @($regEtc) -PrivilegedRegFiles @('80-etc-42537950.reg')
+            Should -Invoke Invoke-RegImportPrivileged -Times 1 -ParameterFilter { $RegFile -eq $regEtc -and $HiveKey -eq 'PE-SYS' }
+            Should -Invoke Invoke-RegImportAsSystem -Times 0
+            Should -Invoke Import-RegFile -Times 0
+        }
+        finally {
+            Remove-Item -LiteralPath $mount -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

@@ -74,6 +74,17 @@ public static class MicpePrivilegedRegistry
     public const uint SE_PRIVILEGE_ENABLED = 0x00000002;
     public const int ERROR_FILE_NOT_FOUND = 2;
     public const int ERROR_NOT_ALL_ASSIGNED = 1300;
+    // Run 58 (ETC temp-layer experiment): the DACL save/write/restore
+    // flow needs these. DACL_SECURITY_INFORMATION asks RegGetKeySecurity
+    // / RegSetKeySecurity for the DACL only (owner/group/SACL untouched).
+    // WRITE_DAC + READ_CONTROL open the key for the DACL swap through a
+    // backup/restore handle, which skips the key DACL and checks only
+    // the privilege — the same mechanism backup software uses.
+    public const uint DACL_SECURITY_INFORMATION = 0x00000004;
+    public const uint WRITE_DAC = 0x00040000;
+    public const uint READ_CONTROL = 0x00020000;
+    public const int ERROR_ACCESS_DENIED = 5;
+    public const int ERROR_INSUFFICIENT_BUFFER = 122;
     public static readonly UIntPtr HKEY_LOCAL_MACHINE = new UIntPtr(0x80000002u);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -102,6 +113,16 @@ public static class MicpePrivilegedRegistry
 
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern int RegCloseKey(UIntPtr hKey);
+
+    // Run 58 (ETC temp-layer experiment): read and replace a key's
+    // DACL. RegGetKeySecurity returns the descriptor in self-relative
+    // format, so the bytes are self-contained and can be handed back
+    // to RegSetKeySecurity verbatim for the restore.
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern int RegGetKeySecurity(UIntPtr hKey, uint SecurityInformation, byte[] pSecurityDescriptor, ref uint lpcbSecurityDescriptor);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern int RegSetKeySecurity(UIntPtr hKey, uint SecurityInformation, byte[] pSecurityDescriptor);
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool ConvertStringSidToSid(string StringSid, out IntPtr Sid);
@@ -219,6 +240,88 @@ public static class MicpePrivilegedRegistry
             if (pSystemSid != IntPtr.Zero) LocalFree(pSystemSid);
             if (pAdminSid != IntPtr.Zero) LocalFree(pAdminSid);
             if (pServiceSid != IntPtr.Zero) LocalFree(pServiceSid);
+        }
+    }
+
+    // Run 58 (ETC temp-layer experiment): read a key's DACL as
+    // self-relative bytes. Two-call pattern: the first call with a null
+    // buffer returns ERROR_INSUFFICIENT_BUFFER and the required size.
+    // The bytes are self-contained, so the caller can hand them back
+    // to SetKeySecurityDacl verbatim for the restore. Throws
+    // InvalidOperationException naming the failed step.
+    public static byte[] GetKeySecurityDacl(UIntPtr hKey)
+    {
+        uint size = 0;
+        int rc = RegGetKeySecurity(hKey, DACL_SECURITY_INFORMATION, null, ref size);
+        if (rc != ERROR_INSUFFICIENT_BUFFER)
+            throw new InvalidOperationException("RegGetKeySecurity (size probe) failed with Win32 error " + rc);
+        byte[] sd = new byte[size];
+        rc = RegGetKeySecurity(hKey, DACL_SECURITY_INFORMATION, sd, ref size);
+        if (rc != 0)
+            throw new InvalidOperationException("RegGetKeySecurity failed with Win32 error " + rc);
+        return sd;
+    }
+
+    // Run 58: replace a key's DACL with the saved bytes (self-relative,
+    // as returned by GetKeySecurityDacl). Throws InvalidOperationException
+    // naming the failed step.
+    public static void SetKeySecurityDacl(UIntPtr hKey, byte[] sd)
+    {
+        int rc = RegSetKeySecurity(hKey, DACL_SECURITY_INFORMATION, sd);
+        if (rc != 0)
+            throw new InvalidOperationException("RegSetKeySecurity failed with Win32 error " + rc);
+    }
+
+    // Run 58: convert an absolute security descriptor to self-relative
+    // bytes (the form RegSetKeySecurity takes as a byte[]).
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool MakeSelfRelativeSD(IntPtr pAbsoluteSD, byte[] pSelfRelativeSD, ref uint lpdwBufferLength);
+
+    // Run 58: set a key's DACL to a transient one-ACE descriptor (SYSTEM
+    // full control only) so the caller can write values through an
+    // ordinary handle. The descriptor is built in absolute format,
+    // converted to self-relative bytes, and applied before any of its
+    // buffers are freed. The caller must restore the saved DACL
+    // afterwards and verify the restore; this method does not keep the
+    // transient DACL around. Throws InvalidOperationException naming
+    // the failed step.
+    public static void SetTransientSystemDacl(UIntPtr hKey)
+    {
+        IntPtr pSystemSid = IntPtr.Zero;
+        IntPtr pAcl = IntPtr.Zero;
+        IntPtr pSD = IntPtr.Zero;
+        try
+        {
+            if (!ConvertStringSidToSid("S-1-5-18", out pSystemSid))
+                throw new InvalidOperationException("ConvertStringSidToSid failed for S-1-5-18 with Win32 error " + Marshal.GetLastWin32Error());
+            uint aclSize = 8 + (8 + GetLengthSid(pSystemSid));
+            pAcl = Marshal.AllocHGlobal((int)aclSize);
+            if (!InitializeAcl(pAcl, aclSize, 2))
+                throw new InvalidOperationException("InitializeAcl failed with Win32 error " + Marshal.GetLastWin32Error());
+            if (!AddAccessAllowedAce(pAcl, 2, 0x000f003f, pSystemSid))
+                throw new InvalidOperationException("AddAccessAllowedAce failed for SYSTEM with Win32 error " + Marshal.GetLastWin32Error());
+            pSD = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SECURITY_DESCRIPTOR)));
+            if (!InitializeSecurityDescriptor(pSD, 1))
+                throw new InvalidOperationException("InitializeSecurityDescriptor failed with Win32 error " + Marshal.GetLastWin32Error());
+            if (!SetSecurityDescriptorDacl(pSD, true, pAcl, false))
+                throw new InvalidOperationException("SetSecurityDescriptorDacl failed with Win32 error " + Marshal.GetLastWin32Error());
+            uint sdSize = 0;
+            if (MakeSelfRelativeSD(pSD, null, ref sdSize))
+                throw new InvalidOperationException("MakeSelfRelativeSD (size probe) unexpectedly succeeded");
+            if (Marshal.GetLastWin32Error() != ERROR_INSUFFICIENT_BUFFER)
+                throw new InvalidOperationException("MakeSelfRelativeSD (size probe) failed with Win32 error " + Marshal.GetLastWin32Error());
+            byte[] sd = new byte[sdSize];
+            if (!MakeSelfRelativeSD(pSD, sd, ref sdSize))
+                throw new InvalidOperationException("MakeSelfRelativeSD failed with Win32 error " + Marshal.GetLastWin32Error());
+            int rc = RegSetKeySecurity(hKey, DACL_SECURITY_INFORMATION, sd);
+            if (rc != 0)
+                throw new InvalidOperationException("RegSetKeySecurity (transient DACL) failed with Win32 error " + rc);
+        }
+        finally
+        {
+            if (pSD != IntPtr.Zero) Marshal.FreeHGlobal(pSD);
+            if (pAcl != IntPtr.Zero) Marshal.FreeHGlobal(pAcl);
+            if (pSystemSid != IntPtr.Zero) LocalFree(pSystemSid);
         }
     }
 
@@ -453,6 +556,178 @@ function Set-PrivilegedRegistryValue {
     }
 }
 
+function Write-PrivilegedRegistryValues {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $KeyPath,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Specialized.OrderedDictionary] $Values
+    )
+
+    # Writes the values of one .reg section through an ordinary handle.
+    # Two paths: a key the privileged create just made (or any key
+    # whose DACL already lets SYSTEM write) takes the fast path; a
+    # stock key whose DACL gives SYSTEM only KEY_READ
+    # (EnterpriseTempControls, run 58) takes the DACL save/write/
+    # restore flow. Any failure throws; the build then discards the
+    # mount, so a half-written hive never ships. Returns the number
+    # of values written.
+    $handle = [UIntPtr]::Zero
+    try {
+        $rc = [MicpePrivilegedRegistry]::RegOpenKeyEx(
+            [MicpePrivilegedRegistry]::HKEY_LOCAL_MACHINE, $KeyPath, 0,
+            [MicpePrivilegedRegistry]::KEY_SET_VALUE -bor [MicpePrivilegedRegistry]::KEY_QUERY_VALUE,
+            [ref]$handle)
+        if ($rc -eq [MicpePrivilegedRegistry]::ERROR_ACCESS_DENIED) {
+            Write-PrivProgress ("key {0} denies ordinary write (access denied); using DACL save/write/restore flow" -f $KeyPath)
+            return (Write-PrivilegedRegistryValuesWithDaclFlow -KeyPath $KeyPath -Values $Values)
+        }
+        if ($rc -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "cannot open '$KeyPath' for writing after privileged create (Win32 error $rc) — the new key's DACL may still be restrictive")
+        }
+        $count = 0
+        foreach ($name in $Values.Keys) {
+            Set-PrivilegedRegistryValue -KeyHandle $handle -Name $name -Value $Values[$name]
+            Write-PrivProgress ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $KeyPath, $name, $Values[$name])
+            $count++
+        }
+        return $count
+    }
+    finally {
+        if ($handle -ne [UIntPtr]::Zero) {
+            [void][MicpePrivilegedRegistry]::RegCloseKey($handle)
+        }
+    }
+}
+
+function Test-RegistryDaclEqual {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $SavedSddl,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RestoredSddl
+    )
+
+    # Compares two DACL SDDL forms for policy equality. The ACE list
+    # (the parenthesized groups) is the access policy; the control
+    # flags before it describe how the DACL was composed. The kernel
+    # clears SE_DACL_AUTO_INHERITED when it stores a protected DACL
+    # (a protected DACL has no inherited ACEs, so the bit carries no
+    # access meaning — CI run 44709227930: saved D:PAI, restored D:P,
+    # same ACEs), so the auto-inherit flags are excluded from the
+    # comparison. The protection flag is compared: dropping it would
+    # let the key inherit its parent's DACL, which changes the
+    # effective access even though the explicit ACEs are the same.
+    # Returns $true when the DACLs grant the same access.
+    $savedIdx = $SavedSddl.IndexOf('(')
+    $restoredIdx = $RestoredSddl.IndexOf('(')
+    if ($savedIdx -lt 0 -or $restoredIdx -lt 0) {
+        return $SavedSddl -eq $RestoredSddl
+    }
+    $savedAces = $SavedSddl.Substring($savedIdx)
+    $restoredAces = $RestoredSddl.Substring($restoredIdx)
+    $savedProtected = $SavedSddl -match '^D:[A-Z]*P'
+    $restoredProtected = $RestoredSddl -match '^D:[A-Z]*P'
+    return ($savedAces -eq $restoredAces) -and ($savedProtected -eq $restoredProtected)
+}
+
+function Write-PrivilegedRegistryValuesWithDaclFlow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $KeyPath,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Specialized.OrderedDictionary] $Values
+    )
+
+    # DACL save/write/restore flow (run 58). Opens the key with
+    # REG_OPTION_BACKUP_RESTORE (the DACL is skipped; the privilege
+    # governs), saves the stock DACL bytes, sets a transient
+    # SYSTEM-only DACL, writes the values through an ordinary handle,
+    # then restores the saved DACL and verifies the restore by
+    # comparing the DACL's ACE list plus its protection state
+    # (Test-RegistryDaclEqual; the kernel re-serializes the descriptor
+    # on set, so a byte comparison is too strict — CI runs 44707795321
+    # and 44709227930). The transient DACL exists only for the duration
+    # of the write; the shipped image keeps the stock DACL. Any
+    # failure throws (the build discards the mount). Returns the
+    # number of values written.
+    $privHandle = [UIntPtr]::Zero
+    try {
+        $rc = [MicpePrivilegedRegistry]::RegOpenKeyEx(
+            [MicpePrivilegedRegistry]::HKEY_LOCAL_MACHINE, $KeyPath,
+            [MicpePrivilegedRegistry]::REG_OPTION_BACKUP_RESTORE,
+            [MicpePrivilegedRegistry]::WRITE_DAC -bor [MicpePrivilegedRegistry]::READ_CONTROL,
+            [ref]$privHandle)
+        if ($rc -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "cannot open '$KeyPath' with backup/restore for the DACL flow (Win32 error $rc)")
+        }
+        $savedSd = [MicpePrivilegedRegistry]::GetKeySecurityDacl($privHandle)
+        Write-PrivProgress ("saved stock DACL ({0} bytes) for {1}" -f $savedSd.Length, $KeyPath)
+        [MicpePrivilegedRegistry]::SetTransientSystemDacl($privHandle)
+        Write-PrivProgress ("transient DACL set for {0}" -f $KeyPath)
+        $count = 0
+        try {
+            $handle = [UIntPtr]::Zero
+            try {
+                $rc = [MicpePrivilegedRegistry]::RegOpenKeyEx(
+                    [MicpePrivilegedRegistry]::HKEY_LOCAL_MACHINE, $KeyPath, 0,
+                    [MicpePrivilegedRegistry]::KEY_SET_VALUE -bor [MicpePrivilegedRegistry]::KEY_QUERY_VALUE,
+                    [ref]$handle)
+                if ($rc -ne 0) {
+                    throw [System.InvalidOperationException]::new(
+                        "cannot open '$KeyPath' for writing after transient DACL (Win32 error $rc)")
+                }
+                foreach ($name in $Values.Keys) {
+                    Set-PrivilegedRegistryValue -KeyHandle $handle -Name $name -Value $Values[$name]
+                    Write-PrivProgress ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $KeyPath, $name, $Values[$name])
+                    $count++
+                }
+            }
+            finally {
+                if ($handle -ne [UIntPtr]::Zero) {
+                    [void][MicpePrivilegedRegistry]::RegCloseKey($handle)
+                }
+            }
+        }
+        finally {
+            [MicpePrivilegedRegistry]::SetKeySecurityDacl($privHandle, $savedSd)
+            $restoredSd = [MicpePrivilegedRegistry]::GetKeySecurityDacl($privHandle)
+            # Verify the restore semantically, not byte-for-byte: the
+            # kernel re-serializes the descriptor when it stores the
+            # DACL, so the read-back bytes can differ from the saved
+            # bytes (CI run 44707795321: 72 bytes saved, 72 bytes read
+            # back, bytes differ) while the access policy is identical.
+            # The SDDL form captures the policy — the DACL's ACEs in
+            # order plus its protection state — and
+            # Test-RegistryDaclEqual compares those, excluding the
+            # auto-inherit flags the kernel clears on a protected DACL
+            # (CI run 44709227930: saved D:PAI, restored D:P, same ACEs).
+            $savedSddl = ([System.Security.AccessControl.RawSecurityDescriptor]::new($savedSd, 0)).GetSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+            $restoredSddl = ([System.Security.AccessControl.RawSecurityDescriptor]::new($restoredSd, 0)).GetSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+            Write-PrivProgress ("DACL restore check for {0}: saved {1}; restored {2}" -f $KeyPath, $savedSddl, $restoredSddl)
+            if (-not (Test-RegistryDaclEqual -SavedSddl $savedSddl -RestoredSddl $restoredSddl)) {
+                throw [System.InvalidOperationException]::new(
+                    "DACL restore verification failed for '$KeyPath': the DACL after restore differs from the saved stock DACL (saved: $savedSddl; restored: $restoredSddl; $($savedSd.Length) bytes saved, $($restoredSd.Length) bytes read back) — failing the build so the mount is discarded")
+            }
+            Write-PrivProgress ("stock DACL restored and verified for {0}" -f $KeyPath)
+        }
+        return $count
+    }
+    finally {
+        if ($privHandle -ne [UIntPtr]::Zero) {
+            [void][MicpePrivilegedRegistry]::RegCloseKey($privHandle)
+        }
+    }
+}
+
 # The parameters are deliberately not mandatory: Pester dot-sources this
 # file to test the parser, and a mandatory parameter would prompt for
 # input on dot-source and hang the suite. The main flow below validates
@@ -488,27 +763,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-PrivProgress ("ensuring key {0}" -f $entry.KeyPath)
         Ensure-PrivilegedRegistryKey -SubKeyPath $entry.KeyPath
         Write-PrivProgress ("key ready {0}" -f $entry.KeyPath)
-        $handle = [UIntPtr]::Zero
-        try {
-            $rc = [MicpePrivilegedRegistry]::RegOpenKeyEx(
-                [MicpePrivilegedRegistry]::HKEY_LOCAL_MACHINE, $entry.KeyPath, 0,
-                [MicpePrivilegedRegistry]::KEY_SET_VALUE -bor [MicpePrivilegedRegistry]::KEY_QUERY_VALUE,
-                [ref]$handle)
-            if ($rc -ne 0) {
-                throw [System.InvalidOperationException]::new(
-                    "cannot open '$($entry.KeyPath)' for writing after privileged create (Win32 error $rc) — the new key's DACL may still be restrictive")
-            }
-            foreach ($name in $entry.Values.Keys) {
-                Set-PrivilegedRegistryValue -KeyHandle $handle -Name $name -Value $entry.Values[$name]
-                Write-PrivProgress ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $entry.KeyPath, $name, $entry.Values[$name])
-                $written++
-            }
-        }
-        finally {
-            if ($handle -ne [UIntPtr]::Zero) {
-                [void][MicpePrivilegedRegistry]::RegCloseKey($handle)
-            }
-        }
+        $written += Write-PrivilegedRegistryValues -KeyPath $entry.KeyPath -Values $entry.Values
     }
     Write-PrivProgress ("privileged import complete: {0} value(s) in {1} key(s) from {2}" -f $written, $entries.Count, (Split-Path -Leaf $RegFile))
 }
