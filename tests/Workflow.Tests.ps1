@@ -386,6 +386,17 @@ Describe 'M4 step wiring' {
         $script:buildScript | Should -Match 'Assert-UwpReady'
     }
 
+    It 'reads back the WER LocalDumps key after the registry imports (run 54)' {
+        # Runs 50/53: the 60-werdumps.reg SYSTEM import logged success
+        # while the running PE still read wer_localdumps_folder=missing
+        # — the import only checks reg.exe's exit code and never reads
+        # the values back. Assert-WerLocalDumps turns that silent miss
+        # into a loud build failure, right after Assert-AppxPolicy.
+        $script:buildScript | Should -Match 'Assert-WerLocalDumps'
+        $script:buildScript.IndexOf('Assert-WerLocalDumps') | Should -BeGreaterThan $script:buildScript.IndexOf('Invoke-RegistryScript') -Because 'the read-back runs after the imports'
+        $script:buildScript.IndexOf('Assert-WerLocalDumps') | Should -BeGreaterThan $script:buildScript.IndexOf('Assert-AppxPolicy') -Because 'it sits next to the Appx read-back'
+    }
+
     It 'mounts and commits boot.wim around the uwp step' {
         $script:buildScript | Should -Match 'Invoke-UwpStep'
     }

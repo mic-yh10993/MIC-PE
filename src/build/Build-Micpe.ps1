@@ -369,6 +369,7 @@ function Invoke-UwpStep {
         # ignored by the loader (§36.5.1).
         Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '60-werdumps.reg') -PrivilegedRegFiles @('70-feature-42537950.reg')
         Assert-AppxPolicy -MountDir $paths.Mount
+        Assert-WerLocalDumps -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
         Assert-UwpReady -MountDir $paths.Mount
     }

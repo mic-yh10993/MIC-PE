@@ -261,3 +261,81 @@ Describe 'UWP filelist entries' {
         $all | Should -Contain 'Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy*'
     }
 }
+
+Describe 'Assert-WerLocalDumps' {
+    It 'throws naming the SOFTWARE hive when the mount has no hive file' {
+        $m = New-FakeMount
+        $msg = try { Assert-WerLocalDumps -MountDir $m } catch { $_.Exception.Message }
+        $msg | Should -Match 'SOFTWARE hive'
+    }
+
+    It 'passes when the LocalDumps key holds the expected values (Windows only)' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
+
+        $m = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$m/Windows/System32/config" | Out-Null
+        $hiveCopy = "$m/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'MICPE-WER-TEST'
+            try {
+                $key = 'HKLM\MICPE-WER-TEST\Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe'
+                $null = & reg.exe add $key /v DumpFolder /t REG_SZ /d 'X:\CrashDumps' /f 2>&1
+                $null = & reg.exe add $key /v DumpCount /t REG_DWORD /d 3 /f 2>&1
+                $null = & reg.exe add $key /v DumpType /t REG_DWORD /d 1 /f 2>&1
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'MICPE-WER-TEST'
+            }
+            { Assert-WerLocalDumps -MountDir $m } | Should -Not -Throw
+        }
+        finally {
+            Remove-Item -LiteralPath $m -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws naming the key when LocalDumps is missing (Windows only)' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
+
+        $m = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$m/Windows/System32/config" | Out-Null
+        $hiveCopy = "$m/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        try {
+            # The runner's own SOFTWARE hive has no PE LocalDumps key;
+            # a build whose SYSTEM import silently missed must fail here.
+            { Assert-WerLocalDumps -MountDir $m } | Should -Throw '*WER LocalDumps is missing*'
+        }
+        finally {
+            Remove-Item -LiteralPath $m -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws naming the value when DumpFolder points elsewhere (Windows only)' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'needs reg.exe and a real SOFTWARE hive'; return }
+
+        $m = New-FakeMount
+        New-Item -ItemType Directory -Force -Path "$m/Windows/System32/config" | Out-Null
+        $hiveCopy = "$m/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'MICPE-WER-TEST'
+            try {
+                $key = 'HKLM\MICPE-WER-TEST\Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe'
+                $null = & reg.exe add $key /v DumpFolder /t REG_SZ /d 'C:\Wrong' /f 2>&1
+                $null = & reg.exe add $key /v DumpCount /t REG_DWORD /d 3 /f 2>&1
+                $null = & reg.exe add $key /v DumpType /t REG_DWORD /d 1 /f 2>&1
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'MICPE-WER-TEST'
+            }
+            { Assert-WerLocalDumps -MountDir $m } | Should -Throw '*expected X:\CrashDumps*'
+        }
+        finally {
+            Remove-Item -LiteralPath $m -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
