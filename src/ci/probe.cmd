@@ -628,6 +628,22 @@ echo fm_etc_activeconfig=%FM_ETC_ACTIVE% >> "%PROBE_LOCAL%" & echo fm_etc_active
 set "FM_G0_OPT=missing"
 for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\0\42537950" /v EnabledStateOptions 2^>nul ^| find /i "EnabledStateOptions"') do set "FM_G0_OPT=%%A"
 echo fm_42537950_group0_options=%FM_G0_OPT% >> "%PROBE_LOCAL%" & echo fm_42537950_group0_options=%FM_G0_OPT% >> "%PROBE_OUT%"
+rem Run 56 (feature-query read-path close-out, eval card §42): ntdll
+rem reads EnterpriseTempControls directly (its .rdata holds the
+rem Active and FeatureManagement paths, but no Overrides path at
+rem all — the Overrides are consumed by the kernel, via
+rem NtQuerySystemInformation, not by ntdll). The active temp config
+rem (2208259724) is empty in the stock image, so the feature has no
+rem entry there — expect missing. A value here would mean the temp
+rem layer, not the Overrides, is deciding the feature. FconPresent
+rem says whether the feature configuration is present at all.
+rem Read-only, no new mark_ marker.
+set "FM_ETC_FEATURE=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\EnterpriseTempControls\2208259724" /v 42537950 2^>nul ^| find /i "42537950"') do set "FM_ETC_FEATURE=%%A"
+echo fm_etc_feature=%FM_ETC_FEATURE% >> "%PROBE_LOCAL%" & echo fm_etc_feature=%FM_ETC_FEATURE% >> "%PROBE_OUT%"
+set "FM_FCON=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement" /v FconPresent 2^>nul ^| find /i "FconPresent"') do set "FM_FCON=%%A"
+echo fm_fconpresent=%FM_FCON% >> "%PROBE_LOCAL%" & echo fm_fconpresent=%FM_FCON% >> "%PROBE_OUT%"
 rem Run 50 (minidump route re-check): 60-werdumps.reg pointed its key
 rem at HKLM\SOFTWARE, which a plain reg.exe import writes into the
 rem RUNNER's live hive — the image hives are mounted as PE-SOFT/PE-SYS,
@@ -1411,15 +1427,25 @@ rem reads the service state afterwards with :probe_svc (the query
 rem command is proven safe; only the start call ever wedged).
 rem The temp file lives on %SystemDrive% (X: in PE, the RAM disk) so
 rem it never touches the share and never waits on the network.
+rem Run 56 (sc start experiment fix, eval card §42): run 55 came back
+rem with no scstart_* key at all, twice in a row — the spin below was
+rem 20000 bare iterations with no time bound and no progress key, so
+rem on a slow PE the spin alone could outrun the host's 120-second
+rem wait and the stall was silent (the host waited the full 120s).
+rem The spin is now a short fast path (200 iterations, then the timed
+rem wait below takes over), and the experiment writes a started key
+rem BEFORE the child is even launched, so a wedge is visible in the
+rem probe file instead of silent.
 set "SC_TMP=%SystemDrive%\micpe-scstart.tmp"
 del "%SC_TMP%" >nul 2>&1
+echo scstart_%~2_started=1 >> "%PROBE_LOCAL%" & echo scstart_%~2_started=1 >> "%PROBE_OUT%"
 start "" /min cmd /c sc start %~1 ^> "%SC_TMP%" 2^>nul ^& echo DONE ^>^> "%SC_TMP%"
 set /a SC_SPIN=0
 set /a SC_WAIT=0
 :sc_start_spin
 if exist "%SC_TMP%" for %%F in ("%SC_TMP%") do if %%~zF gtr 0 goto sc_start_check_done
 set /a SC_SPIN+=1
-if %SC_SPIN% lss 20000 goto sc_start_spin
+if %SC_SPIN% lss 200 goto sc_start_spin
 :sc_start_wait
 if exist "%SC_TMP%" for %%F in ("%SC_TMP%") do if %%~zF gtr 0 goto sc_start_check_done
 if %SC_WAIT% geq 15 goto sc_start_timeout
