@@ -2005,6 +2005,18 @@ Describe 'probe.cmd run 50 feature 42537950 override read-back and explorer_end 
         $text | Should -Match 'echo fm_42537950_cs001_group0=%FM_CS001_G0%' -Because 'the ControlSet001 read-back is recorded'
         $text | Should -Match 'echo fm_etc_activeconfig=%FM_ETC_ACTIVE%' -Because 'the active config is recorded'
         $text | Should -Match 'echo fm_42537950_group0_options=%FM_G0_OPT%' -Because 'the raw options value is recorded'
+        # Run 56 (eval card §42): ntdll reads EnterpriseTempControls
+        # directly (its .rdata holds the Active path but no Overrides
+        # path — the Overrides are consumed by the kernel), so the
+        # probe also reads the feature's entry in the active temp
+        # config (expect missing: the stock active config is empty)
+        # and FconPresent. Both are read-only diagnostics.
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\EnterpriseTempControls\\2208259724" /v 42537950' -Because 'the feature entry in the active temp config is read back'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement" /v FconPresent' -Because 'FconPresent is read back'
+        $text | Should -Match 'echo fm_etc_feature=%FM_ETC_FEATURE%' -Because 'the temp-config read-back is recorded'
+        $text | Should -Match 'echo fm_fconpresent=%FM_FCON%' -Because 'FconPresent is recorded'
+        $text.IndexOf('echo fm_etc_feature=') | Should -BeGreaterThan $text.IndexOf('echo fm_42537950_group0_options=') -Because 'the temp-config diagnostics follow the group read-backs'
+        $text.IndexOf('echo fm_fconpresent=') | Should -BeLessThan $text.IndexOf('echo wer_localdumps_folder=') -Because 'the diagnostics run before the WER section'
         $text.IndexOf('echo fm_select_current=') | Should -BeGreaterThan $text.IndexOf('echo fm_42537950_group9=') -Because 'the diagnostics follow the group read-backs'
         $text.IndexOf('echo fm_42537950_group0_options=') | Should -BeLessThan $text.IndexOf('echo wer_localdumps_folder=') -Because 'the diagnostics run before the WER section'
     }
@@ -2089,6 +2101,12 @@ Describe 'probe.cmd run 51 grouped feature override and service start experiment
         # parent waits for DONE with a bounded spin and 15 one-second
         # ticks, then taskkills a hung start. Same shape as the
         # :probe_poll_check detachment (run 47).
+        # Run 56: the spin was 20000 bare iterations with no time bound
+        # and no progress key — on a slow PE the spin alone could
+        # outrun the host's 120-second wait, so no scstart_* key ever
+        # came back (run 55, twice). The spin is now a short fast path
+        # (200 iterations, then the timed wait takes over), and the
+        # experiment writes a started key before the child is launched.
         $helper = & $script:ExtractProbeSub ':probe_sc_start' ':probe_poll_check'
         ($helper -join "`n") | Should -Match 'start "" /min cmd /c sc start %~1' -Because 'the start runs in a detached child cmd'
         ($helper -join "`n") | Should -Match 'echo DONE' -Because 'the child writes a DONE sentinel'
@@ -2097,6 +2115,10 @@ Describe 'probe.cmd run 51 grouped feature override and service start experiment
         ($helper -join "`n") | Should -Match 'taskkill /f /im sc\.exe' -Because 'a hung start is taskkilled'
         ($helper -join "`n") | Should -Match 'echo scstart_%~2_done=1' -Because 'a finished start is recorded'
         ($helper -join "`n") | Should -Match 'echo scstart_%~2_timeout=1' -Because 'a timed-out start is recorded'
+        ($helper -join "`n") | Should -Match 'echo scstart_%~2_started=1' -Because 'the experiment writes a progress key before the child is launched'
+        ($helper -join "`n") | Should -Match 'if %SC_SPIN% lss 200 goto sc_start_spin' -Because 'the spin is a short fast path, not an unbounded loop'
+        ($helper -join "`n") | Should -Not -Match 'if %SC_SPIN% lss 20000' -Because 'the 20000-iteration spin is gone'
+        ($helper -join "`n").IndexOf('echo scstart_%~2_started=1') | Should -BeLessThan ($helper -join "`n").IndexOf('start "" /min cmd /c sc start') -Because 'the started key is written before the child is launched'
     }
 
     It 're-dumps the AUMID store after the starts and syncs the local file once more' {
