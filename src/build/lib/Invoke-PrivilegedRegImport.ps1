@@ -210,6 +210,33 @@ public static class MicpePrivilegedRegistry
 }
 '@
 
+function Write-PrivProgress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Message
+    )
+
+    # Crash breadcrumb (run 53): every progress line goes to the host
+    # (the caller redirects stdout to import.log) AND, when the
+    # MICPE_PRIV_PROGRESS file is set, straight to that file with
+    # Add-Content — one synchronous write per step. Run 52 died with
+    # STATUS_HEAP_CORRUPTION before the first "wrote" line and the
+    # import log came back empty, so the next crash must still leave a
+    # trail of how far the import got. A progress-file failure must
+    # never break the import itself, so it is swallowed here.
+    Write-Host $Message
+    $progressFile = $env:MICPE_PRIV_PROGRESS
+    if ($progressFile) {
+        try {
+            Add-Content -LiteralPath $progressFile -Value $Message -ErrorAction Stop
+        }
+        catch {
+            # Diagnostics only; the import continues without them.
+        }
+    }
+}
+
 function Initialize-PrivilegedRegistryApi {
     [CmdletBinding()]
     param()
@@ -425,8 +452,11 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 
     $entries = ConvertFrom-RegFile -Path $RegFile -HiveKey $HiveKey
+    Write-PrivProgress ("parsed {0} key(s) from {1}" -f $entries.Count, (Split-Path -Leaf $RegFile))
     Initialize-PrivilegedRegistryApi
+    Write-PrivProgress 'privileged registry API loaded'
     Enable-BackupRestorePrivilege
+    Write-PrivProgress 'backup/restore privileges enabled'
     $written = 0
     foreach ($entry in $entries) {
         # Make sure the key exists (creates it with an explicit DACL
@@ -435,7 +465,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         # success but the values never land (run 52), so the write must
         # go through a handle opened the ordinary way — which only works
         # because CreateKeyWithDacl gave the new key a writable DACL.
+        Write-PrivProgress ("ensuring key {0}" -f $entry.KeyPath)
         Ensure-PrivilegedRegistryKey -SubKeyPath $entry.KeyPath
+        Write-PrivProgress ("key ready {0}" -f $entry.KeyPath)
         $handle = [UIntPtr]::Zero
         try {
             $rc = [MicpePrivilegedRegistry]::RegOpenKeyEx(
@@ -448,7 +480,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
             foreach ($name in $entry.Values.Keys) {
                 Set-PrivilegedRegistryValue -KeyHandle $handle -Name $name -Value $entry.Values[$name]
-                Write-Host ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $entry.KeyPath, $name, $entry.Values[$name])
+                Write-PrivProgress ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $entry.KeyPath, $name, $entry.Values[$name])
                 $written++
             }
         }
@@ -458,5 +490,5 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
         }
     }
-    Write-Host ("privileged import complete: {0} value(s) in {1} key(s) from {2}" -f $written, $entries.Count, (Split-Path -Leaf $RegFile))
+    Write-PrivProgress ("privileged import complete: {0} value(s) in {1} key(s) from {2}" -f $written, $entries.Count, (Split-Path -Leaf $RegFile))
 }
