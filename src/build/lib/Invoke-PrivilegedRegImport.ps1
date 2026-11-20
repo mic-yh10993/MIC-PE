@@ -121,6 +121,26 @@ public static class MicpePrivilegedRegistry
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern bool AddAccessAllowedAce(IntPtr pAcl, uint dwAceRevision, uint AccessMask, IntPtr pSid);
 
+    // SECURITY_DESCRIPTOR in absolute format: a 4-byte header
+    // (Revision, Sbz1, Control) followed by four pointers. On x64
+    // that is 40 bytes, not 20: the run 52 code allocated 20 bytes
+    // (the x86 size), so InitializeSecurityDescriptor wrote 20 bytes
+    // past the buffer on every CreateKeyWithDacl and corrupted the
+    // heap — run 53 reproduced it deterministically, crashing on the
+    // third call with STATUS_HEAP_CORRUPTION. Size the buffer from
+    // the struct so the allocation is right on any pointer width.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SECURITY_DESCRIPTOR
+    {
+        public byte Revision;
+        public byte Sbz1;
+        public ushort Control;
+        public IntPtr Owner;
+        public IntPtr Group;
+        public IntPtr Sacl;
+        public IntPtr Dacl;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct SECURITY_ATTRIBUTES
     {
@@ -178,7 +198,7 @@ public static class MicpePrivilegedRegistry
                 throw new InvalidOperationException("AddAccessAllowedAce failed for Administrators with Win32 error " + Marshal.GetLastWin32Error());
             if (!AddAccessAllowedAce(pAcl, 2, 0x000f003f, pServiceSid))
                 throw new InvalidOperationException("AddAccessAllowedAce failed for the Feature Management service with Win32 error " + Marshal.GetLastWin32Error());
-            pSD = Marshal.AllocHGlobal(20);
+            pSD = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SECURITY_DESCRIPTOR)));
             if (!InitializeSecurityDescriptor(pSD, 1))
                 throw new InvalidOperationException("InitializeSecurityDescriptor failed with Win32 error " + Marshal.GetLastWin32Error());
             if (!SetSecurityDescriptorDacl(pSD, true, pAcl, false))
@@ -209,6 +229,33 @@ public static class MicpePrivilegedRegistry
     public static extern bool CloseHandle(IntPtr hObject);
 }
 '@
+
+function Write-PrivProgress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Message
+    )
+
+    # Crash breadcrumb (run 53): every progress line goes to the host
+    # (the caller redirects stdout to import.log) AND, when the
+    # MICPE_PRIV_PROGRESS file is set, straight to that file with
+    # Add-Content — one synchronous write per step. Run 52 died with
+    # STATUS_HEAP_CORRUPTION before the first "wrote" line and the
+    # import log came back empty, so the next crash must still leave a
+    # trail of how far the import got. A progress-file failure must
+    # never break the import itself, so it is swallowed here.
+    Write-Host $Message
+    $progressFile = $env:MICPE_PRIV_PROGRESS
+    if ($progressFile) {
+        try {
+            Add-Content -LiteralPath $progressFile -Value $Message -ErrorAction Stop
+        }
+        catch {
+            # Diagnostics only; the import continues without them.
+        }
+    }
+}
 
 function Initialize-PrivilegedRegistryApi {
     [CmdletBinding()]
@@ -425,8 +472,11 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 
     $entries = ConvertFrom-RegFile -Path $RegFile -HiveKey $HiveKey
+    Write-PrivProgress ("parsed {0} key(s) from {1}" -f $entries.Count, (Split-Path -Leaf $RegFile))
     Initialize-PrivilegedRegistryApi
+    Write-PrivProgress 'privileged registry API loaded'
     Enable-BackupRestorePrivilege
+    Write-PrivProgress 'backup/restore privileges enabled'
     $written = 0
     foreach ($entry in $entries) {
         # Make sure the key exists (creates it with an explicit DACL
@@ -435,7 +485,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         # success but the values never land (run 52), so the write must
         # go through a handle opened the ordinary way — which only works
         # because CreateKeyWithDacl gave the new key a writable DACL.
+        Write-PrivProgress ("ensuring key {0}" -f $entry.KeyPath)
         Ensure-PrivilegedRegistryKey -SubKeyPath $entry.KeyPath
+        Write-PrivProgress ("key ready {0}" -f $entry.KeyPath)
         $handle = [UIntPtr]::Zero
         try {
             $rc = [MicpePrivilegedRegistry]::RegOpenKeyEx(
@@ -448,7 +500,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
             foreach ($name in $entry.Values.Keys) {
                 Set-PrivilegedRegistryValue -KeyHandle $handle -Name $name -Value $entry.Values[$name]
-                Write-Host ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $entry.KeyPath, $name, $entry.Values[$name])
+                Write-PrivProgress ("wrote HKLM\{0}\{1} = 0x{2:x8}" -f $entry.KeyPath, $name, $entry.Values[$name])
                 $written++
             }
         }
@@ -458,5 +510,5 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
         }
     }
-    Write-Host ("privileged import complete: {0} value(s) in {1} key(s) from {2}" -f $written, $entries.Count, (Split-Path -Leaf $RegFile))
+    Write-PrivProgress ("privileged import complete: {0} value(s) in {1} key(s) from {2}" -f $written, $entries.Count, (Split-Path -Leaf $RegFile))
 }

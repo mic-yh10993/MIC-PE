@@ -252,9 +252,17 @@ function Invoke-RegImportPrivileged {
     $wrapper = Join-Path $workDir 'import.cmd'
     $codeFile = Join-Path $workDir 'exitcode.txt'
     $logFile = Join-Path $workDir 'import.log'
+    # Crash breadcrumb (run 53): the writer appends one line per step
+    # to this file as it goes (see Write-PrivProgress). Run 52 died
+    # with STATUS_HEAP_CORRUPTION before the first "wrote" line and
+    # the import log came back empty; the progress file survives the
+    # crash because each line is a synchronous write, so the failure
+    # below can still say how far the import got.
+    $progressFile = Join-Path $workDir 'import.progress.txt'
     try {
         @(
             '@echo off',
+            "set `"MICPE_PRIV_PROGRESS=$progressFile`"",
             "`"$pwsh`" -NoProfile -ExecutionPolicy Bypass -File `"$script`" -RegFile `"$RegFile`" -HiveKey `"$HiveKey`" > `"$logFile`" 2>&1",
             "echo %ERRORLEVEL% > `"$codeFile`""
         ) | Set-Content -LiteralPath $wrapper -Encoding ascii
@@ -288,11 +296,26 @@ function Invoke-RegImportPrivileged {
         if ($null -eq $code) { $code = '' }
         $code = "$code".Trim()
         if ($code -ne '0') {
+            # The import log is the first source; the progress file is
+            # the second — it holds the per-step lines the writer wrote
+            # synchronously before the failure, so it is the only record
+            # when the import process itself crashes (run 52: the log
+            # came back empty). Both are shown when they differ.
             $detail = '(the privileged import printed nothing)'
+            $logText = ''
             if (Test-Path -LiteralPath $logFile) {
-                $logged = (Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue)
-                if ($logged) { $detail = "$logged".Trim() }
+                $logText = "$((Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue))".Trim()
             }
+            $progressText = ''
+            if (Test-Path -LiteralPath $progressFile) {
+                $progressText = "$((Get-Content -LiteralPath $progressFile -Raw -ErrorAction SilentlyContinue))".Trim()
+            }
+            $parts = @()
+            if ($logText) { $parts += $logText }
+            if ($progressText -and $progressText -ne $logText) {
+                $parts += ("progress before the failure:`n" + $progressText)
+            }
+            if ($parts.Count -gt 0) { $detail = ($parts -join "`n") }
             throw [System.InvalidOperationException]::new(
                 "privileged reg import failed with exit code $code for $RegFile : $detail")
         }

@@ -378,6 +378,59 @@ Describe 'ConvertFrom-RegFile (privileged registry writer, run 52)' {
     }
 }
 
+Describe 'MicpePrivilegedRegistry struct layouts (run 53)' {
+    It 'SECURITY_DESCRIPTOR is 40 bytes on x64 (the run 52 heap corruption)' {
+        # Absolute-format SECURITY_DESCRIPTOR: 4-byte header + 4
+        # pointers. The run 52 code allocated 20 bytes (the x86 size),
+        # so InitializeSecurityDescriptor wrote 20 bytes past the
+        # buffer on every CreateKeyWithDacl and corrupted the heap;
+        # run 53 reproduced it deterministically, crashing on the third
+        # call with STATUS_HEAP_CORRUPTION. The writer now sizes the
+        # buffer from this struct.
+        Initialize-PrivilegedRegistryApi
+        $apiType = ([System.Management.Automation.PSTypeName]'MicpePrivilegedRegistry').Type
+        # The [type] cast matters: without it PowerShell binds
+        # Marshal.SizeOf to the object overload and fails.
+        $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type]$apiType.GetNestedType('SECURITY_DESCRIPTOR'))
+        if ([System.IntPtr]::Size -eq 8) { $size | Should -Be 40 } else { $size | Should -Be 20 }
+    }
+
+    It 'SECURITY_ATTRIBUTES is 24 bytes on x64 (audit of the same call)' {
+        Initialize-PrivilegedRegistryApi
+        $apiType = ([System.Management.Automation.PSTypeName]'MicpePrivilegedRegistry').Type
+        # The [type] cast matters: without it PowerShell binds
+        # Marshal.SizeOf to the object overload and fails.
+        $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type]$apiType.GetNestedType('SECURITY_ATTRIBUTES'))
+        if ([System.IntPtr]::Size -eq 8) { $size | Should -Be 24 } else { $size | Should -Be 12 }
+    }
+}
+
+Describe 'Write-PrivProgress (crash breadcrumbs, run 53)' {
+    It 'appends progress lines to the progress file when MICPE_PRIV_PROGRESS is set' {
+        # The writer's host output is lost when its process crashes
+        # (run 52: heap corruption, empty import log), so each step
+        # also lands in the progress file as a synchronous write.
+        $progress = Join-Path $script:TempRoot "micpe-privprogress-$(Get-Random).txt"
+        try {
+            $env:MICPE_PRIV_PROGRESS = $progress
+            Write-PrivProgress 'test breadcrumb'
+            Test-Path -LiteralPath $progress | Should -Be $true
+            (Get-Content -LiteralPath $progress -Raw) | Should -Match 'test breadcrumb'
+        }
+        finally {
+            Remove-Item Env:MICPE_PRIV_PROGRESS -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $progress -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'reverse control: without MICPE_PRIV_PROGRESS no file is created' {
+        Remove-Item Env:MICPE_PRIV_PROGRESS -ErrorAction SilentlyContinue
+        $progress = Join-Path $script:TempRoot "micpe-privprogress-$(Get-Random).txt"
+        Write-PrivProgress 'test breadcrumb'
+        Test-Path -LiteralPath $progress | Should -Be $false
+    }
+}
+
 Describe 'Invoke-RegistryScript privileged routing' {
     It 'routes privileged files to the privileged writer, SYSTEM files to SYSTEM, the rest to admin' {
         # Mock the hive mount and all three import paths; the routing
@@ -442,81 +495,97 @@ Describe 'Invoke-RegImportPrivileged' {
         }
     }
 
-    It 'writes a key whose DACL gives SYSTEM only KEY_READ, where the SYSTEM import fails (run 51)' -Skip:(-not $IsWindows) {
+    It 'writes all three groups whose DACL gives SYSTEM only KEY_READ, where the SYSTEM import fails (run 51, heap-corruption triage run 53)' -Skip:(-not $IsWindows) {
         # Mirror of the Appx SYSTEM-import test, with the run 51 DACL
         # shape instead: the group key gives SYSTEM only ReadKey, so
         # both the plain admin import and the SYSTEM import must fail,
         # and only the backup/restore write lands the values. The
         # restriction lives only inside the throwaway test hive; the
         # temp dir is deleted after.
+        #
+        # Run 53: the patch carries all three groups (0, 15, 9) — the
+        # real 70-feature shape, not one group. Production calls
+        # CreateKeyWithDacl three times in one privileged import and
+        # run 52 died with STATUS_HEAP_CORRUPTION before the first
+        # value landed, while the 1-group test only ever made one
+        # call; this test makes the call shape match production so a
+        # deterministic heap bug reproduces here instead of in a Build.
         $work = Join-Path $script:TempRoot "priv-sys-$(Get-Random)"
         New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
         $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
         $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
         if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
         $keyName = 'MICPE-PRIV-TEST'
-        $groupSub = 'Control\FeatureManagement\Overrides\0'
+        $groupBase = 'Control\FeatureManagement\Overrides'
+        $groups = @('0', '15', '9')
+        $regLines = @('Windows Registry Editor Version 5.00', '')
+        foreach ($group in $groups) {
+            $regLines += ('[HKEY_LOCAL_MACHINE\{0}\{1}\{2}\42537950]' -f $keyName, $groupBase, $group)
+            $regLines += '"EnabledState"=dword:00000000'
+            $regLines += '"EnabledStateOptions"=dword:00000000'
+            $regLines += ''
+        }
         $testReg = Join-Path $work 'priv-test.reg'
-        $regText = @(
-            'Windows Registry Editor Version 5.00',
-            '',
-            ('[HKEY_LOCAL_MACHINE\{0}\{1}\42537950]' -f $keyName, $groupSub),
-            '"EnabledState"=dword:00000000',
-            '"EnabledStateOptions"=dword:00000000',
-            ''
-        ) -join "`r`n"
-        [System.IO.File]::WriteAllText($testReg, $regText, [System.Text.Encoding]::Unicode)
+        [System.IO.File]::WriteAllText($testReg, ($regLines -join "`r`n"), [System.Text.Encoding]::Unicode)
         try {
             Mount-RegistryHive -HiveFile $hiveCopy -KeyName $keyName
             try {
-                $addOut = & reg.exe add "HKLM\$keyName\$groupSub" /f 2>&1
-                if ($LASTEXITCODE -ne 0) { throw "reg add group key failed: $addOut" }
+                foreach ($group in $groups) {
+                    $groupSub = "$groupBase\$group"
+                    $addOut = & reg.exe add "HKLM\$keyName\$groupSub" /f 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "reg add group key $group failed: $addOut" }
 
-                $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-                    "$keyName\$groupSub",
-                    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-                    [System.Security.AccessControl.RegistryRights]::ChangePermissions)
-                $acl = New-Object System.Security.AccessControl.RegistrySecurity
-                $acl.SetAccessRuleProtection($true, $false)
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
-                    'NT AUTHORITY\SYSTEM',
-                    [System.Security.AccessControl.RegistryRights]::ReadKey,
-                    [System.Security.AccessControl.InheritanceFlags]::None,
-                    [System.Security.AccessControl.PropagationFlags]::None,
-                    [System.Security.AccessControl.AccessControlType]::Allow)))
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
-                    'BUILTIN\Administrators',
-                    [System.Security.AccessControl.RegistryRights]::ReadKey,
-                    [System.Security.AccessControl.InheritanceFlags]::None,
-                    [System.Security.AccessControl.PropagationFlags]::None,
-                    [System.Security.AccessControl.AccessControlType]::Allow)))
-                $regKey.SetAccessControl($acl)
-                $regKey.Close()
+                    $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+                        "$keyName\$groupSub",
+                        [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                        [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+                    $acl = New-Object System.Security.AccessControl.RegistrySecurity
+                    $acl.SetAccessRuleProtection($true, $false)
+                    $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
+                        'NT AUTHORITY\SYSTEM',
+                        [System.Security.AccessControl.RegistryRights]::ReadKey,
+                        [System.Security.AccessControl.InheritanceFlags]::None,
+                        [System.Security.AccessControl.PropagationFlags]::None,
+                        [System.Security.AccessControl.AccessControlType]::Allow)))
+                    $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
+                        'BUILTIN\Administrators',
+                        [System.Security.AccessControl.RegistryRights]::ReadKey,
+                        [System.Security.AccessControl.InheritanceFlags]::None,
+                        [System.Security.AccessControl.PropagationFlags]::None,
+                        [System.Security.AccessControl.AccessControlType]::Allow)))
+                    $regKey.SetAccessControl($acl)
+                    $regKey.Close()
+                }
 
-                # Admin import must fail on the restricted key (run 51:
-                # the group key gives nobody a write right except the
+                # Admin import must fail on the restricted keys (run 51:
+                # the group keys give nobody a write right except the
                 # Feature Management service account).
                 $null = & reg.exe import $testReg 2>&1
-                $LASTEXITCODE | Should -Not -Be 0 -Because 'the restricted DACL must block the admin import, or this test proves nothing'
+                $LASTEXITCODE | Should -Not -Be 0 -Because 'the restricted DACLs must block the admin import, or this test proves nothing'
 
                 # SYSTEM import must fail the same way (run 51 repro:
-                # SYSTEM has only KEY_READ on the group key).
+                # SYSTEM has only KEY_READ on the group keys).
                 { Invoke-RegImportAsSystem -RegFile $testReg } | Should -Throw '*Error accessing the registry*'
 
                 # The backup/restore write must succeed through the
-                # same DACL, without changing it.
+                # same DACLs, without changing them — three
+                # CreateKeyWithDacl calls in one process, like the real
+                # Build (run 52 heap-corruption triage).
                 { Invoke-RegImportPrivileged -RegFile $testReg -HiveKey $keyName } | Should -Not -Throw
 
-                # Diagnostic: show exactly what exists under the group
-                # key after the privileged write, so a read-back miss
-                # says whether the write went elsewhere (or nowhere).
-                $dump = & reg.exe query "HKLM\$keyName\$groupSub" /s 2>&1 | Out-String
+                # Diagnostic: show exactly what exists under the
+                # Overrides key after the privileged write, so a
+                # read-back miss says whether the write went elsewhere
+                # (or nowhere).
+                $dump = & reg.exe query "HKLM\$keyName\$groupBase" /s 2>&1 | Out-String
                 Write-Host "Overrides subtree after privileged import:`n$dump"
 
-                $values = Get-RegistryKeyValues -KeyName $keyName -SubKey "$groupSub\42537950"
-                $values | Should -Not -BeNullOrEmpty
-                $values['EnabledState'] | Should -Match '^0x0*0$'
-                $values['EnabledStateOptions'] | Should -Match '^0x0*0$'
+                foreach ($group in $groups) {
+                    $values = Get-RegistryKeyValues -KeyName $keyName -SubKey "$groupBase\$group\42537950"
+                    $values | Should -Not -BeNullOrEmpty -Because "group $group must carry the override"
+                    $values['EnabledState'] | Should -Match '^0x0*0$'
+                    $values['EnabledStateOptions'] | Should -Match '^0x0*0$'
+                }
             }
             finally {
                 Dismount-RegistryHive -KeyName $keyName
