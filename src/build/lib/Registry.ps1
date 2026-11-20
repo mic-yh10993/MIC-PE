@@ -190,6 +190,19 @@ function Invoke-RegImportAsSystem {
             throw [System.InvalidOperationException]::new(
                 "SYSTEM reg import failed with exit code $code for $RegFile : $detail")
         }
+        # Run 55: reg.exe exited 0 while the values never landed, and
+        # the import log was deleted with the workdir — the miss was
+        # silent until the build-time assert caught it. Surface the
+        # log and read the values back here, at the import step, so a
+        # future miss fails here with the evidence attached instead of
+        # three steps later.
+        if (Test-Path -LiteralPath $logFile) {
+            $logged = (Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue)
+            foreach ($line in $logged) {
+                if ("$line".Trim()) { Write-Host "  [sys-import] $line" }
+            }
+        }
+        Assert-RegImportLanded -RegFile $RegFile
         Write-SubStep "imported $(Split-Path -Leaf $RegFile) as SYSTEM"
     }
     finally {
@@ -425,6 +438,114 @@ function Get-RegistryValue {
         return $item.$Name
     }
     return $null
+}
+
+function Get-RegFileDeclaredEntries {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RegFile
+    )
+
+    # Parses a .reg patch into the sections it declares and the value
+    # names each section writes. Names only, never values: the caller
+    # (Assert-RegImportLanded) reads the values back from the hive, so
+    # a drift between parser and file cannot silently pass. Pure text
+    # parsing, no registry access: unit-testable on Linux.
+    #
+    # Run 55: the 60-werdumps SYSTEM import exited 0 while the values
+    # never landed (the key existed, DumpFolder did not) — the import
+    # step never read anything back. The parser feeds the read-back
+    # that closes that gap.
+    Assert-PathExists -Path $RegFile -Label 'Registry patch'
+
+    $text = [System.IO.File]::ReadAllText($RegFile, [System.Text.Encoding]::Unicode)
+    $entries = [System.Collections.Generic.List[pscustomobject]]::new()
+    $current = $null
+    # A value can span lines with a trailing backslash (hex blobs in
+    # 40-uwp.reg); the name is always on the first line, so a
+    # continuation line matches nothing below and is skipped.
+    foreach ($rawLine in ($text -split "`r`n|`n")) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith(';')) { continue }
+        if ($line -match '^\[(.+)\]$') {
+            $path = $Matches[1]
+            if ($path -notmatch '^HKEY_LOCAL_MACHINE\\(.+)$') {
+                throw [System.InvalidOperationException]::new(
+                    "registry patch section '$path' does not address HKEY_LOCAL_MACHINE (never write outside the mounted hive)")
+            }
+            # Run 50 lesson: a section addressing a live hive root
+            # (HKLM\SOFTWARE, HKLM\SYSTEM, ...) writes into the
+            # runner's live registry, not the mounted image hive.
+            # Mounted hives always carry a PE-* (or test) key name.
+            $root = $Matches[1].Split('\')[0]
+            if ($root -in @('SOFTWARE', 'SYSTEM', 'SAM', 'SECURITY', 'DEFAULT', 'DRIVERS', 'HARDWARE', 'BCD00000000', 'COMPONENTS')) {
+                throw [System.InvalidOperationException]::new(
+                    "registry patch section '$path' addresses the live $root hive, not a mounted image hive (run 50 lesson: HKLM\$root writes into the runner, not the image)")
+            }
+            $current = [pscustomobject]@{
+                KeyPath = $Matches[1]
+                Values  = [System.Collections.Generic.List[string]]::new()
+            }
+            $entries.Add($current)
+            continue
+        }
+        if ($null -eq $current) { continue }  # header line
+        if ($line -match '^"((?:[^"\\]|\\.)*)"\s*=') {
+            $name = $Matches[1] -replace '\\\\', '\' -replace '\\"', '"'
+            $current.Values.Add($name)
+        }
+        elseif ($line -match '^@\s*=') {
+            $current.Values.Add('(Default)')
+        }
+    }
+    return $entries
+}
+
+function Assert-RegImportLanded {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RegFile
+    )
+
+    # Reads back every section a .reg patch declares, right after the
+    # import, and fails loudly when a declared value is missing. Run
+    # 54: the 60-werdumps SYSTEM import exited 0 while the values
+    # never landed (the key existed, DumpFolder did not) — the import
+    # step never read anything back, so the miss stayed silent until
+    # the build-time assert caught it. This closes that gap at the
+    # import step itself, for every SYSTEM import, not just WER.
+    $entries = Get-RegFileDeclaredEntries -RegFile $RegFile
+    foreach ($entry in $entries) {
+        $sep = $entry.KeyPath.IndexOf('\')
+        $hiveKey = $entry.KeyPath.Substring(0, $sep)
+        $subKey = $entry.KeyPath.Substring($sep + 1)
+        $values = Get-RegistryKeyValues -KeyName $hiveKey -SubKey $subKey
+        if ($null -eq $values) {
+            # Distinguish "cannot read" from "does not exist": a key
+            # whose DACL denies the build admin a read must not fail
+            # the build as if the import missed. (The privileged
+            # writer's group keys are like that — but those never go
+            # through the SYSTEM import, so a denial here is
+            # unexpected; warn and skip that key instead of passing
+            # silently or failing wrongly.)
+            $probe = & reg.exe query "HKLM\$($entry.KeyPath)" 2>&1 | Out-String
+            if ($probe -match 'Access is denied') {
+                Write-Warn "cannot read back HKLM\$($entry.KeyPath) (access denied); skipping verification for this key"
+                continue
+            }
+            throw [System.InvalidOperationException]::new(
+                "SYSTEM import read-back: HKLM\$($entry.KeyPath) does not exist after importing $(Split-Path -Leaf $RegFile) (reg.exe exited 0 but the key never landed)")
+        }
+        foreach ($name in $entry.Values) {
+            if (-not $values.Contains($name)) {
+                $have = if ($values.Count -gt 0) { ($values.Keys -join ', ') } else { '(no values)' }
+                throw [System.InvalidOperationException]::new(
+                    "SYSTEM import read-back: value '$name' is missing under HKLM\$($entry.KeyPath) after importing $(Split-Path -Leaf $RegFile) (reg.exe exited 0; key exists with: $have)")
+            }
+        }
+    }
 }
 
 function Invoke-RegistryScript {

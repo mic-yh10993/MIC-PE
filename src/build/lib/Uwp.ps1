@@ -419,6 +419,28 @@ function Assert-WerLocalDumps {
     try {
         $subKey = 'Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe'
         $values = Get-RegistryKeyValues -KeyName $HiveKey -SubKey $subKey
+        # Run 55 diagnostic: run 54 only knew "DumpFolder is not
+        # set" — not whether the key held other values, nor whether
+        # the values landed under a sibling key. Print what is
+        # actually there before any throw, so the build log carries
+        # the evidence on every failure mode, not just the first
+        # missing value.
+        $parentKey = 'Microsoft\Windows\Windows Error Reporting\LocalDumps'
+        $dumpOut = & reg.exe query "HKLM\$HiveKey\$parentKey" /s 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $dumpText = ($dumpOut | Out-String).Trim()
+            Write-Host "  [wer-dump] LocalDumps subtree:`n$dumpText"
+        }
+        else {
+            Write-Host "  [wer-dump] LocalDumps subtree: (missing — reg query exit $LASTEXITCODE)"
+        }
+        if ($null -ne $values -and $values.Count -gt 0) {
+            $pairs = ($values.Keys | ForEach-Object { "$_=$($values[$_])" }) -join '; '
+            Write-Host "  [wer-dump] explorer.exe values: $pairs"
+        }
+        elseif ($null -ne $values) {
+            Write-Host '  [wer-dump] explorer.exe values: (key exists, no values)'
+        }
         if ($null -eq $values) {
             throw [System.InvalidOperationException]::new(
                 "WER LocalDumps is missing: HKLM\$($HiveKey)\$($subKey) does not exist (60-werdumps.reg SYSTEM import did not land)")
