@@ -343,6 +343,13 @@ function Invoke-RegImportPrivileged {
             }
         }
         Write-SubStep "imported $(Split-Path -Leaf $RegFile) as SYSTEM (backup/restore)"
+        # Run 58: assert every written value landed, same as the SYSTEM
+        # path does. Assert-RegImportLanded warns and skips on access
+        # denied (it already has that guard), and the ETC/Overrides
+        # keys grant KEY_READ to Administrators, so the assert can read
+        # back the values through the mounted hive (the hive key is
+        # embedded in the .reg path, so no -HiveKey parameter exists).
+        Assert-RegImportLanded -RegFile $RegFile
     }
     finally {
         $null = & schtasks.exe /delete /tn $taskName /f 2>&1

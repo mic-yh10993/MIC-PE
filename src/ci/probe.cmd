@@ -1040,7 +1040,20 @@ choice /c Y /d Y /t 1 >nul
 choice /c Y /d Y /t 3 >nul
 echo sc_experiment_entered=1 >> "%PROBE_LOCAL%" & echo sc_experiment_entered=1 >> "%PROBE_OUT%"
 if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
-choice /c Y /d Y /t 1 >nul
+rem Run 58 (sc start experiment finish, eval card §44): run 57 narrowed
+rem the wedge to entered's downstream — the choice /t 1 below, the
+rem call, or the subroutine's first lines. The choice is replaced by
+rem the pure-cmd :probe_wait_1s (no external binary: choice is the
+rem suspect, ping was the run-44319967017 suspect, timeout.exe is not
+rem in the image at all — verified against the run 27 boot.wim
+rem System32 listing), and a calling marker brackets the call itself:
+rem calling present means the wait returned and the stall is in the
+rem call or the subroutine; calling absent means the wait itself stuck.
+rem The run-57 choices above (after_copy /t 1, /t 3) are proven good —
+rem entered came back — so they stay.
+call :probe_wait_1s
+echo sc_experiment_calling=1 >> "%PROBE_LOCAL%" & echo sc_experiment_calling=1 >> "%PROBE_OUT%"
+if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
 
 rem Run 51 (service start experiment, eval card §34.7): probe_done is
 rem already in the LOCAL file and the share copy is detached, so
@@ -1429,6 +1442,31 @@ echo dump_%~1_profile=%DUMP_PROFILE% >> "%PROBE_LOCAL%" & echo dump_%~1_profile=
 echo dump_%~1_profile_copy=%DUMP_PROFILE_COPY% >> "%PROBE_LOCAL%" & echo dump_%~1_profile_copy=%DUMP_PROFILE_COPY% >> "%PROBE_OUT%"
 exit /b 0
 
+:probe_wait_1s
+rem Pure-cmd one-second wait, no external binary. Run 58 (eval card
+rem §44): the experiment path no longer waits on choice — choice is the
+rem run-57 prime suspect (run 38: a 60-second choice never returned;
+rem run 57 narrowed the wedge to the window holding a choice /t 1),
+rem ping was the run-44319967017 prime suspect, and timeout.exe is not
+rem in the image at all (verified against the run 27 boot.wim System32
+rem listing: choice.exe and ping.exe present, timeout.exe absent,
+rem waitfor.exe absent, powershell.exe absent). This helper polls
+rem %TIME% until the seconds field advances, bounded by an iteration
+rem cap so a stuck clock still returns. It is a pacing tick, not a
+rem precise sleep: returning early just polls more often. %TIME% is
+rem already the probe's clock (every mark_* timestamp), so no new
+rem dependency is introduced. Each line re-parses on every goto, so
+rem %PW_S1% is read fresh each iteration.
+set "PW_S0="
+for /f "tokens=3 delims=:.," %%S in ("%TIME: =0%") do set "PW_S0=%%S"
+set /a PW_N=0
+:probe_wait_1s_loop
+for /f "tokens=3 delims=:.," %%S in ("%TIME: =0%") do set "PW_S1=%%S"
+if not "%PW_S1%"=="%PW_S0%" exit /b 0
+set /a PW_N+=1
+if %PW_N% geq 200 exit /b 0
+goto probe_wait_1s_loop
+
 :probe_sc_start
 rem %1 = service name, %2 = key prefix. Run 51: start a service
 rem detached with a bounded wait (run 39: two start calls stalled
@@ -1444,18 +1482,20 @@ rem reads the service state afterwards with :probe_svc (the query
 rem command is proven safe; only the start call ever wedged).
 rem The temp file lives on %SystemDrive% (X: in PE, the RAM disk) so
 rem it never touches the share and never waits on the network.
-rem Run 56 (sc start experiment fix, eval card §42): run 55 came back
-rem with no scstart_* key at all, twice in a row — the spin below was
-rem 20000 bare iterations with no time bound and no progress key, so
-rem on a slow PE the spin alone could outrun the host's 120-second
-rem wait and the stall was silent (the host waited the full 120s).
-rem The spin is now a short fast path (200 iterations, then the timed
-rem wait below takes over), and the experiment writes a started key
-rem BEFORE the child is even launched, so a wedge is visible in the
-rem probe file instead of silent.
+rem Run 58 (sc start experiment finish, eval card §44): the entered
+rem marker is the first executable line, so it proves the call itself
+rem returned — entered absent with calling present means the call never
+rem arrived; entered present with started absent means the stall is in
+rem the del/started-echo lines. The started key gets its own detached
+rem copy right after the echo, so it reaches the share even if the
+rem subroutine wedges later (the fifth sync only runs after the whole
+rem experiment finishes). The waits below are :probe_wait_1s, not
+rem choice — see the helper's comment for why choice is out.
+echo scstart_%~2_entered=1 >> "%PROBE_LOCAL%" & echo scstart_%~2_entered=1 >> "%PROBE_OUT%"
 set "SC_TMP=%SystemDrive%\micpe-scstart.tmp"
 del "%SC_TMP%" >nul 2>&1
 echo scstart_%~2_started=1 >> "%PROBE_LOCAL%" & echo scstart_%~2_started=1 >> "%PROBE_OUT%"
+if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
 start "" /min cmd /c sc start %~1 ^> "%SC_TMP%" 2^>nul ^& echo DONE ^>^> "%SC_TMP%"
 set /a SC_SPIN=0
 set /a SC_WAIT=0
@@ -1466,14 +1506,14 @@ if %SC_SPIN% lss 200 goto sc_start_spin
 :sc_start_wait
 if exist "%SC_TMP%" for %%F in ("%SC_TMP%") do if %%~zF gtr 0 goto sc_start_check_done
 if %SC_WAIT% geq 15 goto sc_start_timeout
-choice /c Y /d Y /t 1 >nul
+call :probe_wait_1s
 set /a SC_WAIT+=1
 goto sc_start_wait
 :sc_start_check_done
 find /i "DONE" "%SC_TMP%" >nul 2>&1
 if not errorlevel 1 goto sc_start_found
 if %SC_WAIT% geq 15 goto sc_start_timeout
-choice /c Y /d Y /t 1 >nul
+call :probe_wait_1s
 set /a SC_WAIT+=1
 goto sc_start_check_done
 :sc_start_found

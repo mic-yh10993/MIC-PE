@@ -338,7 +338,7 @@ function Invoke-UwpStep {
         Install-UwpApps -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot `
             -PackageNames (Get-UwpDefaults)
         Install-FrameHost -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
-        $regFiles = @('40-uwp.reg', '60-werdumps.reg', '70-feature-42537950.reg') |
+        $regFiles = @('40-uwp.reg', '60-werdumps.reg', '70-feature-42537950.reg', '80-etc-42537950.reg') |
             ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
         # 40-uwp.reg goes in as SYSTEM: its Appx sideload-policy key gives
         # Administrators only KEY_READ (CI run 44040699722). User decision
@@ -367,7 +367,16 @@ function Invoke-UwpStep {
         # the hive is mounted. Run 51: the override is written grouped
         # (Overrides\0, \15 and \9) — the flat entry run 50 wrote was
         # ignored by the loader (§36.5.1).
-        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '60-werdumps.reg') -PrivilegedRegFiles @('70-feature-42537950.reg')
+        # 80-etc-42537950.reg rides the privileged write too (run 58):
+        # it writes feature 42537950 = 1 (Disabled) into the active
+        # EnterpriseTempControls config 2208259724, the temp layer
+        # ntdll reads directly. That key also gives SYSTEM only
+        # KEY_READ, so the writer's DACL save/write/restore flow runs
+        # for it (save the stock DACL, transient SYSTEM-only DACL,
+        # write, restore and verify by SDDL comparison); the shipped image
+        # keeps the stock DACL. The 70-feature values and groups are
+        # untouched.
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles -SystemRegFiles @('40-uwp.reg', '60-werdumps.reg') -PrivilegedRegFiles @('70-feature-42537950.reg', '80-etc-42537950.reg')
         Assert-AppxPolicy -MountDir $paths.Mount
         Assert-WerLocalDumps -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
