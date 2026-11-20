@@ -94,17 +94,21 @@ Describe 'Get-StageProbeExpect' {
     It 'm5 and m7 assert the grouped feature override is off and explorer survives to the end (run 50, run 51)' {
         # Run 50: the CI build imports an override forcing
         # DisableWin10Taskbar (42537950) off; the stage asserts the
-        # probe read it back as 0x0, and asserts explorer is still
+        # probe read it back as 0x1, and asserts explorer is still
         # alive at probe end (the old explorer=1 is set while it is
         # still starting, so it cannot prove the fix worked). Run 51:
         # the flat entry run 50 wrote was ignored by the loader, so
         # the override is written grouped and the stage asserts the
-        # three group keys instead of the flat one.
+        # three group keys instead of the flat one. Run 54: run 53
+        # wrote EnabledState=0, which is Default, not Disabled
+        # (featurestagingapi.h: 0=Default, 1=Disabled, 2=Enabled) —
+        # the feature stayed enabled and explorer still died. The
+        # stage now asserts 0x1, the first real disable.
         foreach ($stage in 'm5', 'm7') {
             $expect = Get-StageProbeExpect -Stage $stage
-            $expect['fm_42537950_group0'] | Should -Be '0x0'
-            $expect['fm_42537950_group15'] | Should -Be '0x0'
-            $expect['fm_42537950_group9'] | Should -Be '0x0'
+            $expect['fm_42537950_group0'] | Should -Be '0x1'
+            $expect['fm_42537950_group15'] | Should -Be '0x1'
+            $expect['fm_42537950_group9'] | Should -Be '0x1'
             $expect.Keys | Should -Not -Contain 'fm_42537950_state'
             $expect['explorer_end'] | Should -Be '1'
         }

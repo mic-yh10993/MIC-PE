@@ -619,3 +619,44 @@ Describe 'dot-sourcing the helper' {
         $Iso | Should -Be ''
     }
 }
+
+Describe 'Invoke-QemuVerify sc start second-marker wait (run 54)' {
+    BeforeAll {
+        $script:qemuVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/ci/Invoke-QemuVerify.ps1') -Raw
+    }
+
+    It 'Test-ScStartComplete is true only when scstart_done=1 is present' {
+        Test-ScStartComplete -Content "probe_done=1`r`nscstart_done=1`r`n" | Should -BeTrue
+        Test-ScStartComplete -Content "probe_done=1`r`n" | Should -BeFalse
+        Test-ScStartComplete -Content '' | Should -BeFalse
+        Test-ScStartComplete -Content $null | Should -BeFalse
+    }
+
+    It 'Test-ProbeWaitDone never ends the wait before probe_done is seen' {
+        Test-ProbeWaitDone -ShareContent 'probe_done=1' -LocalContent '' -ProbeDoneAt $null | Should -BeFalse
+    }
+
+    It 'Test-ProbeWaitDone ends the wait when probe_failed is present' {
+        # The watchdog says the probe died — never wait for an
+        # experiment that cannot run.
+        Test-ProbeWaitDone -ShareContent 'probe_failed=1' -LocalContent '' -ProbeDoneAt (Get-Date) | Should -BeTrue
+    }
+
+    It 'Test-ProbeWaitDone ends the wait when scstart_done is seen in either file' {
+        Test-ProbeWaitDone -ShareContent 'probe_done=1' -LocalContent "scstart_done=1`r`n" -ProbeDoneAt (Get-Date) | Should -BeTrue
+        Test-ProbeWaitDone -ShareContent "probe_done=1`r`nscstart_done=1" -LocalContent '' -ProbeDoneAt (Get-Date) | Should -BeTrue
+    }
+
+    It 'Test-ProbeWaitDone keeps waiting while the experiment is still running' {
+        Test-ProbeWaitDone -ShareContent 'probe_done=1' -LocalContent '' -ProbeDoneAt (Get-Date) | Should -BeFalse
+    }
+
+    It 'Test-ProbeWaitDone ends the wait when the bounded wait after probe_done elapses' {
+        Test-ProbeWaitDone -ShareContent 'probe_done=1' -LocalContent '' -ProbeDoneAt (Get-Date).AddSeconds(-200) | Should -BeTrue
+    }
+
+    It 'the wait loop records probe_done time and consults Test-ProbeWaitDone before breaking' {
+        $script:qemuVerify | Should -Match '\$probeDoneAt = \$null'
+        $script:qemuVerify | Should -Match 'Test-ProbeWaitDone -ShareContent \$probe -LocalContent \$probeLocal -ProbeDoneAt \$probeDoneAt'
+    }
+}

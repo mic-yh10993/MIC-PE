@@ -591,6 +591,57 @@ function Test-ProbeComplete {
     return ($Content -match '(?m)^probe_done=1\s*$')
 }
 
+function Test-ScStartComplete {
+    [CmdletBinding()]
+    param(
+        [string] $Content
+    )
+
+    # Run 54: the sc start experiment runs after probe_done (run 51)
+    # and writes scstart_done=1 to the probe local file when it
+    # finishes; the fifth sync carries it to the share. The host
+    # waits for it (bounded, see Test-ProbeWaitDone) so the
+    # experiment results come back instead of being cut off with
+    # QEMU (run 53: no scstart_* or aumid_after_* key ever came back).
+    if (-not $Content) { return $false }
+    return ($Content -match '(?m)^scstart_done=1\s*$')
+}
+
+function Test-ProbeWaitDone {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object] $ShareContent,
+
+        [AllowNull()]
+        [object] $LocalContent,
+
+        [AllowNull()]
+        [Nullable[datetime]] $ProbeDoneAt,
+
+        [int] $ScStartWaitSec = 120
+    )
+
+    # Run 54: probe_done ends the main probe, but the sc start
+    # experiment runs after it and needs up to ~45 seconds more
+    # (three bounded sc starts plus the AUMID re-dump). Returns
+    # $true when the host may end the wait: probe_failed (the
+    # watchdog says the probe died — never wait for an experiment
+    # that cannot run), scstart_done seen in either file, or the
+    # bounded wait after probe_done has elapsed (the experiment
+    # did not finish in time; proceeding with what came back is
+    # itself a signal, not a silent loss). $ProbeDoneAt is $null
+    # until probe_done is first seen, so this never ends the wait
+    # before the main probe is done.
+    if ($null -eq $ProbeDoneAt) { return $false }
+    $share = if ($ShareContent -is [string]) { $ShareContent } else { '' }
+    $local = if ($LocalContent -is [string]) { $LocalContent } else { '' }
+    $combined = "$share`n$local"
+    if ($combined -match '(?m)^probe_failed=1\s*$') { return $true }
+    if ($combined -match '(?m)^scstart_done=1\s*$') { return $true }
+    return ((Get-Date) - $ProbeDoneAt).TotalSeconds -ge $ScStartWaitSec
+}
+
 function Test-ScreenshotFrozen {
     [CmdletBinding()]
     param(
@@ -795,6 +846,10 @@ function Invoke-QemuVerify {
     $bootKeysSent = 0
     $probe = @{}
     $probeLocal = $null
+    # Run 54: set when probe_done is first seen; the host then waits
+    # up to $ScStartWaitSec more for the sc start experiment
+    # (scstart_done=1) before ending the run, see Test-ProbeWaitDone.
+    $probeDoneAt = $null
 
     try {
         while ((Get-Date) -lt $deadline) {
@@ -826,8 +881,15 @@ function Invoke-QemuVerify {
                 Start-Sleep -Seconds 3
                 $probe = Get-Content -LiteralPath $probePath -Raw -ErrorAction SilentlyContinue
                 if (Test-ProbeComplete -Content $probe) {
-                    Start-Sleep -Seconds 5
-                    break
+                    # Run 54: probe_done is not the end any more — the
+                    # sc start experiment runs after it. Record when it
+                    # was first seen and end the wait only when the
+                    # experiment is done, failed, or out of time.
+                    if ($null -eq $probeDoneAt) { $probeDoneAt = Get-Date }
+                    if (Test-ProbeWaitDone -ShareContent $probe -LocalContent $probeLocal -ProbeDoneAt $probeDoneAt) {
+                        Start-Sleep -Seconds 5
+                        break
+                    }
                 }
             }
 
@@ -838,8 +900,14 @@ function Invoke-QemuVerify {
             if (Test-Path -LiteralPath $probeLocalPath) {
                 $probeLocal = Get-Content -LiteralPath $probeLocalPath -Raw -ErrorAction SilentlyContinue
                 if (Test-ProbeComplete -Content $probeLocal) {
-                    Start-Sleep -Seconds 5
-                    break
+                    # Run 54: same second-marker wait as the share
+                    # file above — the experiment marker lands in the
+                    # local copy (fifth sync), not the share probe.
+                    if ($null -eq $probeDoneAt) { $probeDoneAt = Get-Date }
+                    if (Test-ProbeWaitDone -ShareContent $probe -LocalContent $probeLocal -ProbeDoneAt $probeDoneAt) {
+                        Start-Sleep -Seconds 5
+                        break
+                    }
                 }
             }
 

@@ -111,11 +111,18 @@ Describe 'feature 42537950 override registry patch (run 50, run 51)' {
         # grouped entries only), so run 51 writes it into all three
         # groups (the feature's group is not known offline; writing
         # all three is harmless). PE-SYS addresses the mounted SYSTEM
-        # hive (HKLM\SYSTEM would hit the runner).
+        # hive (HKLM\SYSTEM would hit the runner). Run 54: run 53
+        # wrote EnabledState=0, which is Default, not Disabled
+        # (featurestagingapi.h: 0=Default, 1=Disabled, 2=Enabled) —
+        # the feature stayed enabled and explorer still died. The
+        # patch now writes 1 (Disabled) in all three groups; the
+        # disassembly of explorer.exe 10.0.26100.1 confirms IsEnabled
+        # is TRUE exactly when the evaluated state is 0 or 2.
         foreach ($group in '0', '15', '9') {
             $script:reg70 | Should -Match "HKEY_LOCAL_MACHINE\\PE-SYS\\ControlSet001\\Control\\FeatureManagement\\Overrides\\$group\\42537950\]" -Because "group $group must carry the override"
         }
-        ([regex]::Matches($script:reg70, '"EnabledState"=dword:00000000')).Count | Should -Be 3 -Because 'one Disabled value per group'
+        ([regex]::Matches($script:reg70, '"EnabledState"=dword:00000001')).Count | Should -Be 3 -Because 'one Disabled value per group'
+        ([regex]::Matches($script:reg70, '"EnabledState"=dword:00000000')).Count | Should -Be 0 -Because '0 is Default, not Disabled — run 53 proved writing 0 leaves the feature enabled'
         ([regex]::Matches($script:reg70, '"EnabledStateOptions"=dword:00000000')).Count | Should -Be 3 -Because 'one options value per group, matching the stock entries'
         $script:reg70 | Should -Not -Match 'HKEY_LOCAL_MACHINE\\PE-SYS\\ControlSet001\\Control\\FeatureManagement\\Overrides\\42537950\]' -Because 'the flat entry is gone on purpose — the loader ignores it'
     }
@@ -317,7 +324,7 @@ Describe 'ConvertFrom-RegFile (privileged registry writer, run 52)' {
         foreach ($group in '0', '15', '9') {
             $entry = @($entries | Where-Object { $_.KeyPath -eq "PE-SYS\ControlSet001\Control\FeatureManagement\Overrides\$group\42537950" })
             $entry.Count | Should -Be 1 -Because "group $group must carry the override"
-            $entry[0].Values['EnabledState'] | Should -Be 0 -Because 'EnabledState 0 disables the feature'
+            $entry[0].Values['EnabledState'] | Should -Be 1 -Because 'EnabledState 1 disables the feature (0 is Default, not Disabled — run 54)'
             $entry[0].Values['EnabledStateOptions'] | Should -Be 0 -Because 'options 0 matches the stock entries'
         }
     }

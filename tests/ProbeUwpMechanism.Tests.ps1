@@ -1985,6 +1985,45 @@ Describe 'probe.cmd run 50 feature 42537950 override read-back and explorer_end 
         $text.IndexOf('echo fm_42537950_state=') | Should -BeLessThan $text.IndexOf('mark_uwp_launch_calculator') -Because 'the read-back runs before the UWP launches'
     }
 
+    It 'reads the boot control set selection, the ControlSet001 override, the temp-control config and the raw options back (run 54)' {
+        # Run 54 read-path close-out (eval card §40.1): the evaluation
+        # goes through the OS feature-staging API on CurrentControlSet,
+        # so the probe also reads HKLM\SYSTEM\Select (which control set
+        # is Current), the same override under ControlSet001 directly,
+        # the active EnterpriseTempControls config, and the raw
+        # EnabledStateOptions — read-only, no new mark_ marker.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\Select" /v Current' -Because 'Current says which control set CurrentControlSet is'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\Select" /v Default' -Because 'Default is part of the boot selection'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\Select" /v Failed' -Because 'Failed is part of the boot selection'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\Select" /v LastKnownGood' -Because 'LastKnownGood is part of the boot selection'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\ControlSet001\\Control\\FeatureManagement\\Overrides\\0\\42537950" /v EnabledState' -Because 'ControlSet001 is read back directly'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\EnterpriseTempControls\\Active" /v ActiveConfig' -Because 'the active temp-control config is read back'
+        $text | Should -Match 'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\Overrides\\0\\42537950" /v EnabledStateOptions' -Because 'the raw options value is read back'
+        $text | Should -Match 'echo fm_select_current=%FM_SEL_CURRENT%' -Because 'the Current value is recorded'
+        $text | Should -Match 'echo fm_select_lastknowngood=%FM_SEL_LKG%' -Because 'the LastKnownGood value is recorded'
+        $text | Should -Match 'echo fm_42537950_cs001_group0=%FM_CS001_G0%' -Because 'the ControlSet001 read-back is recorded'
+        $text | Should -Match 'echo fm_etc_activeconfig=%FM_ETC_ACTIVE%' -Because 'the active config is recorded'
+        $text | Should -Match 'echo fm_42537950_group0_options=%FM_G0_OPT%' -Because 'the raw options value is recorded'
+        $text.IndexOf('echo fm_select_current=') | Should -BeGreaterThan $text.IndexOf('echo fm_42537950_group9=') -Because 'the diagnostics follow the group read-backs'
+        $text.IndexOf('echo fm_42537950_group0_options=') | Should -BeLessThan $text.IndexOf('echo wer_localdumps_folder=') -Because 'the diagnostics run before the WER section'
+    }
+
+    It 'writes the sc start experiment completion marker before the fifth sync (run 54)' {
+        # Run 53: the host ended the verification the moment it saw
+        # probe_done, killing QEMU before the experiment finished, so
+        # no scstart_* or aumid_after_* key ever came back. The
+        # experiment now writes scstart_done=1 when it finishes; the
+        # host waits for it (bounded) before ending the run. The
+        # marker goes to the local file only, like the other
+        # experiment keys, and the fifth sync carries it to the share.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'echo scstart_done=1 >> \"%PROBE_LOCAL%\"' -Because 'the experiment writes its own completion marker'
+        $text.IndexOf('echo scstart_done=1') | Should -BeGreaterThan $text.IndexOf('echo probe_done=1') -Because 'the experiment runs after probe_done'
+        $text.IndexOf('echo scstart_done=1') | Should -BeGreaterThan $text.IndexOf('aumid_after_lines=') -Because 'the marker is written after the AUMID re-dump'
+        $text.IndexOf('echo scstart_done=1') | Should -BeLessThan $text.LastIndexOf('call :probe_sync_local') -Because 'the fifth sync carries the marker to the share'
+    }
+
     It 'reads the WER LocalDumps key, the RpcSs state and the appmodel group back (run 50 diagnostics)' {
         # Run 50 correction: 60-werdumps.reg addressed HKLM\SOFTWARE,
         # which a plain reg.exe import writes into the runner's live

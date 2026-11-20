@@ -390,6 +390,75 @@ function Assert-AppxPolicy {
     }
 }
 
+function Assert-WerLocalDumps {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MountDir,
+
+        [string] $HiveKey = 'PE-WER'
+    )
+
+    # Run 54: reads back the WER LocalDumps values that 60-werdumps.reg
+    # imports as SYSTEM (Invoke-RegImportAsSystem). The import only
+    # checks reg.exe's exit code and never reads the values back, and
+    # the CI test only checks the .reg file text — so a silent miss
+    # was possible, and runs 50/53 proved it: the import step logged
+    # success while the running PE still read wer_localdumps_folder
+    # =missing. This turns that silent miss into a loud build
+    # failure: if the key is not in the mounted SOFTWARE hive here,
+    # the SYSTEM import failed for this key and the build stops
+    # instead of shipping an image whose minidump route is unproven.
+    # Read access is fine for the build admin: the key's DACL grants
+    # Administrators KEY_READ. reg.exe prints a DWORD as 0x1 (or
+    # 0x00000001); accept either form, like Assert-AppxPolicy.
+    $hiveFile = Join-Path $MountDir 'Windows/System32/config/SOFTWARE'
+    Assert-PathExists -Path $hiveFile -Label 'SOFTWARE hive'
+
+    Mount-RegistryHive -HiveFile $hiveFile -KeyName $HiveKey
+    try {
+        $subKey = 'Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe'
+        $values = Get-RegistryKeyValues -KeyName $HiveKey -SubKey $subKey
+        if ($null -eq $values) {
+            throw [System.InvalidOperationException]::new(
+                "WER LocalDumps is missing: HKLM\$($HiveKey)\$($subKey) does not exist (60-werdumps.reg SYSTEM import did not land)")
+        }
+        if (-not $values.Contains('DumpFolder')) {
+            throw [System.InvalidOperationException]::new(
+                "WER LocalDumps is missing: DumpFolder is not set under HKLM\$($HiveKey)\$($subKey)")
+        }
+        if ($values['DumpFolder'] -ne 'X:\CrashDumps') {
+            throw [System.InvalidOperationException]::new(
+                "WER LocalDumps is wrong: DumpFolder is $($values['DumpFolder']), expected X:\CrashDumps")
+        }
+        foreach ($name in 'DumpCount', 'DumpType') {
+            if (-not $values.Contains($name)) {
+                throw [System.InvalidOperationException]::new(
+                    "WER LocalDumps is missing: $name is not set under HKLM\$($HiveKey)\$($subKey)")
+            }
+        }
+        if ($values['DumpCount'] -notmatch '^0x0*3$') {
+            throw [System.InvalidOperationException]::new(
+                "WER LocalDumps is wrong: DumpCount is $($values['DumpCount']), expected 0x3")
+        }
+        if ($values['DumpType'] -notmatch '^0x0*1$') {
+            throw [System.InvalidOperationException]::new(
+                "WER LocalDumps is wrong: DumpType is $($values['DumpType']), expected 0x1")
+        }
+        Write-SubStep 'WER LocalDumps present (explorer.exe: DumpFolder=X:\CrashDumps, DumpCount=3, DumpType=1)'
+    }
+    finally {
+        # A failing unload must not mask the real assertion above: warn and
+        # continue, matching Invoke-RegistryScript's finally convention.
+        try {
+            Dismount-RegistryHive -KeyName $HiveKey
+        }
+        catch {
+            Write-Warn "could not unload HKLM\$HiveKey : $($_.Exception.Message)"
+        }
+    }
+}
+
 function Assert-UwpReady {
     [CmdletBinding()]
     param(

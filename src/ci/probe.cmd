@@ -570,14 +570,24 @@ rem SYSTEM hive holds 330 FeatureManagement Overrides (groups 0/15/9)
 rem and none of them is 42537950 — DisableWin10Taskbar runs at its
 rem built-in default (enabled), and CTray::Init failfasts on it
 rem (run 49, tray.cpp:595, 0x1181ea). The CI build now imports an
-rem override forcing it off (70-feature-42537950.reg, EnabledState=0).
+rem override forcing it off (70-feature-42537950.reg, EnabledState=1).
+rem Run 54: run 53 wrote EnabledState=0, which is Default, not
+rem Disabled (featurestagingapi.h: 0=Default, 1=Disabled, 2=Enabled)
+rem — the feature stayed enabled and explorer still died. Value 1
+rem is the first real disable; the stage now asserts 0x1.
 rem Read it back here, read-only, so the stage can say whether the
 rem import landed in the running image — and whether the override is
 rem really off before any UWP launch is attempted. The three group
 rem checks say whether the feature also sits in a group override
 rem (it does not in the image; a 1 here would mean the image changed).
-rem The EnabledState line reads "EnabledState    REG_DWORD    0x0", so
+rem The EnabledState line reads "EnabledState    REG_DWORD    0x1", so
 rem tokens=3 yields the hex value; a missing key leaves missing.
+rem Run 54 (read-path close-out, eval card §40.1): the evaluation
+rem goes through the OS feature-staging API on CurrentControlSet, so
+rem also read the boot control set selection, the same override
+rem under ControlSet001 directly, the active temp-control config,
+rem and the raw EnabledStateOptions — read-only, no new mark_
+rem marker, the marker count (39) stays put.
 rem Run 51: the flat entry run 50 wrote was ignored by the loader
 rem (§36.5.1 — it reads grouped entries only), so the patch now
 rem writes all three groups and the flat entry is gone. The flat
@@ -597,6 +607,27 @@ echo fm_42537950_group15=%FM_G15% >> "%PROBE_LOCAL%" & echo fm_42537950_group15=
 set "FM_G9=missing"
 for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\9\42537950" /v EnabledState 2^>nul ^| find /i "EnabledState"') do set "FM_G9=%%A"
 echo fm_42537950_group9=%FM_G9% >> "%PROBE_LOCAL%" & echo fm_42537950_group9=%FM_G9% >> "%PROBE_OUT%"
+set "FM_SEL_CURRENT=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\Select" /v Current 2^>nul ^| find /i "Current"') do set "FM_SEL_CURRENT=%%A"
+echo fm_select_current=%FM_SEL_CURRENT% >> "%PROBE_LOCAL%" & echo fm_select_current=%FM_SEL_CURRENT% >> "%PROBE_OUT%"
+set "FM_SEL_DEFAULT=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\Select" /v Default 2^>nul ^| find /i "Default"') do set "FM_SEL_DEFAULT=%%A"
+echo fm_select_default=%FM_SEL_DEFAULT% >> "%PROBE_LOCAL%" & echo fm_select_default=%FM_SEL_DEFAULT% >> "%PROBE_OUT%"
+set "FM_SEL_FAILED=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\Select" /v Failed 2^>nul ^| find /i "Failed"') do set "FM_SEL_FAILED=%%A"
+echo fm_select_failed=%FM_SEL_FAILED% >> "%PROBE_LOCAL%" & echo fm_select_failed=%FM_SEL_FAILED% >> "%PROBE_OUT%"
+set "FM_SEL_LKG=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\Select" /v LastKnownGood 2^>nul ^| find /i "LastKnownGood"') do set "FM_SEL_LKG=%%A"
+echo fm_select_lastknowngood=%FM_SEL_LKG% >> "%PROBE_LOCAL%" & echo fm_select_lastknowngood=%FM_SEL_LKG% >> "%PROBE_OUT%"
+set "FM_CS001_G0=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\ControlSet001\Control\FeatureManagement\Overrides\0\42537950" /v EnabledState 2^>nul ^| find /i "EnabledState"') do set "FM_CS001_G0=%%A"
+echo fm_42537950_cs001_group0=%FM_CS001_G0% >> "%PROBE_LOCAL%" & echo fm_42537950_cs001_group0=%FM_CS001_G0% >> "%PROBE_OUT%"
+set "FM_ETC_ACTIVE=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\EnterpriseTempControls\Active" /v ActiveConfig 2^>nul ^| find /i "ActiveConfig"') do set "FM_ETC_ACTIVE=%%A"
+echo fm_etc_activeconfig=%FM_ETC_ACTIVE% >> "%PROBE_LOCAL%" & echo fm_etc_activeconfig=%FM_ETC_ACTIVE% >> "%PROBE_OUT%"
+set "FM_G0_OPT=missing"
+for /f "tokens=3" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\0\42537950" /v EnabledStateOptions 2^>nul ^| find /i "EnabledStateOptions"') do set "FM_G0_OPT=%%A"
+echo fm_42537950_group0_options=%FM_G0_OPT% >> "%PROBE_LOCAL%" & echo fm_42537950_group0_options=%FM_G0_OPT% >> "%PROBE_OUT%"
 rem Run 50 (minidump route re-check): 60-werdumps.reg pointed its key
 rem at HKLM\SOFTWARE, which a plain reg.exe import writes into the
 rem RUNNER's live hive — the image hives are mounted as PE-SOFT/PE-SYS,
@@ -1016,6 +1047,16 @@ if exist "%SystemDrive%\micpe-aumid-after.tmp" for /f %%A in (%SystemDrive%\micp
 echo aumid_after_lines=%AUMID_AFTER_LINES% >> "%PROBE_LOCAL%" & echo aumid_after_lines=%AUMID_AFTER_LINES% >> "%PROBE_OUT%"
 del "%SystemDrive%\micpe-aumid-after.tmp" >nul 2>&1
 endlocal
+rem Run 54 (sc start experiment completion marker, eval card §40.2):
+rem the host used to end the verification the moment it saw
+rem probe_done, which killed QEMU before this experiment finished
+rem (run 53: no scstart_* or aumid_after_* key ever came back). The
+rem experiment now writes its own completion marker; the host waits
+rem for it (bounded: 120 seconds after probe_done) before ending
+rem the run, so the experiment results finally come back. Written
+rem to the local file only, like the other experiment keys — the
+rem fifth sync below carries it to the share.
+echo scstart_done=1 >> "%PROBE_LOCAL%"
 rem Fifth sync: the experiment wrote keys after the detached end copy
 rem fired, so copy the local file to the share once more — otherwise
 rem the experiment keys live only in the share probe file, whose host
