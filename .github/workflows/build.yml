@@ -24,6 +24,10 @@ on:
         description: "内置 Chrome 精简版（约 +130 MB 包）"
         type: boolean
         default: false
+      probe:
+        description: "注入 probe.cmd 自验证探针（false=交互调试镜像：不放 probe.cmd，停在 cmd 提示符，可手动跑 sc start）"
+        type: boolean
+        default: true
       verify:
         description: "验证档位：full=含 QEMU 运行时自验证；static=只做静态与结构；none=只出产物"
         type: choice
@@ -115,16 +119,18 @@ jobs:
           IN_BUILD: ${{ inputs.build || '26200' }}
           IN_OFFICE: ${{ inputs.office }}
           IN_CHROME: ${{ inputs.chrome }}
+          IN_PROBE: ${{ inputs.probe }}
         run: |
           $buildArgs = @{ Stage = $env:IN_STAGE }
           if ($env:IN_BUILD) { $buildArgs.Build = $env:IN_BUILD }
           if ($env:IN_OFFICE -eq 'true') { $buildArgs.Office = $true }
           if ($env:IN_CHROME -eq 'true') { $buildArgs.Chrome = $true }
+          if ($env:IN_PROBE -eq 'false') { $buildArgs.Probe = $false }
 
           ./src/build/Build-Micpe.ps1 @buildArgs
 
       - name: Install QEMU
-        if: inputs.verify == 'full'
+        if: inputs.verify == 'full' && inputs.probe != false
         shell: pwsh
         run: |
           if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
@@ -136,7 +142,7 @@ jobs:
           "QEMU_PATH=$qemu" | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Ensure OVMF firmware
-        if: inputs.verify == 'full'
+        if: inputs.verify == 'full' && inputs.probe != false
         shell: pwsh
         run: |
           # QEMU ships its UEFI firmware next to the emulator (OVMF_CODE.fd
@@ -159,7 +165,7 @@ jobs:
           "OVMF_PATH=$ovmf" | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Prepare data disks
-        if: inputs.verify == 'full' && (inputs.stage == 'm6' || inputs.stage == 'm7' || inputs.stage == 'all')
+        if: inputs.verify == 'full' && inputs.probe != false && (inputs.stage == 'm6' || inputs.stage == 'm7' || inputs.stage == 'all')
         shell: pwsh
         run: |
           # plan Task 17 Step 6: three qcow2 data disks + one blank 64 GB disk
@@ -234,7 +240,7 @@ jobs:
           Write-Host "data disks: $disks"
 
       - name: Verify in QEMU
-        if: inputs.verify == 'full'
+        if: inputs.verify == 'full' && inputs.probe != false
         shell: pwsh
         env:
           IN_STAGE: ${{ inputs.stage || 'all' }}
@@ -316,7 +322,7 @@ jobs:
           compression-level: 0
 
       - name: Upload verify artifacts
-        if: always() && inputs.verify == 'full'
+        if: always() && inputs.verify == 'full' && inputs.probe != false
         uses: actions/upload-artifact@v4
         with:
           name: micpe-verify-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}

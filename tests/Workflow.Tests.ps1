@@ -12,10 +12,20 @@ Describe 'build workflow' {
         $script:workflow | Should -Match 'timeout-minutes:\s*360'
     }
 
-    It 'accepts the stage, build, office, chrome and verify inputs' {
-        foreach ($name in 'stage', 'build', 'office', 'chrome', 'verify') {
+    It 'accepts the stage, build, office, chrome, probe and verify inputs' {
+        foreach ($name in 'stage', 'build', 'office', 'chrome', 'probe', 'verify') {
             $script:workflow | Should -Match "(?m)^\s{6}${name}:" -Because "input $name must exist"
         }
+    }
+
+    It 'accepts the probe boolean input, defaulting to true (debug interactive image)' {
+        $script:workflow | Should -Match "(?s)probe:\s*\n\s*description:.*\n\s*type: boolean\s*\n\s*default: true"
+    }
+
+    It 'passes the probe flag through IN_PROBE to Build-Micpe.ps1' {
+        $script:workflow | Should -Match 'IN_PROBE:'
+        $script:workflow | Should -Match 'IN_PROBE -eq ''false'''
+        $script:workflow | Should -Match 'buildArgs\.Probe = \$false'
     }
 
     It 'passes inputs through environment variables, never inline interpolation' {
@@ -46,6 +56,18 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'Test-Stage.ps1'
         $script:buildYml | Should -Match "inputs.verify == 'full'"
         $script:buildYml | Should -Match 'qemu'
+    }
+
+    It 'skips the full QEMU verify chain when probe=false (no probe.txt to wait for)' {
+        $script:buildYml | Should -Match "inputs\.verify == 'full' && inputs\.probe != false"
+        $script:buildYml | Should -Match "if: always\(\) && inputs\.verify == 'full' && inputs\.probe != false"
+    }
+
+    It 'leaves probe.cmd out of the image when Probe is off (debug interactive image)' {
+        $script:buildScript | Should -Match '\[bool\] \$Probe = \$true'
+        $script:buildScript | Should -Match 'if \(\$Probe\)'
+        $script:buildScript.IndexOf('if ($Probe)') | Should -BeLessThan $script:buildScript.IndexOf("Copy-Item -LiteralPath `$probe")
+        $script:buildScript | Should -Match 'probe disabled: leaving probe.cmd'
     }
 
     It 'uploads probe artifacts even when verification fails' {
