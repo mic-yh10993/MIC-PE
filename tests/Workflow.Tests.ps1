@@ -70,6 +70,16 @@ Describe 'build.yml verify wiring' {
         $script:buildScript | Should -Match 'probe disabled: leaving probe.cmd'
     }
 
+    It 'does not shadow the Probe parameter with a local $probe variable in the reseed step (r59)' {
+        # PowerShell variables are case-insensitive: a local `$probe = ...`
+        # assignment inside Invoke-ReseedStep shadows the script parameter
+        # $Probe, so `if ($Probe)` reads the non-empty path string and is
+        # always truthy. r59 shipped exactly that way: probe=false was
+        # passed correctly, yet probe.cmd was injected anyway.
+        $script:buildScript | Should -Not -Match '(?m)^\s*\$probe\s*='
+        $script:buildScript | Should -Match '\$probeFile = Join-Path \$repoRoot'
+    }
+
     It 'uploads probe artifacts even when verification fails' {
         $script:buildYml | Should -Match 'micpe-probe.txt'
         $script:buildYml | Should -Match "if: always\(\) && inputs.verify == 'full'"

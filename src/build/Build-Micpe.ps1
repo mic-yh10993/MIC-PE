@@ -234,12 +234,12 @@ function Invoke-ReseedStep {
     # a half-injected image never ships.
     Write-Step 'injecting MICPE boot files into boot.wim'
     $startnet = Join-Path $repoRoot 'src\shell\startnet.cmd'
-    $probe = Join-Path $repoRoot 'src\ci\probe.cmd'
+    $probeFile = Join-Path $repoRoot 'src\ci\probe.cmd'
     $watchdog = Join-Path $repoRoot 'src\ci\probe-watchdog.cmd'
     $sync = Join-Path $repoRoot 'src\ci\probe-sync.cmd'
     $mirror = Join-Path $repoRoot 'src\ci\probe-mirror.cmd'
     Assert-PathExists -Path $startnet -Label 'startnet.cmd'
-    Assert-PathExists -Path $probe -Label 'probe.cmd'
+    Assert-PathExists -Path $probeFile -Label 'probe.cmd'
     Assert-PathExists -Path $watchdog -Label 'probe-watchdog.cmd'
     Assert-PathExists -Path $sync -Label 'probe-sync.cmd'
     Assert-PathExists -Path $mirror -Label 'probe-mirror.cmd'
@@ -248,7 +248,7 @@ function Invoke-ReseedStep {
         $system32 = Join-Path $paths.Mount 'Windows\System32'
         Copy-Item -LiteralPath $startnet -Destination (Join-Path $system32 'startnet.cmd') -Force
         if ($Probe) {
-            Copy-Item -LiteralPath $probe -Destination (Join-Path $system32 'probe.cmd') -Force
+            Copy-Item -LiteralPath $probeFile -Destination (Join-Path $system32 'probe.cmd') -Force
             Copy-Item -LiteralPath $watchdog -Destination (Join-Path $system32 'probe-watchdog.cmd') -Force
             Copy-Item -LiteralPath $sync -Destination (Join-Path $system32 'probe-sync.cmd') -Force
             Copy-Item -LiteralPath $mirror -Destination (Join-Path $system32 'probe-mirror.cmd') -Force
