@@ -121,6 +121,26 @@ public static class MicpePrivilegedRegistry
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern bool AddAccessAllowedAce(IntPtr pAcl, uint dwAceRevision, uint AccessMask, IntPtr pSid);
 
+    // SECURITY_DESCRIPTOR in absolute format: a 4-byte header
+    // (Revision, Sbz1, Control) followed by four pointers. On x64
+    // that is 40 bytes, not 20: the run 52 code allocated 20 bytes
+    // (the x86 size), so InitializeSecurityDescriptor wrote 20 bytes
+    // past the buffer on every CreateKeyWithDacl and corrupted the
+    // heap — run 53 reproduced it deterministically, crashing on the
+    // third call with STATUS_HEAP_CORRUPTION. Size the buffer from
+    // the struct so the allocation is right on any pointer width.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SECURITY_DESCRIPTOR
+    {
+        public byte Revision;
+        public byte Sbz1;
+        public ushort Control;
+        public IntPtr Owner;
+        public IntPtr Group;
+        public IntPtr Sacl;
+        public IntPtr Dacl;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct SECURITY_ATTRIBUTES
     {
@@ -178,7 +198,7 @@ public static class MicpePrivilegedRegistry
                 throw new InvalidOperationException("AddAccessAllowedAce failed for Administrators with Win32 error " + Marshal.GetLastWin32Error());
             if (!AddAccessAllowedAce(pAcl, 2, 0x000f003f, pServiceSid))
                 throw new InvalidOperationException("AddAccessAllowedAce failed for the Feature Management service with Win32 error " + Marshal.GetLastWin32Error());
-            pSD = Marshal.AllocHGlobal(20);
+            pSD = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SECURITY_DESCRIPTOR)));
             if (!InitializeSecurityDescriptor(pSD, 1))
                 throw new InvalidOperationException("InitializeSecurityDescriptor failed with Win32 error " + Marshal.GetLastWin32Error());
             if (!SetSecurityDescriptorDacl(pSD, true, pAcl, false))

@@ -378,6 +378,33 @@ Describe 'ConvertFrom-RegFile (privileged registry writer, run 52)' {
     }
 }
 
+Describe 'MicpePrivilegedRegistry struct layouts (run 53)' {
+    It 'SECURITY_DESCRIPTOR is 40 bytes on x64 (the run 52 heap corruption)' {
+        # Absolute-format SECURITY_DESCRIPTOR: 4-byte header + 4
+        # pointers. The run 52 code allocated 20 bytes (the x86 size),
+        # so InitializeSecurityDescriptor wrote 20 bytes past the
+        # buffer on every CreateKeyWithDacl and corrupted the heap;
+        # run 53 reproduced it deterministically, crashing on the third
+        # call with STATUS_HEAP_CORRUPTION. The writer now sizes the
+        # buffer from this struct.
+        Initialize-PrivilegedRegistryApi
+        $apiType = ([System.Management.Automation.PSTypeName]'MicpePrivilegedRegistry').Type
+        # The [type] cast matters: without it PowerShell binds
+        # Marshal.SizeOf to the object overload and fails.
+        $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type]$apiType.GetNestedType('SECURITY_DESCRIPTOR'))
+        if ([System.IntPtr]::Size -eq 8) { $size | Should -Be 40 } else { $size | Should -Be 20 }
+    }
+
+    It 'SECURITY_ATTRIBUTES is 24 bytes on x64 (audit of the same call)' {
+        Initialize-PrivilegedRegistryApi
+        $apiType = ([System.Management.Automation.PSTypeName]'MicpePrivilegedRegistry').Type
+        # The [type] cast matters: without it PowerShell binds
+        # Marshal.SizeOf to the object overload and fails.
+        $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type]$apiType.GetNestedType('SECURITY_ATTRIBUTES'))
+        if ([System.IntPtr]::Size -eq 8) { $size | Should -Be 24 } else { $size | Should -Be 12 }
+    }
+}
+
 Describe 'Write-PrivProgress (crash breadcrumbs, run 53)' {
     It 'appends progress lines to the progress file when MICPE_PRIV_PROGRESS is set' {
         # The writer's host output is lost when its process crashes
