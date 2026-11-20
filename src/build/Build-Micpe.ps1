@@ -32,6 +32,15 @@ param(
 
     [switch] $Chrome,
 
+    # Interactive debug image: when $false, probe.cmd (and the three
+    # detached watchers that only ever run from probe.cmd) are left out
+    # of boot.wim, so startnet.cmd's `if exist probe.cmd` guard skips
+    # the control call and the image lands on an interactive cmd prompt
+    # instead of probing and shutting down. PECMD.INI's EXEC probe.cmd
+    # fails once, silently; that is harmless. Defaults to $true: every
+    # normal build still self-checks.
+    [bool] $Probe = $true,
+
     [switch] $SkipDownload,
 
     [string] $SourceIso
@@ -238,10 +247,19 @@ function Invoke-ReseedStep {
     try {
         $system32 = Join-Path $paths.Mount 'Windows\System32'
         Copy-Item -LiteralPath $startnet -Destination (Join-Path $system32 'startnet.cmd') -Force
-        Copy-Item -LiteralPath $probe -Destination (Join-Path $system32 'probe.cmd') -Force
-        Copy-Item -LiteralPath $watchdog -Destination (Join-Path $system32 'probe-watchdog.cmd') -Force
-        Copy-Item -LiteralPath $sync -Destination (Join-Path $system32 'probe-sync.cmd') -Force
-        Copy-Item -LiteralPath $mirror -Destination (Join-Path $system32 'probe-mirror.cmd') -Force
+        if ($Probe) {
+            Copy-Item -LiteralPath $probe -Destination (Join-Path $system32 'probe.cmd') -Force
+            Copy-Item -LiteralPath $watchdog -Destination (Join-Path $system32 'probe-watchdog.cmd') -Force
+            Copy-Item -LiteralPath $sync -Destination (Join-Path $system32 'probe-sync.cmd') -Force
+            Copy-Item -LiteralPath $mirror -Destination (Join-Path $system32 'probe-mirror.cmd') -Force
+        }
+        else {
+            # probe=false: interactive debug image. probe.cmd stays out
+            # of the image, so startnet.cmd skips the control call and
+            # ends on an interactive cmd prompt; the three watchers are
+            # only ever started from probe.cmd, so they stay out too.
+            Write-SubStep 'probe disabled: leaving probe.cmd and its watchers out of the image (interactive debug build)'
+        }
     }
     catch {
         Dismount-WimImage -MountDir $paths.Mount
