@@ -2137,3 +2137,38 @@ Describe 'probe.cmd run 51 grouped feature override and service start experiment
         $text.IndexOf('call :probe_sync_local', $text.IndexOf('echo aumid_after_lines=')) | Should -BeGreaterThan $text.IndexOf('echo aumid_after_lines=') -Because 'the fifth sync follows the re-dump'
     }
 }
+
+Describe 'probe.cmd run 57 sc start experiment entry markers (run 57)' {
+    It 'brackets the two lines between probe_done and the first start call with progress markers' {
+        # Run 56: the experiment produced no key at all for the third
+        # round, and the artifact could not say where the script
+        # stopped — the local file ends at probe_done, the share file
+        # wedged at 06:20:50, so the experiment may have started and
+        # died inside :probe_sc_start with its keys stranded on X:.
+        # Two markers bracket the only two lines between probe_done
+        # and the first :probe_sc_start call: after_copy proves the
+        # detached copy line returned, entered proves the choice
+        # returned. Each marker is double-written and followed by its
+        # own detached copy plus a short choice wait, so it reaches
+        # the host even if the share append is wedged again. The
+        # three-way split: entered present means the stall is inside
+        # :probe_sc_start; only after_copy present means the choice
+        # never returned; neither means the detached copy line stuck.
+        $text = Get-Content -LiteralPath $script:ProbePath -Raw -Encoding utf8
+        $text | Should -Match 'echo sc_experiment_after_copy=1 >> \"%PROBE_LOCAL%\"' -Because 'the after-copy marker goes to the local file'
+        $text | Should -Match 'echo sc_experiment_after_copy=1 >> \"%PROBE_OUT%\"' -Because 'the after-copy marker goes to the share file too'
+        $text | Should -Match 'echo sc_experiment_entered=1 >> \"%PROBE_LOCAL%\"' -Because 'the entered marker goes to the local file'
+        $text | Should -Match 'echo sc_experiment_entered=1 >> \"%PROBE_OUT%\"' -Because 'the entered marker goes to the share file too'
+        $afterCopy = $text.IndexOf('echo sc_experiment_after_copy=1')
+        $entered = $text.IndexOf('echo sc_experiment_entered=1')
+        $probeDone = $text.IndexOf('echo probe_done=1')
+        $firstStart = $text.IndexOf('call :probe_sc_start RpcSs rpcss')
+        $afterCopy | Should -BeGreaterThan $probeDone -Because 'the after-copy marker is written after probe_done'
+        $entered | Should -BeGreaterThan $afterCopy -Because 'the entered marker follows the after-copy marker'
+        $entered | Should -BeLessThan $firstStart -Because 'the entered marker is written before the first start call'
+        $text.IndexOf('choice /c Y /d Y /t 3', $afterCopy) | Should -BeGreaterThan $afterCopy -Because 'the 3-second choice still waits after the after-copy marker'
+        $text.IndexOf('choice /c Y /d Y /t 3', $afterCopy) | Should -BeLessThan $entered -Because 'the entered marker is written after the 3-second choice returns'
+        $text.IndexOf('copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt"', $afterCopy) | Should -BeGreaterThan $afterCopy -Because 'the after-copy marker is followed by its own detached copy'
+        $text.IndexOf('copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt"', $entered) | Should -BeGreaterThan $entered -Because 'the entered marker is followed by its own detached copy'
+    }
+}
