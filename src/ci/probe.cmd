@@ -1023,7 +1023,24 @@ rem The watchdog and the harness both read the share copy, so a copy
 rem that lands in under 3 seconds still ends the wait the fast way.
 echo probe_done=1 >> "%PROBE_LOCAL%"
 if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
+rem Run 57 (sc start experiment entry markers, eval card §43): run 56
+rem proved the experiment never produced a key but not where the
+rem script stopped — the local file ends at probe_done and the share
+rem file wedged at 06:20:50, so the experiment may have started and
+rem died inside :probe_sc_start with its keys stranded on X:. Two
+rem markers bracket the two lines between probe_done and the first
+rem :probe_sc_start call: after_copy proves the detached copy line
+rem returned, entered proves the choice returned. Each marker is
+rem double-written and followed by its own detached copy plus a short
+rem choice wait, so it reaches the host even if the share append is
+rem wedged again.
+echo sc_experiment_after_copy=1 >> "%PROBE_LOCAL%" & echo sc_experiment_after_copy=1 >> "%PROBE_OUT%"
+if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
+choice /c Y /d Y /t 1 >nul
 choice /c Y /d Y /t 3 >nul
+echo sc_experiment_entered=1 >> "%PROBE_LOCAL%" & echo sc_experiment_entered=1 >> "%PROBE_OUT%"
+if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
+choice /c Y /d Y /t 1 >nul
 
 rem Run 51 (service start experiment, eval card §34.7): probe_done is
 rem already in the LOCAL file and the share copy is detached, so
