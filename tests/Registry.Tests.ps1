@@ -89,8 +89,8 @@ Describe 'WER local dumps registry patch (run 49)' {
         # import only (user decision 2026-11-17 23:43); nothing is
         # written to the registry inside PE.
         $script:reg60 | Should -Match 'Windows Error Reporting\\LocalDumps\\explorer\.exe\]' -Because 'the entry is scoped to explorer.exe'
-        $script:reg60.Contains('"DumpFolder"="X:\CrashDumps"') | Should -BeTrue -Because 'the dump folder is the PE system drive'
-        $script:reg60.Contains('"DumpFolder"="X:\\CrashDumps"') | Should -BeFalse -Because 'a doubled backslash would point at a literal backslash folder'
+        $script:reg60.Contains('"DumpFolder"="X:\\CrashDumps"') | Should -BeTrue -Because '.reg string syntax needs a doubled backslash for a literal backslash — a lone backslash makes reg.exe silently skip the value while exiting 0 (run 55)'
+        $script:reg60.Contains('"DumpFolder"="X:\CrashDumps"') | Should -BeFalse -Because 'a lone backslash is an invalid .reg escape: reg.exe drops the DumpFolder value and the DWORDs land alone (run 55 repro: key existed with DumpCount, DumpType, no DumpFolder)'
         $script:reg60.Contains('"DumpType"=dword:00000001') | Should -BeTrue -Because 'DumpType 1 is a mini dump'
         $script:reg60.Contains('"DumpCount"=dword:00000003') | Should -BeTrue -Because 'DumpCount 3 keeps at most three dumps on the RAM disk'
     }
@@ -305,6 +305,289 @@ Describe 'Invoke-RegImportAsSystem' {
             }
             finally {
                 Dismount-RegistryHive -KeyName $keyName
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Get-RegFileDeclaredEntries (.reg section parser, run 55)' {
+    It 'parses the real 60-werdumps.reg into one section with three value names' {
+        $entries = Get-RegFileDeclaredEntries -RegFile (Join-Path $PSScriptRoot '../src/registry/60-werdumps.reg')
+        $entries.Count | Should -Be 1
+        $entries[0].KeyPath | Should -Be 'PE-SOFT\Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe'
+        $entries[0].Values | Should -Be @('DumpFolder', 'DumpCount', 'DumpType')
+    }
+
+    It 'parses the real 40-uwp.reg into six sections, including multi-line hex values' {
+        $entries = Get-RegFileDeclaredEntries -RegFile (Join-Path $PSScriptRoot '../src/registry/40-uwp.reg')
+        $entries.Count | Should -Be 6
+        ($entries | Where-Object { $_.KeyPath -like '*StateRepository\Security' }).Values | Should -Be @('Security')
+        ($entries | Where-Object { $_.KeyPath -like '*CurrentVersion\Appx' }).Values |
+            Should -Be @('AllowAllTrustedApps', 'AllowDevelopmentWithoutDevLicense')
+    }
+
+    It 'records the default value name for @= lines and skips comments and blank lines' {
+        $reg = Join-Path $script:TempRoot "micpe-declared-$(Get-Random).reg"
+        $text = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            '; a comment',
+            '[HKEY_LOCAL_MACHINE\PE-SOFT\Microsoft\Windows\Test]',
+            '@="default data"',
+            '"Named"=dword:00000001',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($reg, $text, [System.Text.Encoding]::Unicode)
+        try {
+            $entries = Get-RegFileDeclaredEntries -RegFile $reg
+            $entries.Count | Should -Be 1
+            $entries[0].Values | Should -Be @('(Default)', 'Named')
+        }
+        finally {
+            Remove-Item -LiteralPath $reg -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws on a section addressing a live hive root (run 50 lesson)' {
+        $reg = Join-Path $script:TempRoot "micpe-declared-live-$(Get-Random).reg"
+        $text = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            '[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Test]',
+            '"Named"=dword:00000001',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($reg, $text, [System.Text.Encoding]::Unicode)
+        try {
+            { Get-RegFileDeclaredEntries -RegFile $reg } | Should -Throw '*live*'
+        }
+        finally {
+            Remove-Item -LiteralPath $reg -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'SYSTEM import of the real 60-werdumps.reg lands the values (run 55 repro)' {
+    BeforeAll {
+        $script:werReg60 = Join-Path $PSScriptRoot '../src/registry/60-werdumps.reg'
+        $script:werSub = 'Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe'
+        $script:werParent = 'Microsoft\Windows\Windows Error Reporting\LocalDumps'
+    }
+
+    It 'imports the real 60-werdumps.reg as SYSTEM into a scratch hive and reads all three values back' -Skip:(-not $IsWindows) {
+        # Run 54: the import exited 0 while the values never landed
+        # (key existed, DumpFolder did not). Run 55 reproduced it
+        # here and pinned the mechanism: the file's DumpFolder line
+        # had a lone backslash ("X:\CrashDumps"), which reg.exe
+        # silently skips while writing the DWORDs and exiting 0.
+        # The file now doubles the backslash, so this test is the
+        # regression test that the fixed file lands all three values.
+        # Same call shape the Build makes — a snapshot of the runner
+        # SOFTWARE hive mounted as PE-SOFT, LocalDumps removed first
+        # so the import must create the intermediate keys, exactly
+        # like the stock image where LocalDumps does not exist.
+        $work = Join-Path $script:TempRoot "wer-sys-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'PE-SOFT'
+            try {
+                $null = & reg.exe delete "HKLM\PE-SOFT\$($script:werParent)" /f 2>&1
+                (Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey $script:werSub) | Should -BeNullOrEmpty -Because 'the test hive must match the stock image: no LocalDumps key before the import'
+
+                $importError = $null
+                try { Invoke-RegImportAsSystem -RegFile $script:werReg60 } catch { $importError = $_ }
+                $dump = & reg.exe query "HKLM\PE-SOFT\$($script:werParent)" /s 2>&1 | Out-String
+                Write-Host "LocalDumps subtree after SYSTEM import:`n$($dump.Trim())"
+                if ($importError) { throw $importError }
+
+                $values = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey $script:werSub
+                $values | Should -Not -BeNullOrEmpty -Because 'the key must exist after the import'
+                $values['DumpFolder'] | Should -Be 'X:\CrashDumps'
+                $values['DumpCount'] | Should -Match '^0x0*3$'
+                $values['DumpType'] | Should -Match '^0x0*1$'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'PE-SOFT'
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'admin import of the same file lands the values (bisect: SYSTEM task vs reg.exe)' -Skip:(-not $IsWindows) {
+        # If the admin import lands while the SYSTEM import does
+        # not, the mechanism lives in the scheduled-task path; if
+        # both fail, it lives in reg.exe plus the file/hive shape.
+        $work = Join-Path $script:TempRoot "wer-admin-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'PE-SOFT'
+            try {
+                $null = & reg.exe delete "HKLM\PE-SOFT\$($script:werParent)" /f 2>&1
+                $importOut = & reg.exe import $script:werReg60 2>&1 | Out-String
+                $LASTEXITCODE | Should -Be 0 -Because "the admin import must succeed: $importOut"
+                $dump = & reg.exe query "HKLM\PE-SOFT\$($script:werParent)" /s 2>&1 | Out-String
+                Write-Host "LocalDumps subtree after admin import:`n$($dump.Trim())"
+                $values = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey $script:werSub
+                $values | Should -Not -BeNullOrEmpty
+                $values['DumpFolder'] | Should -Be 'X:\CrashDumps'
+                $values['DumpCount'] | Should -Match '^0x0*3$'
+                $values['DumpType'] | Should -Match '^0x0*1$'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'PE-SOFT'
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'SYSTEM import lands the values when the parent keys already exist (bisect: missing parents)' -Skip:(-not $IsWindows) {
+        # If pre-creating LocalDumps\explorer.exe makes the SYSTEM
+        # import land while the repro fails, the mechanism is the
+        # creation of the intermediate keys, not the values.
+        $work = Join-Path $script:TempRoot "wer-parents-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'PE-SOFT'
+            try {
+                $null = & reg.exe delete "HKLM\PE-SOFT\$($script:werParent)" /f 2>&1
+                $addOut = & reg.exe add "HKLM\PE-SOFT\$($script:werSub)" /f 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "reg add explorer.exe key failed: $addOut" }
+                { Invoke-RegImportAsSystem -RegFile $script:werReg60 } | Should -Not -Throw
+                $values = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey $script:werSub
+                $values | Should -Not -BeNullOrEmpty
+                $values['DumpFolder'] | Should -Be 'X:\CrashDumps'
+                $values['DumpCount'] | Should -Match '^0x0*3$'
+                $values['DumpType'] | Should -Match '^0x0*1$'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'PE-SOFT'
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'SYSTEM import of a line-ending-normalized copy lands (bisect: mixed CRLF/LF)' -Skip:(-not $IsWindows) {
+        # 60-werdumps.reg mixes CRLF (13 lines) with LF (6 lines);
+        # 40-uwp.reg is LF-only and lands. If the normalized copy
+        # lands while the real file fails, the endings are the
+        # mechanism; if both fail the same way, endings are excluded.
+        $work = Join-Path $script:TempRoot "wer-eol-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        $normReg = Join-Path $work '60-werdumps-lf.reg'
+        $text = [System.IO.File]::ReadAllText($script:werReg60, [System.Text.Encoding]::Unicode)
+        [System.IO.File]::WriteAllText($normReg, ($text -split "`r`n|`n" -join "`n"), [System.Text.Encoding]::Unicode)
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'PE-SOFT'
+            try {
+                $null = & reg.exe delete "HKLM\PE-SOFT\$($script:werParent)" /f 2>&1
+                { Invoke-RegImportAsSystem -RegFile $normReg } | Should -Not -Throw
+                $values = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey $script:werSub
+                $values | Should -Not -BeNullOrEmpty
+                $values['DumpFolder'] | Should -Be 'X:\CrashDumps'
+                $values['DumpCount'] | Should -Match '^0x0*3$'
+                $values['DumpType'] | Should -Match '^0x0*1$'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'PE-SOFT'
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'a lone backslash in a REG_SZ value is silently dropped by reg.exe (mechanism, run 55)' -Skip:(-not $IsWindows) {
+        # The rule the repro pinned: in .reg string values a
+        # backslash must be doubled for a literal backslash. A file
+        # with a lone backslash ("X:\CrashDumps") imports with exit
+        # 0, writes the DWORDs, and silently drops the string value
+        # — the read-back in Invoke-RegImportAsSystem is what turns
+        # that into a loud failure instead of a silent miss.
+        $work = Join-Path $script:TempRoot "wer-bs-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        $singleReg = Join-Path $work 'single-bs.reg'
+        $regText = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            '[HKEY_LOCAL_MACHINE\PE-SOFT\Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe]',
+            '"DumpFolder"="X:\CrashDumps"',
+            '"DumpCount"=dword:00000003',
+            '"DumpType"=dword:00000001',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($singleReg, $regText, [System.Text.Encoding]::Unicode)
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'PE-SOFT'
+            try {
+                $null = & reg.exe delete "HKLM\PE-SOFT\$($script:werParent)" /f 2>&1
+                { Invoke-RegImportAsSystem -RegFile $singleReg } | Should -Throw '*DumpFolder*missing*'
+                # The DWORDs still land — only the string is dropped,
+                # which is why the miss stayed silent until the
+                # read-back existed.
+                $values = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey $script:werSub
+                $values | Should -Not -BeNullOrEmpty
+                $values['DumpCount'] | Should -Match '^0x0*3$'
+                $values['DumpType'] | Should -Match '^0x0*1$'
+                $values.Contains('DumpFolder') | Should -BeFalse
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'PE-SOFT'
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Assert-RegImportLanded throws when a declared value is missing' -Skip:(-not $IsWindows) {
+        # The read-back must fail loudly on a miss, not pass a
+        # half-landed import. No import runs here: the declared key
+        # simply does not exist in the scratch hive.
+        $work = Join-Path $script:TempRoot "wer-assert-$(Get-Random)"
+        New-Item -ItemType Directory -Force -Path "$work/Windows/System32/config" | Out-Null
+        $hiveCopy = "$work/Windows/System32/config/SOFTWARE"
+        $null = & reg.exe save 'HKLM\SOFTWARE' $hiveCopy /y 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'reg save SOFTWARE failed' }
+        $testReg = Join-Path $work 'missing.reg'
+        $regText = @(
+            'Windows Registry Editor Version 5.00',
+            '',
+            '[HKEY_LOCAL_MACHINE\PE-SOFT\Microsoft\Windows\MicpeNotThere]',
+            '"NoSuchValue"=dword:00000001',
+            ''
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText($testReg, $regText, [System.Text.Encoding]::Unicode)
+        try {
+            Mount-RegistryHive -HiveFile $hiveCopy -KeyName 'PE-SOFT'
+            try {
+                { Assert-RegImportLanded -RegFile $testReg } | Should -Throw '*does not exist*'
+            }
+            finally {
+                Dismount-RegistryHive -KeyName 'PE-SOFT'
             }
         }
         finally {
