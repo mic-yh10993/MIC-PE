@@ -12,9 +12,9 @@ on:
         default: m1
         required: true
       build:
-        description: "UUP dump 构建号（26200 = 25H2 最新修订）"
+        description: "UUP dump 构建号（26300 = 26H2 最新修订）"
         type: string
-        default: "26200"
+        default: "26300"
         required: true
       office:
         description: "内置 Office 2016 精简版（约 +170 MB 包）"
@@ -116,7 +116,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IN_STAGE: ${{ inputs.stage || 'all' }}
-          IN_BUILD: ${{ inputs.build || '26200' }}
+          IN_BUILD: ${{ inputs.build || '26300' }}
           IN_OFFICE: ${{ inputs.office }}
           IN_CHROME: ${{ inputs.chrome }}
           IN_PROBE: ${{ inputs.probe }}

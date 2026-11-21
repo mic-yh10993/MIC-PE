@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 目标仓库：`mic-yh10993/MIC-PE`，分支 `main`，公开，许可 GPL-3.0（仅覆盖本仓库自有代码，不含微软二进制与第三方工具）。
-- 源镜像：UUP dump，`Windows 11 25H2`，`amd64`，`zh-cn`，Pro 版；构建号由 workflow 输入 `build` 指定，默认 `26200`。
+- 源镜像：UUP dump，`Windows 11 26H2`，`amd64`，`zh-cn`，Pro 版；构建号由 workflow 输入 `build` 指定，默认 `26300`。
 - 体积硬约束：`boot.wim` ≤ 3 GB，目标 ≤ 2.6 GB；ISO ≤ 3.2 GB。超限时按 Office → Chrome → Photos → Media Player 顺序降级。
 - 单个 Release asset ≤ 2 GB；成品 ISO 约 1–1.5 GB，直接作为 Release 资产上传，不分卷。
 - 仓库单文件 ≤ 100 MB，因此三个包直接提交在仓库 `app/` 文件夹里：`app/payload/micpe-payload.7z`（预装软件，28.5 MB，单文件）、`app/chrome/chrome-slim.7z.001/.002`（Chrome 精简版，拼回 125 MB）、`app/office/office2016-slim.7z.001/.002`（Office 精简版，拼回 167 MB）。Chrome 去语言包（只留 en-US、zh-CN）与 WidevineCdm，Office 去 Access 与厂商安装卸载脚本；构建时拼回、验 SHA256 再用。三者互不依赖，可单独更新。旧的三个独立 Release 资产（`payload-v1` / `chrome-v1` / `office-v1`）已于分卷版验证通过后删除，不再有第二条包来源。

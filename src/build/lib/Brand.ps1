@@ -34,7 +34,7 @@ function Get-BrandRegContent {
     param(
         [string] $Version = '1.0.0',
 
-        [string] $BuildNumber = '26200.10066',
+        [string] $BuildNumber = '26300.10075',
 
         [string] $ComputerName = 'MICPE-XXXX'
     )
@@ -68,7 +68,7 @@ function Get-BrandReadmeContent {
     param(
         [string] $Version = '1.0.0',
 
-        [string] $BuildNumber = '26200.10066'
+        [string] $BuildNumber = '26300.10075'
     )
 
     $lines = @(
@@ -78,7 +78,7 @@ function Get-BrandReadmeContent {
         '作者：SYSTEM-Intel-MIC'
         '主页：https://space.bilibili.com/1978487514'
         ''
-        '本映像基于 Windows 11 25H2 制作，仅供学习与维修使用。'
+        '本映像基于 Windows 11 26H2 制作，仅供学习与维修使用。'
     )
 
     return ($lines -join "`r`n")
@@ -115,7 +115,7 @@ function Set-Brand {
 
         [string] $Version = '1.0.0',
 
-        [string] $BuildNumber = '26200.10066',
+        [string] $BuildNumber = '26300.10075',
 
         [string] $ComputerName = 'MICPE-XXXX'
     )

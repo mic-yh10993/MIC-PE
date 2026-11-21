@@ -76,4 +76,4 @@ install.wim 的前提下不可能达到**——4.48 GB 里 ~4.1 GiB 就是 media
 - `.esd` 映像的 DISM apply：同一条命令，L3 未覆盖。
 - disk2-only 的 `installer_scan=nopartition` 场景：合跑里观测不到。
 - PECMD WCS 语法：初稿，以 L3 probe + 截图为准。
-- 26H2 底座：用户已决定留在 25H2 26200，不换。
+- 26H2 底座：用户 2026-11-21 决定底座改 26300（26H2），取代此前“留 26200 不换”的决定。

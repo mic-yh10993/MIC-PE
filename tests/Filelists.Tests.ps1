@@ -13,7 +13,7 @@ Describe 'whitelists' {
 
     It 'every entry is a relative Windows path without a drive letter' {
         $bad = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost', '70-logon') {
             $entries = Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt")
             foreach ($entry in $entries) {
                 if ($entry -match '^[A-Za-z]:') { $bad.Add("$name drive: $entry") }
@@ -26,7 +26,7 @@ Describe 'whitelists' {
 
     It 'does not carry the winre.wim base image' {
         $found = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost', '70-logon') {
             Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt") |
                 Where-Object { $_ -like '*Recovery\Winre.wim' } |
                 ForEach-Object { $found.Add("$name $_") }
@@ -76,7 +76,7 @@ Describe 'whitelists' {
             'Windows\System32\MLS*.dll'
         )
         $found = [System.Collections.Generic.List[string]]::new()
-        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost') {
+        foreach ($name in '10-cmdpe', '20-explorer', '30-runtimes', '40-components', '50-uwp', '60-framehost', '70-logon') {
             Read-Whitelist -Path (Join-Path $script:ListDir "$name.txt") |
                 Where-Object { $stale -contains $_ } |
                 ForEach-Object { $found.Add("$name $_") }
@@ -151,5 +151,32 @@ Describe 'whitelists' {
         $entries | Should -Contain 'Windows\System32\AppReadiness.dll'
         $entries | Should -Contain 'Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy*'
         $entries | Should -Contain 'Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy*'
+    }
+
+    It 'the logon list contains the admin logon stack (Phase 1)' {
+        # 70-logon.txt is the same kind of small hand-written list as
+        # 50-uwp.txt and 60-framehost.txt. Every entry was verified
+        # against the real 26200 install.wim file list before this round;
+        # the 26300 list is not available locally yet, so existence in
+        # 26300 is verified at CI build time (a missing entry fails the
+        # build; the assertion is not weakened).
+        $path = Join-Path $script:ListDir '70-logon.txt'
+        Test-Path -LiteralPath $path | Should -BeTrue
+        $entries = Read-Whitelist -Path $path
+        $entries.Count | Should -Be 9
+        $entries | Should -Contain 'Windows\System32\LogonUI.exe'
+        $entries | Should -Contain 'Windows\System32\seclogon.dll'
+        $entries | Should -Contain 'Windows\System32\Windows.UI.Logon.dll'
+        $entries | Should -Contain 'Windows\System32\sihost.exe'
+        $entries | Should -Contain 'Windows\System32\ShellAppRuntime.exe'
+        $entries | Should -Contain 'Windows\System32\whoami.exe'
+        $entries | Should -Contain 'Windows\SystemResources\Windows.UI.Logon\Windows.UI.Logon.pri'
+        $entries | Should -Contain 'Windows\SystemResources\Windows.UI.Logon\pris\Windows.UI.Logon.zh-CN.pri'
+        $entries | Should -Contain 'Windows\System32\zh-CN\seclogon.dll.mui'
+        # whoami has no MUI on purpose: without one it falls back to its
+        # embedded English resources, which the probe's `whoami /priv`
+        # parsing (find "Enabled") depends on; a zh-CN MUI would break it.
+        $entries | Should -Not -Contain 'Windows\System32\zh-CN\whoami.exe.mui'
+        $entries | Should -Not -Contain 'Windows\System32\en-US\whoami.exe.mui'
     }
 }

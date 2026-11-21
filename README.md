@@ -37,7 +37,7 @@ MICPE 只认标记文件，不猜：
 | 输入 | 说明 |
 |---|---|
 | `stage` | 构建到哪一期（`m1`–`m7` 或 `all`），每期都可独立出 ISO |
-| `build` | UUP dump 构建号，默认 `26200`（Windows 11 25H2） |
+| `build` | UUP dump 构建号，默认 `26300`（Windows 11 26H2） |
 | `office` | 是否内置 Office 2016 绿色版（默认关，占约 330 MB） |
 | `chrome` | 是否内置 Chrome（默认关，占约 280 MB） |
 | `verify` | 验证档位：`full`（含 QEMU 运行时验证）/ `static` / `none` |
