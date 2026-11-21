@@ -156,15 +156,28 @@ Describe 'whitelists' {
     It 'the logon list contains the admin logon stack (Phase 1)' {
         # 70-logon.txt is the same kind of small hand-written list as
         # 50-uwp.txt and 60-framehost.txt. Every entry was verified
-        # against the real 26200 install.wim file list before this round;
-        # the 26300 list is not available locally yet, so existence in
-        # 26300 is verified at CI build time (a missing entry fails the
-        # build; the assertion is not weakened).
+        # against the real 26200 install.wim file list (the original 9
+        # before the Phase 1 round, the 11 experiment additions during
+        # the native-logon experiment patch); the 26300 list is not
+        # available locally yet, so existence in 26300 is verified at CI
+        # build time (a missing entry fails the build; the assertion is
+        # not weakened).
         $path = Join-Path $script:ListDir '70-logon.txt'
         Test-Path -LiteralPath $path | Should -BeTrue
         $entries = Read-Whitelist -Path $path
-        $entries.Count | Should -Be 9
+        $entries.Count | Should -Be 20
         $entries | Should -Contain 'Windows\System32\LogonUI.exe'
+        $entries | Should -Contain 'Windows\System32\winlogon.exe'
+        $entries | Should -Contain 'Windows\System32\userinit.exe'
+        $entries | Should -Contain 'Windows\System32\authui.dll'
+        $entries | Should -Contain 'Windows\System32\SmartcardCredentialProvider.dll'
+        $entries | Should -Contain 'Windows\System32\lsasrv.dll'
+        $entries | Should -Contain 'Windows\System32\samsrv.dll'
+        $entries | Should -Contain 'Windows\System32\samlib.dll'
+        $entries | Should -Contain 'Windows\System32\msv1_0.dll'
+        $entries | Should -Contain 'Windows\System32\secur32.dll'
+        $entries | Should -Contain 'Windows\System32\userenv.dll'
+        $entries | Should -Contain 'Windows\System32\profsvc.dll'
         $entries | Should -Contain 'Windows\System32\seclogon.dll'
         $entries | Should -Contain 'Windows\System32\Windows.UI.Logon.dll'
         $entries | Should -Contain 'Windows\System32\sihost.exe'

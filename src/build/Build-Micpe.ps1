@@ -43,6 +43,9 @@ param(
 
     [switch] $SkipDownload,
 
+    # Dedicated branch experiment: use the native Winlogon login path.
+    [switch] $NativeLogonExperiment,
+
     [string] $SourceIso
 )
 
@@ -280,13 +283,23 @@ function Invoke-ExplorerStep {
     Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
     try {
         Install-ExplorerShell -MountDir $paths.Mount -InstallWim $installWim -RepoRoot $repoRoot
+        if ($NativeLogonExperiment) {
+            Write-Step 'extracting native Winlogon and credential-provider files'
+            $logonPatterns = Read-Whitelist -Path (Join-Path $repoRoot 'src/filelists/70-logon.txt')
+            Export-WimFiles -WimPath $installWim -Index 1 `
+                -Destination $paths.Mount -Patterns $logonPatterns
+        }
         # 10 before 20 on purpose: 20-explorer.reg overrides the Winlogon
         # Shell pointer that 10-pe-base.reg sets (PECMD is launched from
         # startnet.cmd; Explorer is the desktop shell).
         $regFiles = @('10-pe-base.reg', '20-explorer.reg') |
             ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
+        if ($NativeLogonExperiment) {
+            $regFiles += Join-Path $repoRoot 'src/registry/25-native-logon-experiment.reg'
+        }
         Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles
-        Set-BootShell -MountDir $paths.Mount -RepoRoot $repoRoot
+        Set-BootShell -MountDir $paths.Mount -RepoRoot $repoRoot `
+            -NativeLogonExperiment:$NativeLogonExperiment
         Assert-ExplorerPresent -MountDir $paths.Mount
     }
     catch {

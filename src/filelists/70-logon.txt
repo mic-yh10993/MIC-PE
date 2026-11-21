@@ -1,18 +1,18 @@
-# Phase 1 - admin logon stack: the files Winlogon needs to show the
-# native logon UI and run an Administrator session (LogonUI.exe,
-# seclogon, the Windows.UI.Logon runtime, sihost, ShellAppRuntime,
-# whoami for the probe's token check), plus the seclogon zh-CN MUI.
-# // reuse-check: every entry verified against the real 26200
-# install.wim file list (109,828 lines) before this round. The 26300
-# list is not available locally yet; existence in 26300 is verified at
-# CI build time (a missing entry fails the build; do not weaken the
-# assertion to make the build pass).
-# The .pri files live under SystemResources, NOT System32.
-# NOT listed here, deliberately: whoami.exe.mui. Without a MUI, whoami
-# falls back to its embedded English resources, which the probe's
-# `whoami /priv` parsing (find "Enabled") depends on; a zh-CN MUI
-# would make it output Chinese and break the match.
+# Native logon experiment file set. Paths are extracted from install.wim
+# index 1. This list is a candidate; a missing path should fail the build
+# so the 26300 donor image can be reconciled rather than silently skipped.
 Windows\System32\LogonUI.exe
+Windows\System32\winlogon.exe
+Windows\System32\userinit.exe
+Windows\System32\authui.dll
+Windows\System32\SmartcardCredentialProvider.dll
+Windows\System32\lsasrv.dll
+Windows\System32\samsrv.dll
+Windows\System32\samlib.dll
+Windows\System32\msv1_0.dll
+Windows\System32\secur32.dll
+Windows\System32\userenv.dll
+Windows\System32\profsvc.dll
 Windows\System32\seclogon.dll
 Windows\System32\Windows.UI.Logon.dll
 Windows\System32\sihost.exe

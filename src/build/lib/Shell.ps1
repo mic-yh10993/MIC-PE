@@ -137,15 +137,24 @@ function Set-BootShell {
         [string] $MountDir,
 
         [Parameter(Mandatory = $true)]
-        [string] $RepoRoot
+        [string] $RepoRoot,
+
+        [switch] $NativeLogonExperiment
     )
 
     $shellSrc = Join-Path $RepoRoot 'src/shell'
     Assert-PathExists -Path $shellSrc -Label 'shell source directory'
 
     $startnet = Join-Path $MountDir 'Windows/System32/startnet.cmd'
-    Copy-Item -LiteralPath (Join-Path $shellSrc 'startnet.cmd') -Destination $startnet -Force
-    Write-SubStep 'startnet.cmd installed'
+    $startnetName = if ($NativeLogonExperiment) {
+        'startnet-native-logon.cmd'
+    } else {
+        'startnet.cmd'
+    }
+    $startnetSource = Join-Path $shellSrc $startnetName
+    Assert-PathExists -Path $startnetSource -Label $startnetName
+    Copy-Item -LiteralPath $startnetSource -Destination $startnet -Force
+    Write-SubStep "$startnetName installed"
 
     # Replace the winpeshl-driven boot with our own entry point so the shell
     # launch order is under our control.
@@ -160,20 +169,21 @@ function Set-BootShell {
         New-Item -ItemType Directory -Path $peDir -Force | Out-Null
     }
 
-    foreach ($file in 'PECMD.INI', 'PECMD.EXE') {
-        $source = Join-Path $shellSrc $file
-        if (Test-Path -LiteralPath $source) {
-            Copy-Item -LiteralPath $source -Destination (Join-Path $peDir $file) -Force
-            Write-SubStep "$file installed to Program Files/MICPE"
+    if (-not $NativeLogonExperiment) {
+        foreach ($file in 'PECMD.INI', 'PECMD.EXE') {
+            $source = Join-Path $shellSrc $file
+            if (Test-Path -LiteralPath $source) {
+                Copy-Item -LiteralPath $source -Destination (Join-Path $peDir $file) -Force
+                Write-SubStep "$file installed to Program Files/MICPE"
+            }
         }
-    }
 
-    # Pin-Shortcuts.wcs runs from System32 (next to probe.cmd) so PECMD.INI
-    # can CALL it with a space-free path.
-    $shortcuts = Join-Path $shellSrc 'Pin-Shortcuts.wcs'
-    if (Test-Path -LiteralPath $shortcuts) {
-        Copy-Item -LiteralPath $shortcuts -Destination (Join-Path $MountDir 'Windows/System32/Pin-Shortcuts.wcs') -Force
-        Write-SubStep 'Pin-Shortcuts.wcs installed to System32'
+        # Pin-Shortcuts.wcs is only used by the PECMD startup chain.
+        $shortcuts = Join-Path $shellSrc 'Pin-Shortcuts.wcs'
+        if (Test-Path -LiteralPath $shortcuts) {
+            Copy-Item -LiteralPath $shortcuts -Destination (Join-Path $MountDir 'Windows/System32/Pin-Shortcuts.wcs') -Force
+            Write-SubStep 'Pin-Shortcuts.wcs installed to System32'
+        }
     }
 
     # Fix-DriveLetters.cmd runs from startnet.cmd (after wpeinit, before the
@@ -195,7 +205,8 @@ function Set-BootShell {
     # step supplies it (payload asset or CI download, M5/M6), this M2 step
     # leaves the cmd fallback in place; a later step supplies the binary,
     # so this warning is about the M2 step only, not the finished image.
-    if (-not (Test-Path -LiteralPath (Join-Path $shellSrc 'PECMD.EXE'))) {
+    if (-not $NativeLogonExperiment -and
+        -not (Test-Path -LiteralPath (Join-Path $shellSrc 'PECMD.EXE'))) {
         Write-Warn 'PECMD.EXE is not in src/shell; this M2 step leaves the cmd fallback in place until a later step supplies the PECMD binary'
     }
 }
