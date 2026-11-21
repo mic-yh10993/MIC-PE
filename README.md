@@ -4,6 +4,12 @@ MICPE 是一个基于 Windows 11 的装机维修盘（WinPE），从 U 盘或光
 
 本项目通过 GitHub Actions 从 UUP dump 的官方 Windows 11 镜像构建，全流程无人工介入，产物为可直接启动的双启（BIOS + UEFI）ISO。
 
+## 原生管理员登录状态
+
+`phase1-admin-logon` 分支目前仍处于原生登录可行性验证阶段，**尚未实现或证明 WinPE 中的真实交互式 Administrator 登录**。当前 Explorer 注册表配置和启动脚本不能作为真实登录已完成的证据：`startnet.cmd` 仍由 WinPE 启动链执行，现有实现曾通过 PECMD 启动桌面；`20-explorer.reg` 将 `Userinit` 留空；`src/filelists/70-logon.txt` 目前只是文件清单，不能单独建立 Winlogon 登录会话。
+
+目标验收条件、验证步骤和停止条件见 [`docs/native-logon-feasibility.md`](docs/native-logon-feasibility.md)。在这些条件全部通过前，不应把直接启动 `LogonUI.exe`、由 SYSTEM 启动 Explorer，或仅设置 `Shell=explorer.exe` 标记为“原生 Administrator 登录”。
+
 ## 系统要求
 
 - **内存：至少 4 GB**。`boot.wim` 会完整载入内存盘，这是 WinPE 的固有工作方式；2 GB 内存的机器**无法**进入桌面。
