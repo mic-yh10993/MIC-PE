@@ -12,8 +12,8 @@ Describe 'build workflow' {
         $script:workflow | Should -Match 'timeout-minutes:\s*360'
     }
 
-    It 'accepts the stage, build, office, chrome, probe and verify inputs' {
-        foreach ($name in 'stage', 'build', 'office', 'chrome', 'probe', 'verify') {
+    It 'accepts the stage, build, office, chrome, probe, nativeLogonExperiment and verify inputs' {
+        foreach ($name in 'stage', 'build', 'office', 'chrome', 'probe', 'nativeLogonExperiment', 'verify') {
             $script:workflow | Should -Match "(?m)^\s{6}${name}:" -Because "input $name must exist"
         }
     }
@@ -26,6 +26,12 @@ Describe 'build workflow' {
         $script:workflow | Should -Match 'IN_PROBE:'
         $script:workflow | Should -Match 'IN_PROBE -eq ''false'''
         $script:workflow | Should -Match 'buildArgs\.Probe = \$false'
+    }
+
+    It 'passes the native logon experiment flag through IN_NATIVE_LOGON_EXPERIMENT to Build-Micpe.ps1' {
+        $script:workflow | Should -Match 'IN_NATIVE_LOGON_EXPERIMENT:'
+        $script:workflow | Should -Match 'IN_NATIVE_LOGON_EXPERIMENT -eq ''true'''
+        $script:workflow | Should -Match 'buildArgs\.NativeLogonExperiment = \$true'
     }
 
     It 'passes inputs through environment variables, never inline interpolation' {

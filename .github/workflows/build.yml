@@ -28,6 +28,10 @@ on:
         description: "注入 probe.cmd 自验证探针（false=交互调试镜像：不放 probe.cmd，停在 cmd 提示符，可手动跑 sc start）"
         type: boolean
         default: true
+      nativeLogonExperiment:
+        description: "原生登录实验：启用 -NativeLogonExperiment（提取登录文件、实验 startnet、不装 PECMD）"
+        type: boolean
+        default: false
       verify:
         description: "验证档位：full=含 QEMU 运行时自验证；static=只做静态与结构；none=只出产物"
         type: choice
@@ -120,12 +124,14 @@ jobs:
           IN_OFFICE: ${{ inputs.office }}
           IN_CHROME: ${{ inputs.chrome }}
           IN_PROBE: ${{ inputs.probe }}
+          IN_NATIVE_LOGON_EXPERIMENT: ${{ inputs.nativeLogonExperiment }}
         run: |
           $buildArgs = @{ Stage = $env:IN_STAGE }
           if ($env:IN_BUILD) { $buildArgs.Build = $env:IN_BUILD }
           if ($env:IN_OFFICE -eq 'true') { $buildArgs.Office = $true }
           if ($env:IN_CHROME -eq 'true') { $buildArgs.Chrome = $true }
           if ($env:IN_PROBE -eq 'false') { $buildArgs.Probe = $false }
+          if ($env:IN_NATIVE_LOGON_EXPERIMENT -eq 'true') { $buildArgs.NativeLogonExperiment = $true }
 
           ./src/build/Build-Micpe.ps1 @buildArgs
 
