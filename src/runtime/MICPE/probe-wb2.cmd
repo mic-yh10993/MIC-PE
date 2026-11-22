@@ -123,6 +123,34 @@ if errorlevel 1 (echo appinfo_run=0 >> "%PROBE_OUT%" & echo appinfo_run=0 >> "%P
 sc.exe query Schedule 2>nul | find /i "RUNNING" >nul
 if errorlevel 1 (echo schedule_run=0 >> "%PROBE_OUT%" & echo schedule_run=0 >> "%PROBE_LOCAL%") else (echo schedule_run=1 >> "%PROBE_OUT%" & echo schedule_run=1 >> "%PROBE_LOCAL%")
 
+rem Base netsvcs services (round 4; not asserted). If UserManager, Themes
+rem and ShellHWDetection are also 0, the netsvcs svchost host itself is not
+rem starting services and the problem is not the four logon service
+rem definitions. Themes needs the round-4 netsvcs group fix (63 .reg) to
+rem start at all; UserManager and ShellHWDetection were already members.
+sc.exe query UserManager 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo usermgr_run=0 >> "%PROBE_OUT%" & echo usermgr_run=0 >> "%PROBE_LOCAL%") else (echo usermgr_run=1 >> "%PROBE_OUT%" & echo usermgr_run=1 >> "%PROBE_LOCAL%")
+sc.exe query Themes 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo themes_run=0 >> "%PROBE_OUT%" & echo themes_run=0 >> "%PROBE_LOCAL%") else (echo themes_run=1 >> "%PROBE_OUT%" & echo themes_run=1 >> "%PROBE_LOCAL%")
+sc.exe query ShellHWDetection 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo shhw_run=0 >> "%PROBE_OUT%" & echo shhw_run=0 >> "%PROBE_LOCAL%") else (echo shhw_run=1 >> "%PROBE_OUT%" & echo shhw_run=1 >> "%PROBE_LOCAL%")
+
+rem sc-start return codes (round 4; not asserted). These run AFTER the
+rem RUNNING checks above so the assertion keys reflect the state at probe
+rem time, not after this manual start. The code says WHY a STOPPED service
+rem did not come up: 0 started now, 1056 already running, 1058 disabled,
+rem 1083 service not in the svchost group, 1068/1075 dependency failure,
+rem 2/3 file not found. The code is captured into a variable first because
+rem echo itself resets errorlevel.
+sc.exe start seclogon >nul 2>&1
+set "RC_SECLOGON=!errorlevel!"
+>> "%PROBE_OUT%" echo scstart_seclogon_rc=!RC_SECLOGON!
+>> "%PROBE_LOCAL%" echo scstart_seclogon_rc=!RC_SECLOGON!
+sc.exe start SENS >nul 2>&1
+set "RC_SENS=!errorlevel!"
+>> "%PROBE_OUT%" echo scstart_sens_rc=!RC_SENS!
+>> "%PROBE_LOCAL%" echo scstart_sens_rc=!RC_SENS!
+
 rem -- boot.log to the share (round 3) ---------------------------------------
 rem Phase 25 logs every sc start return code and the seclogon poll result
 rem into boot.log; the probe file alone cannot say WHY a service failed.
