@@ -136,6 +136,11 @@
       "file": "60-logon-services.reg"
     },
     {
+      "name": "Svchost netsvcs membership (seclogon, Appinfo, Schedule)",
+      "kind": "values",
+      "file": "63-svchost-netsvcs.reg"
+    },
+    {
       "name": "Logon stack values (sihost integration, LogonUI key, LSA packages)",
       "kind": "values",
       "file": "62-logon-stack.reg"

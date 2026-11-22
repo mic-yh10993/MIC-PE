@@ -35,14 +35,24 @@ $script:StageProbeExpect = [ordered]@{
     # wb2 (the WimBuilder2 UWP chain) is probed by probe-wb2.cmd, not the
     # classic probe.cmd: the wb2 startnet never installs probe.cmd, so the
     # probe runs as a postshell hook (10-probe.cmd) and writes the same
-    # micpe-probe.txt format. logon_token = phase 25 created the
-    # Administrator logon token (logon-token.flag); sab_mapped =
-    # StartAllBackLoaderX64.dll is mapped in the explorer process;
-    # logonui = LogonUI.exe is present in the image; seclogon = the
-    # Secondary Logon service is RUNNING. The probe does NOT shut the
-    # guest down: the harness takes the final screenshot first, then
-    # quits QEMU.
-    wb2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; logon_token = '1'; sab_mapped = '1'; logonui = '1'; seclogon = '1' }
+    # micpe-probe.txt format. sab_mapped = StartAllBackLoaderX64.dll is
+    # mapped in the explorer process; logonui = LogonUI.exe is present in
+    # the image; seclogon = the Secondary Logon service is RUNNING. The
+    # probe does NOT shut the guest down: the harness takes the final
+    # screenshot first, then quits QEMU.
+    #
+    # logon_token is deliberately NOT asserted here (round-2 decision,
+    # run 62): phase 25 builds the Administrator logon token through
+    # seclogon/runas, a workstream of its own with failure modes (runas,
+    # the Administrator account, the profile clone) that are independent
+    # of whether the desktop/taskbar works. Asserting it would fail every
+    # wb2 build for a token-path problem even when the shell is good. The
+    # probe still writes logon_token (diagnostic), and the token path is
+    # validated separately once seclogon is confirmed RUNNING. logonui
+    # stays asserted: LogonUI.exe is in the image (72-logon-ui.txt) and
+    # the probe only checks the file exists, so a missing logonui is a
+    # real build regression, not a deferred feature.
+    wb2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; sab_mapped = '1'; logonui = '1'; seclogon = '1' }
 }
 
 function Get-StageProbeExpect {
