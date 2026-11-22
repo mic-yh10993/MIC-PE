@@ -188,7 +188,7 @@ function Copy-UwpFileList {
         [Parameter(Mandatory = $true)][string] $InstallWim,
         [Parameter(Mandatory = $true)][string] $MountDir,
         [Parameter(Mandatory = $true)][string] $ListPath,
-        [int] $SourceIndex = 4
+        [int] $SourceIndex = 1
     )
 
     Assert-PathExists -Path $ListPath -Label 'UWP file list'
@@ -297,7 +297,7 @@ function Copy-UwpRegistryTrees {
         [Parameter(Mandatory = $true)][string] $MountDir,
         [Parameter(Mandatory = $true)][string] $ServicesList,
         [Parameter(Mandatory = $true)][string] $KeysList,
-        [int] $SourceIndex = 4,
+        [int] $SourceIndex = 1,
         [string] $ScratchDir
     )
 
@@ -893,7 +893,7 @@ function Install-WbUwpChain {
         [Parameter(Mandatory = $true)][string] $InstallWim,
         [Parameter(Mandatory = $true)][string] $MountDir,
         [Parameter(Mandatory = $true)][string] $RepoRoot,
-        [int] $SourceIndex = 4,
+        [int] $SourceIndex = 1,
         [string] $ScratchDir
     )
 
