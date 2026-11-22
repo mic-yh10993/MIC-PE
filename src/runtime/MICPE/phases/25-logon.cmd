@@ -45,10 +45,37 @@ rem -- 1. services the logon path needs ---------------------------------------
 rem The start order matters: SamSs carries the SAM database, seclogon needs
 rem RPCSS. A service that is already running prints an error line (1056) and
 rem that is not a failure, so the output is only logged.
-for %%S in (SamSs RPCSS seclogon Themes SENS Appinfo) do (
+rem Order follows WimBuilder2 LogonAdmin.bat: seclogon first, then the AppX
+rem chain (SENS, CoreMessagingRegistrar, UserManager, BrokerInfrastructure,
+rem StateRepository, Schedule, AppReadiness), then the shell services
+rem (Themes, Appinfo, ShellHWDetection, ProfSvc). ProfSvc loads the user
+rem profile for the logon token; without it the logon falls back to a
+rem temporary profile.
+for %%S in (SamSs RPCSS seclogon SENS CoreMessagingRegistrar UserManager BrokerInfrastructure StateRepository Schedule AppReadiness Themes Appinfo ShellHWDetection ProfSvc) do (
     sc.exe start %%S >>"%LOG%" 2>&1
     call :LOG "  sc start %%S rc=%errorlevel%"
 )
+
+rem -- 1b. wait for seclogon to be RUNNING ------------------------------------
+rem runas.exe calls CreateProcessWithLogonW, which fails at once when the
+rem Secondary Logon service is not up yet. sc start returns before the
+rem service finishes starting, so poll for the RUNNING state (15s max).
+rem A timeout is not fatal: the runas attempt below still runs, and a
+rem failure there falls back to the SYSTEM shell in phase 30.
+set /a SECLOGON_WAIT=0
+:SECLOGON_POLL
+sc.exe query seclogon 2>nul | find /i "RUNNING" >nul 2>&1
+if not errorlevel 1 goto :SECLOGON_UP
+set /a SECLOGON_WAIT+=1
+if %SECLOGON_WAIT% GEQ 15 goto :SECLOGON_TIMEOUT
+ping -n 2 127.0.0.1 >nul 2>&1
+goto :SECLOGON_POLL
+:SECLOGON_UP
+call :LOG "  seclogon is RUNNING"
+goto :SECLOGON_DONE
+:SECLOGON_TIMEOUT
+call :LOG "  seclogon did not reach RUNNING in 15s - runas may fail"
+:SECLOGON_DONE
 
 rem -- 2. the Administrator account ------------------------------------------
 rem In this PE the SAM database is created by the SAM service when it starts,

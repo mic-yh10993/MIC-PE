@@ -19,7 +19,7 @@ param(
     [string] $Iso,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'all')]
+    [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'wb2', 'all')]
     [string] $Stage,
 
     [string] $WorkDir,

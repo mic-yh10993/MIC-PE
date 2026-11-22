@@ -57,3 +57,4 @@ WpnService
 WpnUserService
 wscsvc
 StateRepository
+UserManager

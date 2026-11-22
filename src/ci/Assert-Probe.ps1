@@ -32,13 +32,24 @@ $script:StageProbeExpect = [ordered]@{
     m5 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; ime = '1'; payload = '1'; brand = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0'; fm_42537950_group0 = '0x1'; fm_42537950_group15 = '0x1'; fm_42537950_group9 = '0x1'; explorer_end = '1' }
     m6 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; installer_scan = '1'; installer_deploy = '1'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0' }
     m7 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; network = '*'; ime = '1'; uwp_appx = '1'; uwp_launch_photos = '1'; uwp_launch_media = '1'; uwp_launch_calculator = '1'; payload = '1'; brand = '1'; installer_scan = '1'; installer_deploy = '1'; size_wim = '*'; size_iso = '*'; pe_drive = 'X'; win_drive = 'none'; drive_fixed = '0'; fm_42537950_group0 = '0x1'; fm_42537950_group15 = '0x1'; fm_42537950_group9 = '0x1'; explorer_end = '1' }
+    # wb2 (the WimBuilder2 UWP chain) is probed by probe-wb2.cmd, not the
+    # classic probe.cmd: the wb2 startnet never installs probe.cmd, so the
+    # probe runs as a postshell hook (10-probe.cmd) and writes the same
+    # micpe-probe.txt format. logon_token = phase 25 created the
+    # Administrator logon token (logon-token.flag); sab_mapped =
+    # StartAllBackLoaderX64.dll is mapped in the explorer process;
+    # logonui = LogonUI.exe is present in the image; seclogon = the
+    # Secondary Logon service is RUNNING. The probe does NOT shut the
+    # guest down: the harness takes the final screenshot first, then
+    # quits QEMU.
+    wb2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; logon_token = '1'; sab_mapped = '1'; logonui = '1'; seclogon = '1' }
 }
 
 function Get-StageProbeExpect {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'all')]
+        [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'wb2', 'all')]
         [string] $Stage
     )
 

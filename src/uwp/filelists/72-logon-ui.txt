@@ -127,3 +127,17 @@ Windows\System32\Windows.Globalization.Fontgroups.dll
 Windows\System32\Windows.UI.Xaml.Resources.dll
 Windows\System32\Windows.UI.Xaml.Resources.rs4.dll
 Windows\System32\Windows.UI.Xaml.Resources.rs5.dll
+
+; --- Credential provider + SAS support DLLs (wb2 alignment, round 1) ---
+; WimBuilder2's StartIsBack/main.bat adds these for the logon/SAS chain and
+; the CredDialog stack. They were missing from every MICPE filelist:
+; CredProvDataModel.dll (credential provider data model), Windows.UI.Cred.dll
+; (CredDialog XAML runtime), shutdownux.dll (shutdown/switch-user UX used by
+; the SAS menu), nrtapi.dll (wb2 SAB dependency), usermgr.dll (UserManager
+; service backend, started by the logon phase). sud.dll is NOT listed: it
+; does not exist in the 26300 install.wim (see docs/handoff-uwp-shell.md).
+Windows\System32\CredProvDataModel.dll
+Windows\System32\Windows.UI.Cred.dll
+Windows\System32\shutdownux.dll
+Windows\System32\nrtapi.dll
+Windows\System32\usermgr.dll

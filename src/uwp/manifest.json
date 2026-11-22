@@ -136,6 +136,11 @@
       "file": "60-logon-services.reg"
     },
     {
+      "name": "Logon stack values (sihost integration, LogonUI key, LSA packages)",
+      "kind": "values",
+      "file": "62-logon-stack.reg"
+    },
+    {
       "name": "Shell extension registration (NewBrowseDlg)",
       "kind": "values",
       "file": "61-newbrowsedlg.reg"

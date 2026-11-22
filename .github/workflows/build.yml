@@ -8,7 +8,7 @@ on:
       stage:
         description: "构建到哪一期（m1 只有 cmd；m7 是完整成品）"
         type: choice
-        options: [m1, m2, m3, m4, m5, m6, m7, all]
+        options: [m1, m2, m3, m4, m5, m6, m7, wb2, all]
         default: m1
         required: true
       build:
