@@ -340,6 +340,7 @@ jobs:
           path: |
             verify-out/share/micpe-probe.txt
             verify-out/share/micpe-probe-local.txt
+            verify-out/share/micpe-boot.log
             verify-out/share/micpe-watchdog-heartbeat.txt
             verify-out/share/micpe-tasklist.txt
             verify-out/share/micpe-system.evtx

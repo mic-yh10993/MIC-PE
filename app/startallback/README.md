@@ -72,6 +72,14 @@ ContextMenuHandlers 把自己的 DLL 载进去。
 
 ## 已知前提 / 坑
 
+- **版本与系统版本的对应关系（round 3 定死）**：3.6 不支持 26300
+  （26H2）。微软在 26100（24H2）硬拦截了旧版 StartAllBack；3.8（2024-07）
+  才首次支持 24H2（任务栏完全重写），3.9.26（2026-09）才正式支持 26H2。
+  WimBuilder2 对 ≥26100 用 3.9.20/3.9.28。3.6 在 26300 上 loader 能载入
+  （sab_mapped=1），但任务栏钩子对不上新版 explorer 内部结构，任务栏出
+  不来。想在 26300 上有任务栏，最终要升级到 3.9.x（用户会发包）；本轮先用
+  LegacyTaskbar=1（走经典任务栏代码路径）+ 桌面 .lnk（早期触发
+  FolderExtension）缓解。
 - 需要 `authui.dll`、`shutdownux.dll`、`nrtapi.dll` 在 `System32`（电源和
   用户菜单用）。这三个在 `61-shell-explorer-app.txt` 已经在镜像里。
 - 任务栏时钟：`default.reg` 里把 `ImmersiveShell\UseWin32TrayClockExperience`

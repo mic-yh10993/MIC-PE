@@ -89,12 +89,45 @@ if exist "%ProgramFiles%\StartAllBack\StartAllBackLoaderX64.dll" (echo sab_files
 reg query "HKLM\SOFTWARE\Classes\CLSID\{117E3954-5034-453A-A18B-7B79493646E6}\InProcServer32" /ve 2>nul | find /i "StartAllBackLoaderX64.dll" >nul
 if errorlevel 1 (echo sab_clsid=0 >> "%PROBE_OUT%" & echo sab_clsid=0 >> "%PROBE_LOCAL%") else (echo sab_clsid=1 >> "%PROBE_OUT%" & echo sab_clsid=1 >> "%PROBE_LOCAL%")
 
+rem sab_hook: the main StartAllBack hook DLL mapped into explorer. The
+rem loader can be mapped (sab_mapped=1) while the hook DLL failed to load
+rem or unloaded itself (DllCanUnloadNow); that split means the hook layer,
+rem not the trigger, is broken.
+tasklist /m StartAllBackX64.dll /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo sab_hook=0 >> "%PROBE_OUT%" & echo sab_hook=0 >> "%PROBE_LOCAL%") else (echo sab_hook=1 >> "%PROBE_OUT%" & echo sab_hook=1 >> "%PROBE_LOCAL%")
+
 rem logonui: LogonUI.exe present in the image (72-logon-ui.txt).
 if exist "%SystemRoot%\System32\LogonUI.exe" (echo logonui=1 >> "%PROBE_OUT%" & echo logonui=1 >> "%PROBE_LOCAL%") else (echo logonui=0 >> "%PROBE_OUT%" & echo logonui=0 >> "%PROBE_LOCAL%")
 
 rem seclogon: Secondary Logon service RUNNING (phase 25 starts it).
 sc.exe query seclogon 2>nul | find /i "RUNNING" >nul
 if errorlevel 1 (echo seclogon=0 >> "%PROBE_OUT%" & echo seclogon=0 >> "%PROBE_LOCAL%") else (echo seclogon=1 >> "%PROBE_OUT%" & echo seclogon=1 >> "%PROBE_LOCAL%")
+
+rem seclogon diagnostics (not asserted; they say WHY seclogon is 0).
+rem seclogon_key: the service key exists with an svchost ImagePath.
+rem seclogon_dll: the DLL is on disk. seclogon_netsvcs: netsvcs lists
+rem seclogon. All three 1 + seclogon=0 means the definition is fine but
+rem sc start failed at runtime - read micpe-boot.log for the return code.
+reg query "HKLM\SYSTEM\CurrentControlSet\Services\seclogon" /v ImagePath 2>nul | find /i "svchost" >nul
+if errorlevel 1 (echo seclogon_key=0 >> "%PROBE_OUT%" & echo seclogon_key=0 >> "%PROBE_LOCAL%") else (echo seclogon_key=1 >> "%PROBE_OUT%" & echo seclogon_key=1 >> "%PROBE_LOCAL%")
+if exist "%SystemRoot%\System32\seclogon.dll" (echo seclogon_dll=1 >> "%PROBE_OUT%" & echo seclogon_dll=1 >> "%PROBE_LOCAL%") else (echo seclogon_dll=0 >> "%PROBE_OUT%" & echo seclogon_dll=0 >> "%PROBE_LOCAL%")
+reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost" /v netsvcs 2>nul | find /i "seclogon" >nul
+if errorlevel 1 (echo seclogon_netsvcs=0 >> "%PROBE_OUT%" & echo seclogon_netsvcs=0 >> "%PROBE_LOCAL%") else (echo seclogon_netsvcs=1 >> "%PROBE_OUT%" & echo seclogon_netsvcs=1 >> "%PROBE_LOCAL%")
+
+rem Companion services (not asserted; they say whether the start failure
+rem is seclogon-specific or hits every service phase 25 starts).
+sc.exe query SENS 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo sens_run=0 >> "%PROBE_OUT%" & echo sens_run=0 >> "%PROBE_LOCAL%") else (echo sens_run=1 >> "%PROBE_OUT%" & echo sens_run=1 >> "%PROBE_LOCAL%")
+sc.exe query Appinfo 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo appinfo_run=0 >> "%PROBE_OUT%" & echo appinfo_run=0 >> "%PROBE_LOCAL%") else (echo appinfo_run=1 >> "%PROBE_OUT%" & echo appinfo_run=1 >> "%PROBE_LOCAL%")
+sc.exe query Schedule 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo schedule_run=0 >> "%PROBE_OUT%" & echo schedule_run=0 >> "%PROBE_LOCAL%") else (echo schedule_run=1 >> "%PROBE_OUT%" & echo schedule_run=1 >> "%PROBE_LOCAL%")
+
+rem -- boot.log to the share (round 3) ---------------------------------------
+rem Phase 25 logs every sc start return code and the seclogon poll result
+rem into boot.log; the probe file alone cannot say WHY a service failed.
+rem Copy it to the share so the host can read the service start story.
+if defined PROBE_DIR if exist "%SystemRoot%\System32\MICPE\logs\boot.log" copy /y "%SystemRoot%\System32\MICPE\logs\boot.log" "%PROBE_DIR%\micpe-boot.log" >nul 2>&1
 
 rem --- done ------------------------------------------------------------------
 rem No shutdown: the harness takes the final screenshot, then quits QEMU.

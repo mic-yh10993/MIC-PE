@@ -32,6 +32,14 @@ call :LOG "phase 20-preshell: USERPROFILE=%USERPROFILE%"
 if not exist "%TEMP%" md "%TEMP%" >nul 2>&1
 if not exist "%Desktop%" md "%Desktop%" >nul 2>&1
 
+rem -- desktop shortcut (round 3) --------------------------------------------
+rem A .lnk on the desktop makes Explorer parse it at desktop init, which
+rem binds the X: drive namespace and triggers the Drive FolderExtension -
+rem the earliest reliable trigger for the StartAllBack loader. The .lnk
+rem ships in the runtime tree and is placed here, before the shell starts.
+if exist "%MICPE%\Command Prompt.lnk" copy /y "%MICPE%\Command Prompt.lnk" "%Desktop%\Command Prompt.lnk" >nul 2>&1
+if exist "%Desktop%\Command Prompt.lnk" call :LOG "desktop shortcut placed"
+
 rem -- input method host ------------------------------------------------------
 rem  DISABLED on purpose (user request 2026-11-22): starting ctfmon.exe in the
 rem  PE session left the keyboard unusable - no key reached the shell at all.
