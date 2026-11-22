@@ -3,10 +3,9 @@ BeforeAll {
 }
 
 Describe 'repository skeleton' {
-    It 'has GPL-3.0 license text' {
-        $license = Get-Content -LiteralPath (Join-Path $repoRoot 'LICENSE') -Raw
-        $license | Should -Match 'GNU GENERAL PUBLIC LICENSE'
-        $license | Should -Match 'Version 3, 29 June 2007'
+    It 'has no open-source license file (private project)' {
+        # 2026-11-23: repo made private, GPL-3.0 dropped; no LICENSE file.
+        Test-Path -LiteralPath (Join-Path $repoRoot 'LICENSE') | Should -BeFalse
     }
 
     It 'README states the MICPE memory requirement' {

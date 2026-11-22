@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 目标仓库：`mic-yh10993/MIC-PE`，分支 `main`，公开，许可 GPL-3.0（仅覆盖本仓库自有代码，不含微软二进制与第三方工具）。
+- 目标仓库：`mic-yh10993/MIC-PE`，分支 `main`，私有，不适用开源协议（不含微软二进制与第三方工具）。
 - 源镜像：UUP dump，`Windows 11 26H2`，`amd64`，`zh-cn`，Pro 版；构建号由 workflow 输入 `build` 指定，默认 `26300`。
 - 体积硬约束：`boot.wim` ≤ 3 GB，目标 ≤ 2.6 GB；ISO ≤ 3.2 GB。超限时按 Office → Chrome → Photos → Media Player 顺序降级。
 - 单个 Release asset ≤ 2 GB；成品 ISO 约 1–1.5 GB，直接作为 Release 资产上传，不分卷。
@@ -43,7 +43,6 @@
 |---|---|
 | `.github/workflows/build.yml` | 主构建：参数输入、缓存、调用 `Build-Micpe.ps1`、分卷发布 |
 | `.github/workflows/test.yml` | 每次 push/PR 跑 Pester 与语法检查 |
-| `LICENSE` | GPL-3.0 全文 |
 | `README.md` | 用法、`install.mic` 协议、内存要求、许可与来源声明 |
 | `docs/design.md` | 设计文档副本（从 spec 拷入） |
 | `docs/test-checklist.md` | 真机一次性确认表（CI 已覆盖的项标注"CI 已验"） |

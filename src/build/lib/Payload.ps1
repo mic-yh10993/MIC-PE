@@ -30,7 +30,7 @@
     copy (DSI-安装备份-源码/make/PECMD.EXE, SHA-256 pinned in
     docs/payload.md), shipped inside micpe-payload.7z at
     ProgramFiles\MICPE\PECMD.EXE — the path startnet.cmd expects. It is
-    third-party freeware: never committed to git, never covered by GPL.
+    third-party freeware: never committed to git, not part of this repo's own code.
     Do NOT use the GhostCGI copy (GhostCGI/pecmd.exe): it is a different,
     older binary bundled with that tool. The payload build fails loudly
     when PECMD.EXE is missing; a silent skip once let a payload ship

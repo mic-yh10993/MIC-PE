@@ -44,7 +44,7 @@ MICPE 是一张**装机维修盘**：从 U 盘/光盘启动，进一个能联网
 - 为了 UWP 把体积做到 5 GB 以上，失去"装机盘"的便携意义
 - 用了第三方闭源 shell（WinXShell 等）替代 Explorer——用户明确要原生
 - 装机工具需要用户理解"引导分区""映像序号"才能用
-- 公开仓库里出现不可再分发的二进制（违反 GPL 洁净度或许可）
+- 仓库里出现不可再分发的二进制（违反许可）
 
 ## 3. 约束
 
@@ -55,7 +55,7 @@ MICPE 是一张**装机维修盘**：从 U 盘/光盘启动，进一个能联网
 | 体积 | `boot.wim` ≤ 3 GB（硬顶），目标 ≤2.6 GB |
 | 发布 | 单个 Release asset ≤ 2 GB；成品 ISO 约 1–1.5 GB，直接作为 Release 资产上传，不分卷；构建出成品后自动上传 Release（tag `micpe-<stage>-<build>-<yyyymmdd>-r<run_number>`） |
 | 仓库 | 单文件 ≤100 MB → 三个包直接提交在 `app/`：`app/payload/micpe-payload.7z`（28.5 MB）、`app/chrome/chrome-slim.7z.001/.002`（拼回 125 MB）、`app/office/office2016-slim.7z.001/.002`（拼回 167 MB） |
-| 许可 | 本仓库 GPL-3.0；微软系统文件、PENetwork、PECMD、DiskGenius 等不入 git |
+| 许可 | 私有项目，不适用开源协议；微软系统文件、PENetwork、PECMD、DiskGenius 等不入 git |
 | 语言 | 只 zh-CN（含微软拼音） |
 | 作者信息 | 作者 SYSTEM-Intel-MIC；OEM 型号 SYSTEM-Intel-MIC；SupportURL = https://space.bilibili.com/1978487514 |
 
@@ -118,7 +118,6 @@ workflow: .github/workflows/build.yml
 ```
 MIC-PE/
 ├── .github/workflows/build.yml      # 主构建
-├── LICENSE                          # GPL-3.0
 ├── README.md
 ├── docs/
 │   ├── design.md                    # 本文档
@@ -351,7 +350,7 @@ Chrome（MSI，安装到 `X:\Program Files\Google\Chrome`）与 Office 2016 绿�
 | ADK 正统路线 | `…/1/精简版本.txt`（692 行）、`…/4/精简.txt`（139 行） | copype + WinPE-OC 组件包清单。仅作兜底，不进主路径。 |
 | 24H2 精简经验 | `…/2/精简.txt`、`…/3/精简.txt` | 内存占用与体积参考（2 GB 内存不够用，印证 §3 的 4 GB 要求）。 |
 | DSI 装机源码 | `/root/micpe-ref/参考代码/` → 解包到 `DSI-安装备份-源码/DSI-安装备份.WCS`（98 KB，UTF-8 BOM，CRLF） | **可用**。已确认包含：卷/分区表格、`wimlib-imagex apply`、`bcdboot`、格式化、无人值守、驱动导入/导出、错误处理。M6 直接复用其函数结构。 |
-| DSI 附带的 PECMD | `DSI-安装备份-源码/make/PECMD.EXE` | 可直接作为运行时（许可：PECMD 为免费软件，需在 README 注明来源，不入 GPL 覆盖范围）。 |
+| DSI 附带的 PECMD | `DSI-安装备份-源码/make/PECMD.EXE` | 可直接作为运行时（许可：PECMD 为免费软件，需在 README 注明来源，不属于本仓库自有代码）。 |
 | UUP 构建脚本 | `/tmp/winbuild/scripts/Get-UupIso.ps1`（2712 行）+ 其 workflow | **可直接裁剪复用**。只保留 UUP 下载 → 转换 → 取 install.wim/boot.wim 的部分，去掉 unattend/Office/MAS/debloat。 |
 | 预装软件树 | `/root/micpe-ref/PE预装软件/直接塞入programfiles/` | **纯绿色、无需安装**：9 目录 + 6 单文件，全部 PE32/PE32+ 独立 exe，`ls` 无 setup/install/vc_redist。唯一例外是 `GhostCGI/cgi.ini` 调用 `%ProgramFiles%\7-ZIP\7z.exe`（注意它写的是 `7-ZIP` 大写），所以 **7-zip 必须落在 `Program Files\7-zip`**。`WinNTSetup/unattend/` 自带无人值守模板，可复用。 |
 | 品牌资产 | `/root/micpe-ref/品牌化/` | `logo.bmp` 120×120×24bpp（直接符合 OEM logo 要求）、`wallpaper.jpg` 1920×1080。 |

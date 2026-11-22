@@ -70,8 +70,8 @@ plan.md 里引用它的几行已在 M5 改掉，不要再引用。
   打包时拷到 `ProgramFiles\MICPE\PECMD.EXE`（startnet.cmd 要的路径）。
   不从网上下载：PECMD2012 官网（作者 mdyblog 的 163 博客）已无可用
   的官方直链，没有可信哈希的来源不拉。
-- **硬规则**：PECMD.EXE 是第三方免费软件，绝不提交进公开仓库
-  （design.md 约束：不入 git、不入 GPL 覆盖范围）。`New-PayloadArchive`
+- **硬规则**：PECMD.EXE 是第三方免费软件，绝不提交进仓库
+  （design.md 约束：不入 git、不属于本仓库自有代码）。`New-PayloadArchive`
   在 PECMD.EXE 缺失时明确报错停下，绝不静默跳过——旧的打包命令里
   `2>/dev/null || true` 会让缺文件时悄悄通过，payload 缺 PECMD 要到
   镜像启动回退到 cmd 才被发现，这个坑 M5 已堵上。
