@@ -1,0 +1,38 @@
+[Unicode]
+Unicode=yes
+[Version]
+signature="$CHICAGO$"
+Revision=1
+[System Access]
+; Enable the built-in Administrator (RID 500) and relax the password policy so
+; the blank-password account can actually be authenticated.
+NewAdministratorName = "Administrator"
+EnableAdminAccount = 1
+MinimumPasswordAge = 0
+MaximumPasswordAge = -1
+MinimumPasswordLength = 0
+PasswordComplexity = 0
+PasswordHistorySize = 0
+RequireLogonToChangePassword = 0
+ClearTextPassword = 0
+ForceLogoffWhenHourExpire = 0
+LSAAnonymousNameLookup = 1
+[Privilege Rights]
+; The stock WimBuilder2 template only sets EnableAdminAccount. That is not
+; enough for a programmatic logon (runas / CreateProcessWithLogonW): the
+; account also needs SeInteractiveLogonRight, which a stripped WinPE local
+; policy does not necessarily grant to Administrators. SeNetworkLogonRight is
+; listed because CreateProcessWithLogonW is serviced by seclogon.
+SeInteractiveLogonRight = *S-1-5-32-544,*S-1-5-32-545,*S-1-5-32-546
+SeNetworkLogonRight = *S-1-5-32-544,*S-1-5-32-545,*S-1-5-32-546
+SeRemoteInteractiveLogonRight = *S-1-5-32-544
+SeDenyInteractiveLogonRight = *S-1-5-32-546
+SeDenyNetworkLogonRight = *S-1-5-32-546
+[Registry Values]
+; 4 = REG_DWORD. Blank-password accounts are refused for non-console logons
+; unless this is 0; runas goes through seclogon, i.e. a non-console logon.
+MACHINE\System\CurrentControlSet\Control\Lsa\LimitBlankPasswordUse=4,0
+; Treat every network logon as Guest only = off, so the Administrator token is
+; not downgraded to a Guest token.
+MACHINE\System\CurrentControlSet\Control\Lsa\ForceGuest=4,0
+[Event Audit]

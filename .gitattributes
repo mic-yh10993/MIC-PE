@@ -1,0 +1,18 @@
+# Line endings for this repository.
+#
+# The batch files under src/runtime/ and src/ci/ are executed by cmd.exe
+# inside WinPE. cmd.exe needs CRLF: with bare LF it silently mis-parses
+# labels and multi-line blocks. The repo has been bitten by this before,
+# so the rule is pinned here instead of relying on core.autocrlf, which
+# only applies on Windows checkouts and silently produces LF elsewhere.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Registry scripts are UTF-16LE with a BOM (reg.exe requires the BOM) and
+# are handled as binary so git never touches their bytes or line endings.
+*.reg binary
+
+# The UWP filelists are read line by line by Wb2List.ps1. LF is fine for
+# them, but CRLF keeps the files consistent with the rest of the tree.
+src/uwp/filelists/*.txt text eol=crlf
+src/uwp/reg/copy/*.txt text eol=crlf

@@ -1,9 +1,22 @@
 # Native logon experiment file set. Paths are extracted from install.wim
 # index 1. This list is a candidate; a missing path should fail the build
 # so the 26300 donor image can be reconciled rather than silently skipped.
+#
+# The tsdiscon/tscon pair is the actual "switch to Administrator" trigger:
+# startnet-native-logon.cmd disconnects the SYSTEM session and Winlogon
+# creates a new interactive session using AutoAdminLogon. In the 26300
+# install.wim they are NOT exposed at Windows\System32\ — only inside the
+# WinSxS component store, and those copies are DCS-compressed (wimlib returns
+# a ~11 KB DCS stream, not a PE image). Copy-SignedHostToolsToSystem32
+# (Wim.ps1) instead copies the Microsoft-signed System32 binaries from the
+# build host after verifying their Authenticode signature. UsrClass.dat is required
+# on 22621+ or the Administrator profile cannot be created at first logon
+# (WimBuilder2 SwitchToAdmin).
 Windows\System32\LogonUI.exe
 Windows\System32\winlogon.exe
 Windows\System32\userinit.exe
+Windows\System32\TabSvc.dll
+Windows\System32\zh-CN\TabSvc.dll.mui
 Windows\System32\authui.dll
 Windows\System32\SmartcardCredentialProvider.dll
 Windows\System32\lsasrv.dll
@@ -18,6 +31,90 @@ Windows\System32\Windows.UI.Logon.dll
 Windows\System32\sihost.exe
 Windows\System32\ShellAppRuntime.exe
 Windows\System32\whoami.exe
+Windows\System32\secedit.exe
+Windows\System32\AppxSysprep.dll
 Windows\SystemResources\Windows.UI.Logon\Windows.UI.Logon.pri
 Windows\SystemResources\Windows.UI.Logon\pris\Windows.UI.Logon.zh-CN.pri
 Windows\System32\zh-CN\seclogon.dll.mui
+
+; --- LogonUI / Credential Provider chain (from WimBuilder2 SwitchToAdmin) ---
+; A real Winlogon interactive logon renders LogonUI, which needs the XAML
+; stack and the credential-provider host DLLs. Without these the LSA can
+; authenticate but no secure desktop / shell is drawn (black screen, dead SAS).
+Windows\System32\AuthExt.dll
+Windows\System32\FontGlyphAnimator.dll
+Windows\System32\InputSwitch.dll
+Windows\System32\MrmCoreR.dll
+Windows\System32\Windows.UI.dll
+Windows\System32\Windows.UI.Immersive.dll
+Windows\System32\Windows.UI.Xaml.dll
+Windows\System32\Windows.UI.XamlHost.dll
+Windows\System32\Windows.UI.Xaml.Controls.dll
+Windows\System32\Windows.ApplicationModel.dll
+Windows\System32\Windows.Globalization.dll
+Windows\System32\WindowManagement.dll
+Windows\System32\WindowManagementAPI.dll
+Windows\System32\Windows.UI.Core.TextInput.dll
+Windows\System32\windowsudk.shellcommon.dll
+Windows\System32\credprovhost.dll
+Windows\System32\credprovs.dll
+Windows\System32\credprovslegacy.dll
+Windows\System32\LogonController.dll
+Windows\System32\logoncli.dll
+Windows\System32\Windows.Internal.UI.Logon.ProxyStub.dll
+Windows\System32\Windows.UI.CredDialogController.dll
+Windows\System32\ninput.dll
+Windows\System32\shacct.dll
+Windows\System32\threadpoolwinrt.dll
+Windows\System32\profsvcext.dll
+Windows\System32\en-US\Windows.UI.Xaml.dll.mui
+Windows\System32\zh-CN\Windows.UI.Xaml.dll.mui
+
+; Administrator profile template. WimBuilder2 requires UsrClass.dat on 22621+
+; or the RID-500 profile cannot be created. The donor install.wim does not ship
+; one, so the build copies the WimBuilder2-proven asset to both the Default and
+; Administrator profile locations (see Install-NativeLogonAssets in Wim.ps1).
+Users\Default\AppData\Local\Microsoft\Windows\UsrClass.dat
+
+; --- service backends for the repaired logon services (28-logon-services.reg) ---
+; seclogon.dll / SensApi.dll / appinfo.dll / themeservice.dll already exist in
+; boot.wim by default. Sens.dll and schedsvc.dll do NOT, so SENS and Schedule
+; would be registered but unable to start. They are the services WimBuilder2
+; starts right before its tsdiscon switch.
+Windows\System32\Sens.dll
+Windows\System32\schedsvc.dll
+
+; --- Administrator shell launcher ---
+; boot.wim ships neither runas.exe nor termsrv.dll. Without termsrv.dll the
+; WTS API has no provider, so tsdiscon.exe (WTSDisconnectSession) can never
+; switch the console out of the SYSTEM session - it returns at once and the
+; screen stays on the bootstrap cmd. The shell is therefore created directly
+; with an Administrator logon token: runas.exe -> CreateProcessWithLogonW ->
+; seclogon. That yields a genuine LSA logon session, which is exactly what
+; explorer.exe needs (a duplicated SYSTEM token is what produced "a specified
+; logon session does not exist"). Signed Microsoft binary, taken from the
+; donor install.wim like the rest of this list.
+Windows\System32\runas.exe
+
+; --- LogonUI XAML runtime (v6: real logon, not tsdiscon) ---
+; With SystemSetupInProgress=0 Winlogon draws LogonUI, which is a XAML app.
+; The WinPE boot.wim carries an older/partial XAML runtime: wb2's SwitchToAdmin
+; copies this exact set from the Client image, and a missing resource PRI or
+; CoreMessaging pair makes LogonUI die at startup - which Winlogon reports as
+; CRITICAL_PROCESS_DIED (0xEF) at the boot logo. imageres.dll must come from
+; install.wim (the PE copy is a stub without the logon bitmaps).
+Windows\System32\imageres.dll
+Windows\System32\CoreMessaging.dll
+Windows\System32\CoreUIComponents.dll
+Windows\System32\InputHost.dll
+Windows\System32\rmclient.dll
+Windows\System32\TextInputFramework.dll
+Windows\System32\twinapi.appcore.dll
+Windows\System32\profapi.dll
+Windows\System32\profext.dll
+Windows\System32\wuceffects.dll
+Windows\System32\pfclient.dll
+Windows\System32\Windows.Globalization.Fontgroups.dll
+Windows\System32\Windows.UI.Xaml.Resources.dll
+Windows\System32\Windows.UI.Xaml.Resources.rs4.dll
+Windows\System32\Windows.UI.Xaml.Resources.rs5.dll

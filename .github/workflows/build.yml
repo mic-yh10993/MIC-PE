@@ -136,7 +136,7 @@ jobs:
           ./src/build/Build-Micpe.ps1 @buildArgs
 
       - name: Install QEMU
-        if: inputs.verify == 'full' && inputs.probe != false
+        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
         shell: pwsh
         run: |
           if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
@@ -148,7 +148,7 @@ jobs:
           "QEMU_PATH=$qemu" | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Ensure OVMF firmware
-        if: inputs.verify == 'full' && inputs.probe != false
+        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
         shell: pwsh
         run: |
           # QEMU ships its UEFI firmware next to the emulator (OVMF_CODE.fd
@@ -171,7 +171,7 @@ jobs:
           "OVMF_PATH=$ovmf" | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Prepare data disks
-        if: inputs.verify == 'full' && inputs.probe != false && (inputs.stage == 'm6' || inputs.stage == 'm7' || inputs.stage == 'all')
+        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true && (inputs.stage == 'm6' || inputs.stage == 'm7' || inputs.stage == 'all')
         shell: pwsh
         run: |
           # plan Task 17 Step 6: three qcow2 data disks + one blank 64 GB disk
@@ -246,7 +246,7 @@ jobs:
           Write-Host "data disks: $disks"
 
       - name: Verify in QEMU
-        if: inputs.verify == 'full' && inputs.probe != false
+        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
         shell: pwsh
         env:
           IN_STAGE: ${{ inputs.stage || 'all' }}
@@ -297,8 +297,13 @@ jobs:
           }
           ./src/ci/Test-Stage.ps1 @verifyArgs
 
+      # A native-logon image never writes the classic micpe-probe.txt (its
+      # startnet hands off to Winlogon instead of running probe.cmd), so the
+      # QEMU probe chain above is skipped and static verification runs in
+      # its place. Runtime evidence is written to X:\native-logon-probe.txt
+      # by logon-admin.cmd and must be checked in the guest / QEMU screenshot.
       - name: Verify (static)
-        if: inputs.verify == 'static'
+        if: inputs.verify == 'static' || (inputs.verify == 'full' && inputs.nativeLogonExperiment == true)
         shell: pwsh
         run: |
           if (-not $env:ISO_PATH -or -not (Test-Path -LiteralPath $env:ISO_PATH)) {
@@ -328,7 +333,7 @@ jobs:
           compression-level: 0
 
       - name: Upload verify artifacts
-        if: always() && inputs.verify == 'full' && inputs.probe != false
+        if: always() && inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
         uses: actions/upload-artifact@v4
         with:
           name: micpe-verify-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}

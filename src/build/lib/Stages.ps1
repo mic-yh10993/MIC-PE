@@ -30,13 +30,17 @@ $script:StageSteps = @{
     m5 = @('base', 'reseed', 'explorer', 'runtimes', 'components', 'uwp', 'payload', 'brand', 'iso')
     m6 = @('base', 'reseed', 'explorer', 'runtimes', 'components', 'uwp', 'payload', 'brand', 'installer', 'iso')
     m7 = $script:AllSteps
+
+    # WimBuilder2 port only: the same skeleton as m3 but the UWP desktop comes
+    # from src/uwp (the imported wb2 chain) instead of the hand-derived step.
+    wb2 = @('base', 'reseed', 'explorer', 'runtimes', 'components', 'uwpchain', 'iso')
 }
 
 function Get-StageSteps {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'all')]
+        [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'wb2', 'all')]
         [string] $Stage
     )
 

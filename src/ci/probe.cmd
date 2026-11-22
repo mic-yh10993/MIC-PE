@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 rem ---------------------------------------------------------------------------
 rem MICPE in-PE self check.
 rem

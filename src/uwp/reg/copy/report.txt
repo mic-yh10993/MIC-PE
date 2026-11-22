@@ -1,0 +1,7 @@
+01-Components/zp-UWPAppX/main.bat -> 36 registry entries
+01-Components/zp-UWPAppX/AppSvrs/main.bat -> 5 registry entries
+01-Components/zp-UWPAppX/AppXapps/main.bat -> 33 registry entries
+01-Components/00-Shell/main.bat -> 2 registry entries
+01-Components/00-Shell/Explorer/submain.bat -> 21 registry entries
+01-Components/DWM/main.bat -> 1 registry entries
+shared/StateRepositoryService/main.bat -> 1 registry entries

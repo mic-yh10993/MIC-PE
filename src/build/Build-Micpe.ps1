@@ -19,7 +19,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'all')]
+    [ValidateSet('m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'wb2', 'all')]
     [string] $Stage,
 
     [string] $Build = '26300',
@@ -52,10 +52,15 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Stage 'wb2' is the WimBuilder2 port: it boots through
+# src/runtime/MICPE/startnet.cmd (UWP chain) and never loads PECMD. The m*
+# stages keep the M2 PECMD bootstrap untouched.
+$script:UwpProfile = ($Stage -eq 'wb2')
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libDir = Join-Path $PSScriptRoot 'lib'
 
-foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'Shell', 'Uwp', 'Payload', 'Brand', 'Installer', 'BaseImage', 'Iso') {
+foreach ($lib in 'Common', 'Disk', 'Stages', 'Wim', 'Registry', 'AdminAccount', 'Shell', 'Uwp', 'Wb2List', 'UwpChain', 'Payload', 'Brand', 'Installer', 'BaseImage', 'Iso') {
     . (Join-Path $libDir "$lib.ps1")
 }
 
@@ -236,7 +241,15 @@ function Invoke-ReseedStep {
     # Mounted with DISM and committed; a failure here discards the mount so
     # a half-injected image never ships.
     Write-Step 'injecting MICPE boot files into boot.wim'
-    $startnet = Join-Path $repoRoot 'src\shell\startnet.cmd'
+    # The UWP profile boots through this project's own chain (no PECMD, no
+    # probe). The probe files are the CI harness: they belong to the m* stages,
+    # and their first-line errors on a desktop image are noise, not diagnostics.
+    $startnet = if ($script:UwpProfile) {
+        Join-Path $repoRoot 'src\runtime\MICPE\startnet.cmd'
+    }
+    else {
+        Join-Path $repoRoot 'src\shell\startnet.cmd'
+    }
     $probeFile = Join-Path $repoRoot 'src\ci\probe.cmd'
     $watchdog = Join-Path $repoRoot 'src\ci\probe-watchdog.cmd'
     $sync = Join-Path $repoRoot 'src\ci\probe-sync.cmd'
@@ -250,7 +263,10 @@ function Invoke-ReseedStep {
     try {
         $system32 = Join-Path $paths.Mount 'Windows\System32'
         Copy-Item -LiteralPath $startnet -Destination (Join-Path $system32 'startnet.cmd') -Force
-        if ($Probe) {
+        if ($script:UwpProfile) {
+            Write-SubStep 'UWP startnet installed; probe.cmd and its watchers stay out (wb2 profile)'
+        }
+        elseif ($Probe) {
             Copy-Item -LiteralPath $probeFile -Destination (Join-Path $system32 'probe.cmd') -Force
             Copy-Item -LiteralPath $watchdog -Destination (Join-Path $system32 'probe-watchdog.cmd') -Force
             Copy-Item -LiteralPath $sync -Destination (Join-Path $system32 'probe-sync.cmd') -Force
@@ -288,18 +304,72 @@ function Invoke-ExplorerStep {
             $logonPatterns = Read-Whitelist -Path (Join-Path $repoRoot 'src/filelists/70-logon.txt')
             Export-WimFiles -WimPath $installWim -Index 1 `
                 -Destination $paths.Mount -Patterns $logonPatterns
+            # 26300 keeps tsdiscon/tscon only in WinSxS, and those copies are
+            # DCS-compressed (not loadable PEs). Copy the Microsoft-signed
+            # host System32 binaries after signature verification, or the
+            # bootstrap falls into its "tsdiscon missing" cmd-prompt branch.
+            Copy-SignedHostToolsToSystem32 -MountDir $paths.Mount `
+                -Names @('tsdiscon.exe', 'tscon.exe')
+            # dwm.exe is deliberately NOT asserted here: it comes from
+            # 40-components.txt, which the later Components step extracts and
+            # verifies (Install-Components). Asserting it in the Explorer step
+            # only passed while a stale mount from a prior full build happened
+            # to contain it; a clean build fails because Components has not
+            # run yet. Keep the early assertions limited to files this step
+            # actually places (tsdiscon/tscon from the signed host tools and
+            # whoami from 70-logon.txt).
+            foreach ($required in @('tsdiscon.exe', 'tscon.exe', 'whoami.exe', 'runas.exe')) {
+                Assert-PathExists -Path (Join-Path $paths.Mount "Windows\System32\$required") `
+                    -Label "native logon component $required"
+            }
+            # WimBuilder2-proven account/security assets: secedit security
+            # template (EnableAdminAccount=1), LSAgetRights.exe (SYSTEM-class
+            # token privileges for RID 500), UsrClass.dat and a pre-created
+            # Administrator NTUSER.DAT. Without these AutoAdminLogon silently
+            # fails / the new session's shell cannot get a valid token.
+            Install-NativeLogonAssets -MountDir $paths.Mount -RepoRoot $repoRoot
+
+            # WinPE ships Administrator DISABLED, and the v6 logon is a real
+            # Winlogon logon (SystemSetupInProgress=0 in 26-native-logon.reg),
+            # so AutoAdminLogon needs a usable account in the image itself.
+            # A runtime `net user /active:yes` cannot help: wim-boot writes
+            # live in the RAM overlay and vanish on reboot.
+            Write-Step 'enabling built-in Administrator in the offline SAM'
+            $null = Set-OfflineAdminState -SamPath (Join-Path $paths.Mount 'Windows\System32\config\SAM')
         }
         # 10 before 20 on purpose: 20-explorer.reg overrides the Winlogon
         # Shell pointer that 10-pe-base.reg sets (PECMD is launched from
         # startnet.cmd; Explorer is the desktop shell).
         $regFiles = @('10-pe-base.reg', '20-explorer.reg') |
             ForEach-Object { Join-Path $repoRoot "src/registry/$_" }
+        $systemRegFiles = @()
         if ($NativeLogonExperiment) {
             $regFiles += Join-Path $repoRoot 'src/registry/25-native-logon-experiment.reg'
+            $regFiles += Join-Path $repoRoot 'src/registry/26-native-logon.reg'
+            # TextInputManagementService + Setup\AllowStart whitelist: required
+            # for Ctrl+Alt+Del (SAS) and the interactive logon UI on 24H2 PE.
+            # Both the manual 24H2 PE guide and WimBuilder2 SwitchToAdmin add it.
+            $regFiles += Join-Path $repoRoot 'src/registry/27-textinput-service.reg'
+            # seclogon / SENS / Appinfo / Themes / Schedule service definitions.
+            # boot.wim ships seclogon as a STUB (Start only, no ImagePath, no
+            # Parameters\ServiceDll), so `sc start seclogon` always failed and
+            # tsdiscon could never build the Administrator session. This file
+            # writes the complete definitions plus their Setup\AllowStart keys.
+            $regFiles += Join-Path $repoRoot 'src/registry/28-logon-services.reg'
+            # Invoke-RegistryScript imports every file listed in RegFiles and
+            # routes a file to the SYSTEM writer when its LEAF NAME appears
+            # in SystemRegFiles (not its full path). SYSTEM-hive keys such as
+            # Setup / Lsa / service start types are not writable from the
+            # runner's admin token, so route 26/27/28 like 40-uwp.reg.
+            $systemRegFiles += '26-native-logon.reg'
+            $systemRegFiles += '27-textinput-service.reg'
+            $systemRegFiles += '28-logon-services.reg'
         }
-        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles
+        Invoke-RegistryScript -MountDir $paths.Mount -RegFiles $regFiles `
+            -SystemRegFiles $systemRegFiles
         Set-BootShell -MountDir $paths.Mount -RepoRoot $repoRoot `
-            -NativeLogonExperiment:$NativeLogonExperiment
+            -NativeLogonExperiment:$NativeLogonExperiment `
+            -UwpProfile:$script:UwpProfile
         Assert-ExplorerPresent -MountDir $paths.Mount
     }
     catch {
@@ -412,6 +482,36 @@ function Invoke-UwpStep {
         Assert-WerLocalDumps -MountDir $paths.Mount
         Register-ProvisionedAppx -MountDir $paths.Mount -PackageNames (Get-UwpDefaults)
         Assert-UwpReady -MountDir $paths.Mount
+    }
+    catch {
+        Dismount-WimImage -MountDir $paths.Mount
+        throw
+    }
+    Dismount-WimImage -MountDir $paths.Mount -Commit
+
+    Assert-BootWimSize -WimPath $mediaBoot
+}
+
+function Invoke-UwpChainStep {
+    <#
+        .SYNOPSIS
+            Stage 'wb2': the WimBuilder2 UWP chain, ported.
+
+        .DESCRIPTION
+            Runs src/uwp manifests in wb2's order (src/build/lib/UwpChain.ps1).
+            Kept separate from Invoke-UwpStep so the hand-derived step stays
+            available for the existing stages; the two are alternatives, not a
+            sequence, because both install the same AppX file set.
+    #>
+    Write-Step 'installing the WimBuilder2 UWP chain (src/uwp)'
+    $mediaBoot = Join-Path $paths.Media 'sources/boot.wim'
+    $installWim = Join-Path $paths.Base 'install.wim'
+    Assert-PathExists -Path $mediaBoot -Label 'boot.wim'
+    Assert-PathExists -Path $installWim -Label 'install.wim'
+
+    Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
+    try {
+        Install-WbUwpChain -InstallWim $installWim -MountDir $paths.Mount -RepoRoot $repoRoot
     }
     catch {
         Dismount-WimImage -MountDir $paths.Mount
@@ -572,6 +672,7 @@ foreach ($step in $steps) {
         'runtimes'  { Invoke-RuntimesStep }
         'components' { Invoke-ComponentsStep }
         'uwp'       { Invoke-UwpStep }
+        'uwpchain'  { Invoke-UwpChainStep }
         'payload'   { Invoke-PayloadStep }
         'brand'     { Invoke-BrandStep }
         'installer' { Invoke-InstallerStep }

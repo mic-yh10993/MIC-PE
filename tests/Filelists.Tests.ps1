@@ -165,10 +165,30 @@ Describe 'whitelists' {
         $path = Join-Path $script:ListDir '70-logon.txt'
         Test-Path -LiteralPath $path | Should -BeTrue
         $entries = Read-Whitelist -Path $path
-        $entries.Count | Should -Be 20
+        # Grows with the logon work; the exact count is not the contract,
+        # the required entries below are.
+        $entries.Count | Should -BeGreaterOrEqual 56
         $entries | Should -Contain 'Windows\System32\LogonUI.exe'
         $entries | Should -Contain 'Windows\System32\winlogon.exe'
         $entries | Should -Contain 'Windows\System32\userinit.exe'
+        # runas.exe is the launcher for the Administrator shell (seclogon ->
+        # CreateProcessWithLogonW). boot.wim does not carry it; install.wim does.
+        $entries | Should -Contain 'Windows\System32\runas.exe'
+        # TabSvc.dll backs TextInputManagementService (Ctrl+Alt+Del / SAS).
+        $entries | Should -Contain 'Windows\System32\TabSvc.dll'
+        # LogonUI is a XAML app: it needs the Client image's imageres.dll and
+        # the CoreMessaging pair, or it dies at startup (0xEF at boot logo).
+        $entries | Should -Contain 'Windows\System32\imageres.dll'
+        $entries | Should -Contain 'Windows\System32\CoreMessaging.dll'
+        $entries | Should -Contain 'Windows\System32\Windows.UI.Xaml.Resources.dll'
+        $entries | Should -Contain 'Windows\System32\zh-CN\TabSvc.dll.mui'
+        # LogonUI / Credential Provider / XAML chain from WimBuilder2's
+        # SwitchToAdmin. A real Winlogon interactive logon cannot render the
+        # secure desktop / shell without these (black screen, dead SAS).
+        $entries | Should -Contain 'Windows\System32\AuthExt.dll'
+        $entries | Should -Contain 'Windows\System32\Windows.UI.Xaml.dll'
+        $entries | Should -Contain 'Windows\System32\credprovhost.dll'
+        $entries | Should -Contain 'Windows\SystemResources\Windows.UI.Logon\Windows.UI.Logon.pri'
         $entries | Should -Contain 'Windows\System32\authui.dll'
         $entries | Should -Contain 'Windows\System32\SmartcardCredentialProvider.dll'
         $entries | Should -Contain 'Windows\System32\lsasrv.dll'
@@ -183,6 +203,18 @@ Describe 'whitelists' {
         $entries | Should -Contain 'Windows\System32\sihost.exe'
         $entries | Should -Contain 'Windows\System32\ShellAppRuntime.exe'
         $entries | Should -Contain 'Windows\System32\whoami.exe'
+        # tsdiscon is the session switch that replaces the old, non-working
+        # `shutdown /l` transition. UsrClass.dat is required to build the
+        # Administrator profile on 22621+; without it Winlogon falls back
+        # to SYSTEM and the taskbar/Start never appear.
+        # 26300 carries these only under WinSxS; Copy-WimWinSxSFilesToSystem32
+        # resolves the newest component copy after extraction. Listing the
+        # System32 paths here would be silently ignored by --nullglob.
+        $entries | Should -Not -Contain 'Windows\System32\tsdiscon.exe'
+        $entries | Should -Not -Contain 'Windows\System32\tscon.exe'
+        $entries | Should -Contain 'Windows\System32\secedit.exe'
+        $entries | Should -Contain 'Windows\System32\AppxSysprep.dll'
+        $entries | Should -Contain 'Users\Default\AppData\Local\Microsoft\Windows\UsrClass.dat'
         $entries | Should -Contain 'Windows\SystemResources\Windows.UI.Logon\Windows.UI.Logon.pri'
         $entries | Should -Contain 'Windows\SystemResources\Windows.UI.Logon\pris\Windows.UI.Logon.zh-CN.pri'
         $entries | Should -Contain 'Windows\System32\zh-CN\seclogon.dll.mui'

@@ -28,6 +28,11 @@ param(
 
     [string] $QemuPath = 'qemu-system-x86_64',
 
+    # Guest resources. Defaults match Invoke-QemuVerify so CI behaviour is
+    # unchanged; local runs can pass 2 vCPU / 4096 MB for UWP-in-PE.
+    [int] $MemoryMb = 4096,
+    [int] $CpuCount = 4,
+
     [ValidateSet('auto', 'uefi', 'bios')]
     [string] $Firmware = 'auto',
 
@@ -65,11 +70,13 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # empty and the Invoke-QemuVerify call died on parameter binding (runs
 # 43884981629 and 43891758991 both failed exactly this way). Save the three
 # colliding parameters first and restore them right after.
-$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; Firmware = $Firmware; FirmwarePath = $FirmwarePath; DataDisks = $DataDisks; MirrorDir = $MirrorDir }
+$dotSourceParams = @{ Iso = $Iso; TimeoutMin = $TimeoutMin; QemuPath = $QemuPath; MemoryMb = $MemoryMb; CpuCount = $CpuCount; Firmware = $Firmware; FirmwarePath = $FirmwarePath; DataDisks = $DataDisks; MirrorDir = $MirrorDir }
 . (Join-Path $PSScriptRoot 'Invoke-QemuVerify.ps1') -ParseOnly
 $Iso = $dotSourceParams.Iso
 $TimeoutMin = $dotSourceParams.TimeoutMin
 $QemuPath = $dotSourceParams.QemuPath
+$MemoryMb = $dotSourceParams.MemoryMb
+$CpuCount = $dotSourceParams.CpuCount
 $Firmware = $dotSourceParams.Firmware
 $FirmwarePath = $dotSourceParams.FirmwarePath
 $DataDisks = $dotSourceParams.DataDisks
@@ -96,8 +103,9 @@ Write-SubStep "share: $shareDir"
 Write-SubStep "mirror: $mirrorDir"
 
 $result = Invoke-QemuVerify -Iso $Iso -ShareDir $shareDir -TimeoutMin $TimeoutMin `
-    -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -Firmware $Firmware `
-    -FirmwarePath $FirmwarePath -DataDisks $DataDisks -MirrorDir $mirrorDir
+    -ScreenshotDir $shotDir -LogPath $qemuLog -QemuPath $QemuPath -MemoryMb $MemoryMb `
+    -CpuCount $CpuCount -Firmware $Firmware -FirmwarePath $FirmwarePath `
+    -DataDisks $DataDisks -MirrorDir $mirrorDir
 
 # A leaked monitor reply can turn $result into an Object[] instead of the
 # single result object (run 44046530462 threw "The property 'ProbeSeen'

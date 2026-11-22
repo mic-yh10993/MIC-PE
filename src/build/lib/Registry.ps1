@@ -629,3 +629,481 @@ function Invoke-RegistryScript {
         }
     }
 }
+
+function ConvertTo-HiveRelativePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FullPath
+    )
+
+    # Accepts HKLM\... / HKEY_LOCAL_MACHINE\... and returns the part below the
+    # root, which is what the registry API expects.
+    $text = $FullPath.Trim()
+    if ($text -match '^HKLM\\(.+)$') { return $Matches[1] }
+    if ($text -match '^HKEY_LOCAL_MACHINE\\(.+)$') { return $Matches[1] }
+    throw [System.ArgumentException]::new("Not an HKLM path: $FullPath")
+}
+
+# Registry trees from a full Windows image contain keys owned by
+# NT SERVICE\TrustedInstaller where Administrators hold only ReadKey - for
+# example AppModel\Mappings\S-1-15-2-*. Some are not even readable
+# (AppModel\CloudExtensions), so a plain "copy everything" loop either fails
+# outright or silently loses a subtree. Copy-RegistryKeyTree therefore repairs
+# access on demand (take ownership, grant Administrators, retry once) and
+# records anything that still refuses, so a build can report exactly what it
+# could not carry over instead of dying on the first locked key.
+$script:RegCopyDenied = [System.Collections.Generic.List[string]]::new()
+$script:RegCopyUnreadable = [System.Collections.Generic.List[string]]::new()
+
+function Reset-RegistryCopyDenied {
+    [CmdletBinding()]
+    param()
+
+    $script:RegCopyDenied.Clear()
+    $script:RegCopyUnreadable.Clear()
+}
+
+function Get-RegistryCopyDenied {
+    [CmdletBinding()]
+    param()
+
+    # ToArray() (not a comma-wrapped literal): an empty list then yields no
+    # pipeline output, so "@(Get-RegistryCopyDenied).Count" is 0 rather than 1.
+    return $script:RegCopyDenied.ToArray()
+}
+
+function Get-RegistryCopyUnreadable {
+    [CmdletBinding()]
+    param()
+
+    return $script:RegCopyUnreadable.ToArray()
+}
+
+function Test-RegistryAccessException {
+    <#
+        .SYNOPSIS
+            True when an error record means "the ACL said no".
+
+        .DESCRIPTION
+            The registry API raises two different shapes for the same condition,
+            and PowerShell wraps both in MethodInvocationException:
+
+              * read denial  -> SecurityException      ("Requested registry
+                                access is not allowed.")
+              * write denial -> UnauthorizedAccessException ("Access to the
+                                registry key '...' is denied.")
+
+            Catching only UnauthorizedAccessException misses every read denial,
+            which is exactly how AppModel\CloudExtensions broke the chain.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $ErrorRecord)
+
+    $ex = $ErrorRecord.Exception
+    while ($null -ne $ex) {
+        if ($ex -is [System.UnauthorizedAccessException] -or
+            $ex -is [System.Security.SecurityException]) {
+            return $true
+        }
+        $ex = $ex.InnerException
+    }
+    return $false
+}
+
+function Initialize-RegistryWritePrivileges {
+    <#
+        .SYNOPSIS
+            Compiles the token helper that enables SeTakeOwnershipPrivilege.
+
+        .DESCRIPTION
+            An elevated token carries SeTakeOwnershipPrivilege and
+            SeRestorePrivilege but leaves them disabled, so
+            RegistryRights.TakeOwnership fails with "Requested registry access
+            is not allowed." until AdjustTokenPrivileges turns them on. There is
+            no managed API for that, hence the tiny P/Invoke shim.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ('Micpe.RegistryToken' -as [type]) { return }
+
+    Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Micpe
+{
+    public static class RegistryToken
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Luid { public uint Low; public int High; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenPrivileges
+        {
+            public uint Count;
+            public Luid Privilege;
+            public uint Attributes;
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool LookupPrivilegeValue(string system, string name, out Luid luid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool AdjustTokenPrivileges(
+            IntPtr token, bool disableAll, ref TokenPrivileges state, uint length,
+            IntPtr previous, IntPtr returnLength);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        public static bool Enable(string name)
+        {
+            IntPtr token;
+            // TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES
+            if (!OpenProcessToken(GetCurrentProcess(), 0x0008 | 0x0020, out token)) return false;
+            try
+            {
+                Luid luid;
+                if (!LookupPrivilegeValue(null, name, out luid)) return false;
+                TokenPrivileges state = new TokenPrivileges();
+                state.Count = 1;
+                state.Privilege = luid;
+                state.Attributes = 0x00000002; // SE_PRIVILEGE_ENABLED
+                if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) return false;
+                // AdjustTokenPrivileges returns TRUE even when the privilege was
+                // not held; the real answer is ERROR_NOT_ALL_ASSIGNED (1300).
+                return Marshal.GetLastWin32Error() == 0;
+            }
+            finally
+            {
+                CloseHandle(token);
+            }
+        }
+    }
+}
+'@
+}
+
+function Repair-RegistryKeyAccess {
+    <#
+        .SYNOPSIS
+            Takes ownership of one key and grants Administrators full control.
+
+        .DESCRIPTION
+            Used when a read or a write hits a TrustedInstaller-owned key.
+            Ownership goes to BUILTIN\Administrators, then a FullControl ACE with
+            container inheritance is added so everything underneath stays
+            accessible. Only keys that actually refused access are touched, so a
+            normal copy leaves the image ACLs alone.
+
+            Repairing a key inside the scratch source hive is harmless (that hive
+            is re-extracted every build); repairing one inside the mounted image
+            is what the servicing stack does when it takes over a package key.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $FullPath)
+
+    Initialize-RegistryWritePrivileges
+    $null = [Micpe.RegistryToken]::Enable('SeTakeOwnershipPrivilege')
+    $null = [Micpe.RegistryToken]::Enable('SeRestorePrivilege')
+
+    $sub = ConvertTo-HiveRelativePath -FullPath $FullPath
+    $admins = [System.Security.Principal.NTAccount]::new('BUILTIN', 'Administrators')
+    $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $ownerKey = $null
+        try {
+            $ownerKey = $root.OpenSubKey($sub,
+                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+        }
+        catch {
+            $ownerKey = $null
+        }
+        if ($null -eq $ownerKey) {
+            return $false
+        }
+        try {
+            $security = [Microsoft.Win32.RegistryAclExtensions]::GetAccessControl(
+                $ownerKey, [System.Security.AccessControl.AccessControlSections]::Owner)
+            $security.SetOwner($admins)
+            [Microsoft.Win32.RegistryAclExtensions]::SetAccessControl($ownerKey, $security)
+        }
+        finally {
+            $ownerKey.Dispose()
+        }
+
+        # Ownership alone grants nothing: reopen for WRITE_DAC and add the ACE.
+        $daclKey = $null
+        try {
+            $daclKey = $root.OpenSubKey($sub,
+                [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+        }
+        catch {
+            $daclKey = $null
+        }
+        if ($null -eq $daclKey) {
+            return $false
+        }
+        try {
+            $security = [Microsoft.Win32.RegistryAclExtensions]::GetAccessControl(
+                $daclKey,
+                [System.Security.AccessControl.AccessControlSections]::Access)
+            $rule = [System.Security.AccessControl.RegistryAccessRule]::new(
+                $admins,
+                [System.Security.AccessControl.RegistryRights]::FullControl,
+                [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
+                [System.Security.AccessControl.PropagationFlags]::None,
+                [System.Security.AccessControl.AccessControlType]::Allow)
+            $security.AddAccessRule($rule)
+            [Microsoft.Win32.RegistryAclExtensions]::SetAccessControl($daclKey, $security)
+        }
+        finally {
+            $daclKey.Dispose()
+        }
+    }
+    catch {
+        Write-Warn ("access repair failed: {0} ({1})" -f $FullPath, $_.Exception.Message)
+        return $false
+    }
+    finally {
+        $root.Dispose()
+    }
+
+    Write-SubStep ("took ownership of {0}" -f $FullPath)
+    return $true
+}
+
+function Open-RegistrySubKeyWithRepair {
+    <#
+        .SYNOPSIS
+            Opens a subkey read-only, repairing the ACL once if it refuses.
+
+        .DESCRIPTION
+            Returns @{ Key; Status } with Status = ok | missing | denied, so the
+            caller can tell "this build does not have the key" (skip quietly)
+            from "the ACL refused even after repair" (report it).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [Microsoft.Win32.RegistryKey] $Parent,
+        [Parameter(Mandatory = $true)] [string] $Name,
+        [Parameter(Mandatory = $true)] [string] $FullPath
+    )
+
+    try {
+        $key = $Parent.OpenSubKey($Name, $false)
+        if ($null -ne $key) { return [pscustomobject]@{ Key = $key; Status = 'ok' } }
+        # No exception and no key: the key is simply not in this image.
+        return [pscustomobject]@{ Key = $null; Status = 'missing' }
+    }
+    catch {
+        if (-not (Test-RegistryAccessException -ErrorRecord $_)) { throw }
+        if (-not (Repair-RegistryKeyAccess -FullPath $FullPath)) {
+            return [pscustomobject]@{ Key = $null; Status = 'denied' }
+        }
+        try {
+            $key = $Parent.OpenSubKey($Name, $false)
+            if ($null -ne $key) { return [pscustomobject]@{ Key = $key; Status = 'ok' } }
+            return [pscustomobject]@{ Key = $null; Status = 'missing' }
+        }
+        catch {
+            return [pscustomobject]@{ Key = $null; Status = 'denied' }
+        }
+    }
+}
+
+function Copy-RegistryKeyNode {
+    <#
+        .SYNOPSIS
+            Recursively copies values and subkeys of one key pair.
+
+        .DESCRIPTION
+            Paths are passed in explicitly instead of read back from
+            RegistryKey.Name: after a denied call the handle may already be
+            disposed and Name comes back empty, which turns a useful warning into
+            an unreadable one.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [Microsoft.Win32.RegistryKey] $Source,
+        [Parameter(Mandatory = $true)] [Microsoft.Win32.RegistryKey] $Target,
+        [Parameter(Mandatory = $true)] [string] $SourcePath,
+        [Parameter(Mandatory = $true)] [string] $TargetPath
+    )
+
+    # Values first: SetValue with the source's own kind keeps REG_NONE,
+    # REG_BINARY, REG_DWORD, REG_QWORD, REG_SZ, REG_EXPAND_SZ and REG_MULTI_SZ
+    # byte-for-byte identical. DoNotExpandEnvironmentNames stops the API from
+    # resolving %SystemRoot% into the build host's path.
+    try {
+        foreach ($valueName in $Source.GetValueNames()) {
+            $kind = $Source.GetValueKind($valueName)
+            $data = $Source.GetValue($valueName, $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($null -eq $data) {
+                # Zero-length REG_NONE / REG_BINARY reads back as $null.
+                $data = [byte[]]::new(0)
+            }
+            $Target.SetValue($valueName, $data, $kind)
+        }
+    }
+    catch {
+        if (-not (Test-RegistryAccessException -ErrorRecord $_)) { throw }
+        $script:RegCopyDenied.Add($TargetPath)
+        Write-Warn ("values refused by {0}, key left as-is" -f $TargetPath)
+    }
+
+    foreach ($subName in $Source.GetSubKeyNames()) {
+        $childSource = "$SourcePath\$subName"
+        $childTarget = "$TargetPath\$subName"
+
+        $probe = Open-RegistrySubKeyWithRepair -Parent $Source -Name $subName -FullPath $childSource
+        if ($probe.Status -ne 'ok') {
+            # 'missing' is normal (the key is not in this build); only 'denied'
+            # means the ACL won even after the ownership repair.
+            if ($probe.Status -eq 'denied') {
+                $script:RegCopyUnreadable.Add($childSource)
+                Write-Warn ("source unreadable, subtree skipped: {0}" -f $childSource)
+            }
+            continue
+        }
+        $sourceSub = $probe.Key
+        try {
+            $targetSub = $null
+            try {
+                $targetSub = $Target.CreateSubKey($subName, $true)
+            }
+            catch {
+                if (-not (Test-RegistryAccessException -ErrorRecord $_)) { throw }
+                # The child already exists with a DACL that keeps Administrators
+                # read-only (AppModel\Mappings\S-1-15-*). Take ownership of that
+                # exact key, then retry once.
+                if (Repair-RegistryKeyAccess -FullPath $childTarget) {
+                    try {
+                        $targetSub = $Target.CreateSubKey($subName, $true)
+                    }
+                    catch {
+                        $targetSub = $null
+                    }
+                }
+                if ($null -eq $targetSub) {
+                    $script:RegCopyDenied.Add($childTarget)
+                    Write-Warn ("access denied, subtree left as-is: {0}" -f $childTarget)
+                    continue
+                }
+            }
+
+            if ($null -eq $targetSub) {
+                $script:RegCopyDenied.Add($childTarget)
+                continue
+            }
+            try {
+                Copy-RegistryKeyNode -Source $sourceSub -Target $targetSub `
+                    -SourcePath $childSource -TargetPath $childTarget
+            }
+            finally {
+                $targetSub.Dispose()
+            }
+        }
+        finally {
+            $sourceSub.Dispose()
+        }
+    }
+}
+
+function Copy-RegistryKeyTree {
+    <#
+        .SYNOPSIS
+            Copies one key, every subkey and every value into another hive.
+
+        .DESCRIPTION
+            WimBuilder2's RegCopy is "reg export -> rewrite the root -> reg
+            import". That text round-trip breaks on this image:
+
+              * reg.exe wraps a key path at ~100 columns WITHOUT a continuation
+                backslash, so an exported key such as
+                ...\AppModel\SystemAppData\windows.immersivecontrolpanel_cw5...
+                comes back as two physical lines and reg import rejects the whole
+                file with exit code 1 (build 2026-11-22 12:33);
+              * keys under AppModel are owned by TrustedInstaller and some
+                (AppModel\CloudExtensions) are not even readable by
+                Administrators, so import is denied there no matter how the text
+                is formatted.
+
+            Walking the tree through the registry API drops the text layer (value
+            names, value kinds, the default value and the subkey structure are
+            copied as they are) and lets a locked key be repaired on the spot:
+            take ownership, grant Administrators, retry. Anything that still
+            refuses is recorded in $script:RegCopyDenied / $script:RegCopyUnreadable
+            and the copy continues, so one locked subkey cannot abort a build.
+
+            Both hives must already be loaded (Mount-RegistryHive) and both paths
+            are absolute under HKLM, e.g. HKLM\PE-SRC-SOFT\Classes\Local Settings
+            \... . Returns $false when the source key is absent or unreadable, so
+            the caller can report it exactly like a failed reg export.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $SourcePath,
+        [Parameter(Mandatory = $true)] [string] $TargetPath
+    )
+
+    $sourceSub = ConvertTo-HiveRelativePath -FullPath $SourcePath
+    $targetSub = ConvertTo-HiveRelativePath -FullPath $TargetPath
+
+    # Pin the 64-bit view: a 32-bit host would otherwise redirect and we would
+    # copy into WOW6432Node without noticing.
+    $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $probe = Open-RegistrySubKeyWithRepair -Parent $root -Name $sourceSub -FullPath $SourcePath
+        if ($probe.Status -ne 'ok') {
+            if ($probe.Status -eq 'denied') { $script:RegCopyUnreadable.Add($SourcePath) }
+            return $false
+        }
+        $sourceKey = $probe.Key
+        try {
+            $targetKey = $null
+            try {
+                $targetKey = $root.CreateSubKey($targetSub, $true)
+            }
+            catch {
+                if (-not (Test-RegistryAccessException -ErrorRecord $_)) { throw }
+                if (Repair-RegistryKeyAccess -FullPath $TargetPath) {
+                    $targetKey = $root.CreateSubKey($targetSub, $true)
+                }
+            }
+            if ($null -eq $targetKey) {
+                throw [System.InvalidOperationException]::new("cannot create target key: $TargetPath")
+            }
+            try {
+                Copy-RegistryKeyNode -Source $sourceKey -Target $targetKey `
+                    -SourcePath $SourcePath -TargetPath $TargetPath
+            }
+            finally {
+                $targetKey.Dispose()
+            }
+        }
+        finally {
+            $sourceKey.Dispose()
+        }
+    }
+    finally {
+        $root.Dispose()
+    }
+
+    return $true
+}

@@ -1,0 +1,989 @@
+<policyDefinitions revision="1.0" schemaVersion="1.0">
+  <policyNamespaces>
+    <target prefix="fullarmor" namespace="FullArmor.Policies.7F373782_3A56_44DC_B314_39D6F6FEFF79" />
+    <using prefix="windows" namespace="Microsoft.Policies.Windows" />
+  </policyNamespaces>
+  <supersededAdm fileName="" />
+  <resources minRequiredRevision="1.0" />
+  <categories>
+    <category name="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" displayName="$(string.CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389)" explainText="$(string.CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389_Help)" />
+    <category name="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" displayName="$(string.CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E)">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+    </category>
+  </categories>
+  <policies>
+    <policy name="POL_E5092B03_547B_4126_8C9C_6885C2333DB6" class="Machine" displayName="$(string.POL_E5092B03_547B_4126_8C9C_6885C2333DB6)" explainText="$(string.POL_E5092B03_547B_4126_8C9C_6885C2333DB6_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ForceGlobal">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_BE19D006_ECD5_47A4_8C3D_6E115E465F1F" class="Both" displayName="$(string.POL_BE19D006_ECD5_47A4_8C3D_6E115E465F1F)" explainText="$(string.POL_BE19D006_ECD5_47A4_8C3D_6E115E465F1F_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowConfigUI">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_4D75B0E8_EFDD_4FF5_ACE0_C162986BBCFB" class="Both" displayName="$(string.POL_4D75B0E8_EFDD_4FF5_ACE0_C162986BBCFB)" explainText="$(string.POL_4D75B0E8_EFDD_4FF5_ACE0_C162986BBCFB_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowRunRightClick">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_0EFBB377_B60A_4862_80C5_563333ACC288" class="Both" displayName="$(string.POL_0EFBB377_B60A_4862_80C5_563333ACC288)" explainText="$(string.POL_0EFBB377_B60A_4862_80C5_563333ACC288_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowShutdownRightClick">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_98CC66FC_8DAC_496B_BA6D_18AB9CE39D85" class="Both" displayName="$(string.POL_98CC66FC_8DAC_496B_BA6D_18AB9CE39D85)" explainText="$(string.POL_98CC66FC_8DAC_496B_BA6D_18AB9CE39D85_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="TaskTrans">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_636BC3F6_9B35_41C0_B5C5_ACB70BC31D94" class="Both" displayName="$(string.POL_636BC3F6_9B35_41C0_B5C5_ACB70BC31D94)" explainText="$(string.POL_636BC3F6_9B35_41C0_B5C5_ACB70BC31D94_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="SolidAlpha">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_AA307150_1870_4C48_A9E5_5D97AF1D76F0" class="Both" displayName="$(string.POL_AA307150_1870_4C48_A9E5_5D97AF1D76F0)" explainText="$(string.POL_AA307150_1870_4C48_A9E5_5D97AF1D76F0_Help)" presentation="$(presentation.POL_AA307150_1870_4C48_A9E5_5D97AF1D76F0)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="CustomColour">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <text id="TXT_92AD028C_2232_49A9_B949_03AC122842F1" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="CustomColourV" maxLength="10" />
+      </elements>
+    </policy>
+    <policy name="POL_59C8D1F1_3576_4B3A_9763_0D6205736738" class="Both" displayName="$(string.POL_59C8D1F1_3576_4B3A_9763_0D6205736738)" explainText="$(string.POL_59C8D1F1_3576_4B3A_9763_0D6205736738_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="RecentApps">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_C2D7032C_06E0_49BC_BA21_E30B57841D45" class="Both" displayName="$(string.POL_C2D7032C_06E0_49BC_BA21_E30B57841D45)" explainText="$(string.POL_C2D7032C_06E0_49BC_BA21_E30B57841D45_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="LargeIcons">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>0</string>
+</enabledValue>
+<disabledValue>
+<string>1</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_B72FF066_4A1B_4C3B_AE32_2B6EB60E0A64" class="Both" displayName="$(string.POL_B72FF066_4A1B_4C3B_AE32_2B6EB60E0A64)" explainText="$(string.POL_B72FF066_4A1B_4C3B_AE32_2B6EB60E0A64_Help)" presentation="$(presentation.POL_B72FF066_4A1B_4C3B_AE32_2B6EB60E0A64)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ItemCountA">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <decimal id="DXT_B58862CB_A1B7_4A5E_92F0_B9C1C51B6FF7" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ItemCount" required="true" maxValue="40" storeAsText="true" />
+      </elements>
+    </policy>
+    <policy name="POL_DD6A38AE_4E12_41BB_A5E6_0EB0C200C320" class="Both" displayName="$(string.POL_DD6A38AE_4E12_41BB_A5E6_0EB0C200C320)" explainText="$(string.POL_DD6A38AE_4E12_41BB_A5E6_0EB0C200C320_Help)" presentation="$(presentation.POL_DD6A38AE_4E12_41BB_A5E6_0EB0C200C320)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="SkinIndex2">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_51AE143E_FAC5_4967_A0F3_3D6194EE1350" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="SkinIndex">
+          <item displayName="$(string.ITM_F12F42E7_BFAB_46E5_A1BB_F9C05A6A4688)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_244E7AC7_14AD_4D4D_9205_5BBCAE66FB23)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_1D41D2F3_37C2_4331_8967_3AD5327549EE)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_ED5B9CA9_D132_4CB8_A42C_4E899E417C63)">
+            <value>
+              <string>3</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_805B4C7F_5857_4488_A200_633E406BA673)">
+            <value>
+              <string>4</string>
+            </value>
+          </item>
+	  <item displayName="$(string.ITM_805B4C7F_5857_4488_A201_633E406BA673)">
+            <value>
+              <string>5</string>
+            </value>
+          </item>
+	  <item displayName="$(string.ITM_805B4C7F_5857_4488_A202_633E406BA673)">
+            <value>
+              <string>6</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_4B40D99C_E0F1_402A_B9A7_14085EB9922C" class="Both" displayName="$(string.POL_4B40D99C_E0F1_402A_B9A7_14085EB9922C)" explainText="$(string.POL_4B40D99C_E0F1_402A_B9A7_14085EB9922C_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="StandardStartMenu">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_E162549B_B4C7_4A78_AEAC_5C91715A71B6" class="Both" displayName="$(string.POL_E162549B_B4C7_4A78_AEAC_5C91715A71B6)" explainText="$(string.POL_E162549B_B4C7_4A78_AEAC_5C91715A71B6_Help)" presentation="$(presentation.POL_E162549B_B4C7_4A78_AEAC_5C91715A71B6)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Size1">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_B416685B_368F_4812_9C6F_B763F66AAA2E" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Size">
+          <item displayName="$(string.ITM_312BF2EC_3019_4A79_BF05_5F4A0F91F1D3)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_629FF822_3384_4605_B70F_EE0999663C97)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_2B521E84_B56D_457C_A27E_EF3CF14BA19C)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_4BBDF227_502B_4D00_8EBF_20853406A11A)">
+            <value>
+              <string>3</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_5E3933F7_B5DA_43C1_B026_941897B5FEE8)">
+            <value>
+              <string>4</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_FEDD57A5_9501_44B6_A32B_306066126FBA" class="Both" displayName="$(string.POL_FEDD57A5_9501_44B6_A32B_306066126FBA)" explainText="$(string.POL_FEDD57A5_9501_44B6_A32B_306066126FBA_Help)" presentation="$(presentation.POL_FEDD57A5_9501_44B6_A32B_306066126FBA)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="DefaultApps">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_27B74C6F_8EB6_4F06_AA1D_3061BF94E508" class="Both" displayName="$(string.POL_27B74C6F_8EB6_4F06_AA1D_3061BF94E508)" explainText="$(string.POL_27B74C6F_8EB6_4F06_AA1D_3061BF94E508_Help)" presentation="$(presentation.POL_27B74C6F_8EB6_4F06_AA1D_3061BF94E508)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="PowerButtonMode2">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_9F9BCF36_028C_4189_810B_04F73A53D2C7" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="PowerButtonMode">
+          <item displayName="$(string.ITM_92C964DA_54AC_4067_9B4A_F83E6F209886)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_3513D51E_4D6B_4850_A0BA_CE38F0E2BAD6)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_0C7AF42E_079D_4A8C_91A0_4C63F133A7AA)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_E2B957B0_3008_49DE_A0CF_08E3F5E4F6B7)">
+            <value>
+              <string>3</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_BCF60FD9_B0A3_4141_A63E_E3D8BDFA7ACF)">
+            <value>
+              <string>4</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_6FEFEAD9_612F_4C4E_9B68_12959F4FC5A7)">
+            <value>
+              <string>5</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_3E531B50_E1C4_4FA8_B94D_C655EF4BB7DA)">
+            <value>
+              <string>6</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_6290041C_5FA4_42A7_8912_5C0B5F2C617D" class="Both" displayName="$(string.POL_6290041C_5FA4_42A7_8912_5C0B5F2C617D)" explainText="$(string.POL_6290041C_5FA4_42A7_8912_5C0B5F2C617D_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Show8Ctrl">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+     <enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_A56D41FD_EDC7_408A_A32A_DA965684D2FC" class="Both" displayName="$(string.POL_A56D41FD_EDC7_408A_A32A_DA965684D2FC)" explainText="$(string.POL_A56D41FD_EDC7_408A_A32A_DA965684D2FC_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="StartButtonAction">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_5EC0C68D_7017_487C_BCEB_E5ABECBF3578" class="Both" displayName="$(string.POL_5EC0C68D_7017_487C_BCEB_E5ABECBF3578)" explainText="$(string.POL_5EC0C68D_7017_487C_BCEB_E5ABECBF3578_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="WinButtonAction">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_E2DFF273_2165_464E_ACDD_81110D6F2A0E" class="Both" displayName="$(string.POL_E2DFF273_2165_464E_ACDD_81110D6F2A0E)" explainText="$(string.POL_E2DFF273_2165_464E_ACDD_81110D6F2A0E_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="MetroWinButtonAction">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_13C5B435_6F2D_4863_94DF_2CEC4F35084B" class="Both" displayName="$(string.POL_13C5B435_6F2D_4863_94DF_2CEC4F35084B)" explainText="$(string.POL_13C5B435_6F2D_4863_94DF_2CEC4F35084B_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="MetroStartMode">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_BDDD092B_465B_4D2C_973A_1616D2252F8E" class="Both" displayName="$(string.POL_BDDD092B_465B_4D2C_973A_1616D2252F8E)" explainText="$(string.POL_BDDD092B_465B_4D2C_973A_1616D2252F8E_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="DisableCharmsBar">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_E360146A_9F45_493F_A23B_E16EA41CA147" class="Both" displayName="$(string.POL_E360146A_9F45_493F_A23B_E16EA41CA147)" explainText="$(string.POL_E360146A_9F45_493F_A23B_E16EA41CA147_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="DisableCharms">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_A440118A_CD90_4582_953B_857D7375F9D4" class="Both" displayName="$(string.POL_A440118A_CD90_4582_953B_857D7375F9D4)" explainText="$(string.POL_A440118A_CD90_4582_953B_857D7375F9D4_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="DisableTopLeft">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_FA63AF6F_F911_4D15_872C_BF535346696E" class="Both" displayName="$(string.POL_FA63AF6F_F911_4D15_872C_BF535346696E)" explainText="$(string.POL_FA63AF6F_F911_4D15_872C_BF535346696E_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Show8RWin">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_95D01D16_CD6B_4F0C_AB8F_79D54FDF56C2" class="Both" displayName="$(string.POL_95D01D16_CD6B_4F0C_AB8F_79D54FDF56C2)" explainText="$(string.POL_95D01D16_CD6B_4F0C_AB8F_79D54FDF56C2_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Show8RWin2">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_7D7F7F86_5D27_42D3_BFF5_68B71A0257C6" class="Both" displayName="$(string.POL_7D7F7F86_5D27_42D3_BFF5_68B71A0257C6)" explainText="$(string.POL_7D7F7F86_5D27_42D3_BFF5_68B71A0257C6_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Highlight">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_5A8A36D5_4783_4ACB_B77A_E15943A73E76" class="Both" displayName="$(string.POL_5A8A36D5_4783_4ACB_B77A_E15943A73E76)" explainText="$(string.POL_5A8A36D5_4783_4ACB_B77A_E15943A73E76_Help)" presentation="$(presentation.POL_5A8A36D5_4783_4ACB_B77A_E15943A73E76)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="StartButtonMode2">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_40CBD018_8A09_44AA_8BC5_D175F1168131" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="StartButtonMode">
+          <item displayName="$(string.ITM_B67E73E0_D69E_4A8B_ACBB_5B94D80BCFD1)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_D3B7975D_6E6C_43E4_948F_9189D184B356)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_89E6217A_3A05_4B17_8E45_FF1BB2738C6E)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+        <text id="TXT_E2120F6E_3D4A_4AA4_9DEF_8EDB04654995" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Image" />
+      </elements>
+    </policy>
+    <policy name="POL_E714AC55_D6BF_4CE4_A843_2CC21257770D" class="Both" displayName="$(string.POL_E714AC55_D6BF_4CE4_A843_2CC21257770D)" explainText="$(string.POL_E714AC55_D6BF_4CE4_A843_2CC21257770D_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="Login">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_F40DB6A8_A383_438E_81BE_13F6F6C5724F" class="Both" displayName="$(string.POL_F40DB6A8_A383_438E_81BE_13F6F6C5724F)" explainText="$(string.POL_F40DB6A8_A383_438E_81BE_13F6F6C5724F_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="AllowUnPin">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_2142FA90_2354_413D_91EE_790FDE762056" class="Both" displayName="$(string.POL_2142FA90_2354_413D_91EE_790FDE762056)" explainText="$(string.POL_2142FA90_2354_413D_91EE_790FDE762056_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="AllowPin">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_69238615_3F9E_4A72_B23E_992425E75301" class="Both" displayName="$(string.POL_69238615_3F9E_4A72_B23E_992425E75301)" explainText="$(string.POL_69238615_3F9E_4A72_B23E_992425E75301_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="AutoExpand">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_EF8448F6_B22F_4A5C_92C5_30F64B36A5B2" class="Both" displayName="$(string.POL_EF8448F6_B22F_4A5C_92C5_30F64B36A5B2)" explainText="$(string.POL_EF8448F6_B22F_4A5C_92C5_30F64B36A5B2_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowLMPinned">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_08B2C081_671C_43E2_AC29_F71A07B58334" class="Both" displayName="$(string.POL_08B2C081_671C_43E2_AC29_F71A07B58334)" explainText="$(string.POL_08B2C081_671C_43E2_AC29_F71A07B58334_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowPinned">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_13E5CCCB_3309_4521_A45F_626697F0FB22" class="Both" displayName="$(string.POL_13E5CCCB_3309_4521_A45F_626697F0FB22)" explainText="$(string.POL_13E5CCCB_3309_4521_A45F_626697F0FB22_Help)" presentation="$(presentation.POL_13E5CCCB_3309_4521_A45F_626697F0FB22)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_11">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_46BB7A83_F77A_465A_8A04_AD3BA367E0E4" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="11">
+          <item displayName="$(string.ITM_315E9931_C4C7_4729_AFE7_6B716722EBB7)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_1C899AF8_0D80_4152_AE9F_9AADD3B17081)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_83035277_9FC0_4CDA_BF73_1C0E4130736F)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_9F520867_5D3A_4613_9A15_EE9E91F822F8" class="Both" displayName="$(string.POL_9F520867_5D3A_4613_9A15_EE9E91F822F8)" explainText="$(string.POL_9F520867_5D3A_4613_9A15_EE9E91F822F8_Help)" presentation="$(presentation.POL_9F520867_5D3A_4613_9A15_EE9E91F822F8)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_5">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_F9F58D20_C43D_42FB_92BE_BD07DBE8FE0A" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="5">
+          <item displayName="$(string.ITM_CE2CEA92_0536_415B_B7C9_D75A0B4E3554)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_5BAC5AFF_D22D_4134_8549_0DE844E95BA8)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_B23D933B_6F94_4A08_992D_E9EB715EFEAF)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_C1EDE556_096B_4A56_A318_32E9EFB7CE6F" class="Both" displayName="$(string.POL_C1EDE556_096B_4A56_A318_32E9EFB7CE6F)" explainText="$(string.POL_C1EDE556_096B_4A56_A318_32E9EFB7CE6F_Help)" presentation="$(presentation.POL_C1EDE556_096B_4A56_A318_32E9EFB7CE6F)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_12">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_BC0F2D7F_CE0C_456E_A28C_F0B55FF86835" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="12">
+          <item displayName="$(string.ITM_E2229483_E48F_4D2C_A70C_096D3CB30835)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_0CC3DD7B_F5F7_467C_A301_B226D4FB9896)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_AF14E707_9394_45DA_9BD0_44A925D2A7D3)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_0EE78533_2EC4_4A60_84BF_3D19FB41EE31" class="Both" displayName="$(string.POL_0EE78533_2EC4_4A60_84BF_3D19FB41EE31)" explainText="$(string.POL_0EE78533_2EC4_4A60_84BF_3D19FB41EE31_Help)" presentation="$(presentation.POL_0EE78533_2EC4_4A60_84BF_3D19FB41EE31)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_9">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_86ACAC74_D954_42BB_BAFA_5B2AB6A870AE" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="9">
+          <item displayName="$(string.ITM_C4C37688_B2FE_4C10_AA17_8F940A9B716D)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_67B9C4B9_9B36_470D_B7F7_A285F033BC8F)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_9AF734A2_228A_4D18_9FFC_7C5BB1AF9408)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_3DF27C61_CF9B_4EB3_A506_C76491A256BE" class="Both" displayName="$(string.POL_3DF27C61_CF9B_4EB3_A506_C76491A256BE)" explainText="$(string.POL_3DF27C61_CF9B_4EB3_A506_C76491A256BE_Help)" presentation="$(presentation.POL_3DF27C61_CF9B_4EB3_A506_C76491A256BE)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_8">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_7FC1CC11_3AB2_4BA1_A011_3ED019348B60" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="8">
+          <item displayName="$(string.ITM_74129F43_01C8_47CA_B48E_BF2D148B834A)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_17CD3550_DCC0_49DF_B5FE_D83174D7ECA5)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_F63EA3E0_AA67_4415_948C_DF5AE7724DCA" class="Both" displayName="$(string.POL_F63EA3E0_AA67_4415_948C_DF5AE7724DCA)" explainText="$(string.POL_F63EA3E0_AA67_4415_948C_DF5AE7724DCA_Help)" presentation="$(presentation.POL_F63EA3E0_AA67_4415_948C_DF5AE7724DCA)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_16">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_E15BA072_0299_469F_97C4_4CD1885E4D6D" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="16">
+          <item displayName="$(string.ITM_512F228B_CF9A_4678_8524_375AB4A3E475)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_79D7F924_66BF_4A6E_AD92_63D1F47DBF05)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_BA13D457_5DBF_42AC_A845_C3A8536C562A)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_53C88A9E_6650_4A61_A6EB_694901C94EC1" class="Both" displayName="$(string.POL_53C88A9E_6650_4A61_A6EB_694901C94EC1)" explainText="$(string.POL_53C88A9E_6650_4A61_A6EB_694901C94EC1_Help)" presentation="$(presentation.POL_53C88A9E_6650_4A61_A6EB_694901C94EC1)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_20">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_5E768EA4_3A76_4FC3_B374_4C3682B5F83D" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="20">
+          <item displayName="$(string.ITM_095BB8DD_4682_4075_BA52_F86266957C99)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_B96687BB_8157_45B3_986F_6B796E8BCECD)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_F7CCD8A5_9DDF_4485_8502_A2772288C624)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_5E5679D1_C399_466E_A19C_2D1D7F8AAFF5" class="Both" displayName="$(string.POL_5E5679D1_C399_466E_A19C_2D1D7F8AAFF5)" explainText="$(string.POL_5E5679D1_C399_466E_A19C_2D1D7F8AAFF5_Help)" presentation="$(presentation.POL_5E5679D1_C399_466E_A19C_2D1D7F8AAFF5)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_13">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_6B3E00C1_9CB0_4008_8966_B3030260D7A9" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="13">
+          <item displayName="$(string.ITM_E26F48B0_764D_4D73_96E7_59A9A49FCEFB)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_2116110B_976A_4C05_BA98_41364559DD91)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_A1A4F706_98F4_4487_995A_0836CBFCA52B)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_DF38756D_C18A_4108_A0FD_09D0F759F3D7" class="Both" displayName="$(string.POL_DF38756D_C18A_4108_A0FD_09D0F759F3D7)" explainText="$(string.POL_DF38756D_C18A_4108_A0FD_09D0F759F3D7_Help)" presentation="$(presentation.POL_DF38756D_C18A_4108_A0FD_09D0F759F3D7)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_6">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_6C23878B_8A69_4FEF_9801_F0F12B31DA9F" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="6">
+          <item displayName="$(string.ITM_31BBD96E_0609_4847_9E2A_3656DCD6FCD0)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_38857776_8B9B_4A28_BDD3_52A872E2A231)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_F58BB764_EFAD_44BA_9486_64B3098B4770)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_FAEA2859_589E_4373_9740_110A2C9C216F" class="Both" displayName="$(string.POL_FAEA2859_589E_4373_9740_110A2C9C216F)" explainText="$(string.POL_FAEA2859_589E_4373_9740_110A2C9C216F_Help)" presentation="$(presentation.POL_FAEA2859_589E_4373_9740_110A2C9C216F)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_18">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_F5EBBCED_7838_4F7D_AD52_A97A72A67E24" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="18">
+          <item displayName="$(string.ITM_1549F3E3_E6C9_48A7_B9B3_E32A45956B19)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_335B8DD0_1C5C_4B27_AD86_49579426E1B9)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_C3C40C7C_3E09_4DD3_800B_CAD97FDD2445" class="Both" displayName="$(string.POL_C3C40C7C_3E09_4DD3_800B_CAD97FDD2445)" explainText="$(string.POL_C3C40C7C_3E09_4DD3_800B_CAD97FDD2445_Help)" presentation="$(presentation.POL_C3C40C7C_3E09_4DD3_800B_CAD97FDD2445)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_19">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_09213797_A784_4984_BFE4_F1AB1BB67700" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="19">
+          <item displayName="$(string.ITM_94BA54D9_D64E_4978_B100_76487A859F1D)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_35481ADE_5BF9_4C01_97D9_B11D96B2B3DB)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_F26853FB_9DC2_4A1B_97CD_21C3134664F5" class="Both" displayName="$(string.POL_F26853FB_9DC2_4A1B_97CD_21C3134664F5)" explainText="$(string.POL_F26853FB_9DC2_4A1B_97CD_21C3134664F5_Help)" presentation="$(presentation.POL_F26853FB_9DC2_4A1B_97CD_21C3134664F5)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_0">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_69A1295B_24D2_4A47_AA7D_24856FE5D66A" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="0">
+          <item displayName="$(string.ITM_7B5A64F0_7D5E_4BEF_97F6_499241368565)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_B6AA4394_B6E1_4D39_A46E_B9AA53FDBB9E)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_E2E04DED_EF01_4476_A4DA_EB75FC66980F)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_187C5DE6_A085_40E9_B6D9_DB879DE3C85F" class="Both" displayName="$(string.POL_187C5DE6_A085_40E9_B6D9_DB879DE3C85F)" explainText="$(string.POL_187C5DE6_A085_40E9_B6D9_DB879DE3C85F_Help)" presentation="$(presentation.POL_187C5DE6_A085_40E9_B6D9_DB879DE3C85F)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_10">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_8833E31D_02A6_4CF0_889A_C39611832147" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="10">
+          <item displayName="$(string.ITM_2856592C_A1A1_43B6_95E5_24AB3B9A88AB)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_2E2D4B80_397F_4A34_AECD_DF6BCD4B39B5)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_51991BB2_7557_4C3E_939E_8A0E879D3A14" class="Both" displayName="$(string.POL_51991BB2_7557_4C3E_939E_8A0E879D3A14)" explainText="$(string.POL_51991BB2_7557_4C3E_939E_8A0E879D3A14_Help)" presentation="$(presentation.POL_51991BB2_7557_4C3E_939E_8A0E879D3A14)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_1">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_0A007B5F_306C_4E95_9C1B_B704D158AD9F" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="1">
+          <item displayName="$(string.ITM_39A875B7_049E_49A3_B1D2_A99FD79B08B9)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_89E85DCD_8612_4A15_8247_C1B69BA6BDCC)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_D0DCF4D1_4C81_42FD_9652_3D403F23F9C7" class="Both" displayName="$(string.POL_D0DCF4D1_4C81_42FD_9652_3D403F23F9C7)" explainText="$(string.POL_D0DCF4D1_4C81_42FD_9652_3D403F23F9C7_Help)" presentation="$(presentation.POL_D0DCF4D1_4C81_42FD_9652_3D403F23F9C7)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_2">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_11E57495_866F_4A35_9755_9F7BC0E74285" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="2">
+          <item displayName="$(string.ITM_CF7147A8_6716_40D9_8FE4_4CCD58BFB616)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_6C78B2AB_09E8_4F6B_8B7A_B265DF003679)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_E74E2E3B_3D67_46AD_8053_39948888D59E)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_26E411CF_6AB9_45DA_8DA6_F8A82659BC68" class="Both" displayName="$(string.POL_26E411CF_6AB9_45DA_8DA6_F8A82659BC68)" explainText="$(string.POL_26E411CF_6AB9_45DA_8DA6_F8A82659BC68_Help)" presentation="$(presentation.POL_26E411CF_6AB9_45DA_8DA6_F8A82659BC68)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_4">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_73C212DC_BF6C_464F_9219_64447B602EFD" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="4">
+          <item displayName="$(string.ITM_2407F321_8DE7_4E42_9BBE_B009C23C4C2E)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_2DEA138C_0BBE_498F_ABD6_8C8402D03627)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_0F17ADBB_5BE9_451E_84E7_B5CC97B8846A" class="Both" displayName="$(string.POL_0F17ADBB_5BE9_451E_84E7_B5CC97B8846A)" explainText="$(string.POL_0F17ADBB_5BE9_451E_84E7_B5CC97B8846A_Help)" presentation="$(presentation.POL_0F17ADBB_5BE9_451E_84E7_B5CC97B8846A)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_3">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_1377A8A5_948F_468F_B981_B71F81E1EE7E" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="3">
+          <item displayName="$(string.ITM_DF94128D_DE32_4A68_9873_2BA237B0DC00)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_AC6A15E3_63F9_4B77_9545_73C0F3995CBB)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_BCA2411D_A746_493E_A051_3F9649638F59" class="Both" displayName="$(string.POL_BCA2411D_A746_493E_A051_3F9649638F59)" explainText="$(string.POL_BCA2411D_A746_493E_A051_3F9649638F59_Help)" presentation="$(presentation.POL_BCA2411D_A746_493E_A051_3F9649638F59)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_15">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_D36E2BF3_6336_4AFB_9D1D_E2D16CF0DDC1" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="15">
+          <item displayName="$(string.ITM_A3ACA7DC_23BA_4EE7_93A6_9E6CCDB05AB1)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_F631EADD_99AB_479D_8480_73EA73745589)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_2862A40B_A999_4480_87EE_07586E22C1E3)">
+            <value>
+              <string>2</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_709AE9AA_D6EC_4B1A_B49D_D6D84758C884" class="Both" displayName="$(string.POL_709AE9AA_D6EC_4B1A_B49D_D6D84758C884)" explainText="$(string.POL_709AE9AA_D6EC_4B1A_B49D_D6D84758C884_Help)" presentation="$(presentation.POL_709AE9AA_D6EC_4B1A_B49D_D6D84758C884)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_7">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_2628A37B_F4CE_4E11_AB7E_4564C721A36E" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="7">
+          <item displayName="$(string.ITM_76EC13A9_65CB_4763_8CD3_7841B6F1A49F)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_934B19CB_924A_42C7_A1A3_298C34DDBFF5)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_83446122_9CCD_4B96_BBAA_74CF16AA0D83" class="Both" displayName="$(string.POL_83446122_9CCD_4B96_BBAA_74CF16AA0D83)" explainText="$(string.POL_83446122_9CCD_4B96_BBAA_74CF16AA0D83_Help)" presentation="$(presentation.POL_83446122_9CCD_4B96_BBAA_74CF16AA0D83)" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="v_14">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+      <elements>
+        <enum id="DST_18EDC72D_26EE_4DAE_8021_F62DB3FE4E6A" key="SOFTWARE\Stardock\Start8\Start8.ini\Right" valueName="14">
+          <item displayName="$(string.ITM_CF7D05AB_DC4C_45F8_893F_41D04F6C8AD8)">
+            <value>
+              <string>0</string>
+            </value>
+          </item>
+          <item displayName="$(string.ITM_512FFA33_C823_44FE_808E_723EBF81F711)">
+            <value>
+              <string>1</string>
+            </value>
+          </item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="POL_D0ECFD89_5F6D_4398_98E3_715E7E0B43FD" class="Both" displayName="$(string.POL_D0ECFD89_5F6D_4398_98E3_715E7E0B43FD)" explainText="$(string.POL_D0ECFD89_5F6D_4398_98E3_715E7E0B43FD_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="HideMetroApps">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_81EAECC2_778C_4AEF_91C8_5619DB1D4FA8" class="Both" displayName="$(string.POL_81EAECC2_778C_4AEF_91C8_5619DB1D4FA8)" explainText="$(string.POL_81EAECC2_778C_4AEF_91C8_5619DB1D4FA8_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="FullSearch">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_2D636165_1362_4746_B762_0939DEDA172E" class="Both" displayName="$(string.POL_2D636165_1362_4746_B762_0939DEDA172E)" explainText="$(string.POL_2D636165_1362_4746_B762_0939DEDA172E_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="NoSearchControlPanel">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_619ACE60_BD86_4551_A0FF_41EC126A63D3" class="Both" displayName="$(string.POL_619ACE60_BD86_4551_A0FF_41EC126A63D3)" explainText="$(string.POL_619ACE60_BD86_4551_A0FF_41EC126A63D3_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="NoIndexer">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_025D96B9_95F8_408F_9760_17294B43A26B" class="Both" displayName="$(string.POL_025D96B9_95F8_408F_9760_17294B43A26B)" explainText="$(string.POL_025D96B9_95F8_408F_9760_17294B43A26B_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowOnPrimaryTaskbar">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_E049AAE8_C30A_4837_9F6B_687B82390042" class="Both" displayName="$(string.POL_E049AAE8_C30A_4837_9F6B_687B82390042)" explainText="$(string.POL_E049AAE8_C30A_4837_9F6B_687B82390042_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowOnSecondaryTaskbar">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_2A023275_7A7F_4F4E_82D6_ECF6B3C1F568" class="Both" displayName="$(string.POL_2A023275_7A7F_4F4E_82D6_ECF6B3C1F568)" explainText="$(string.POL_2A023275_7A7F_4F4E_82D6_ECF6B3C1F568_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="SmallRight">
+      <parentCategory ref="CAT_BBECD759_1A11_44D7_A1BF_EBB1425DC86E" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_0419AD87_6AD6_41CE_A9A1_AE280D30F0D2" class="Both" displayName="$(string.POL_0419AD87_6AD6_41CE_A9A1_AE280D30F0D2)" explainText="$(string.POL_0419AD87_6AD6_41CE_A9A1_AE280D30F0D2_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="CtrlWinKey">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_1AE67581_9946_4663_B2DE_0B10D29803F0" class="Both" displayName="$(string.POL_1AE67581_9946_4663_B2DE_0B10D29803F0)" explainText="$(string.POL_1AE67581_9946_4663_B2DE_0B10D29803F0_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShiftWinKey">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>   
+    </policy>
+    <policy name="POL_BE4F0F6C_D751_4DFF_81C2_EDEAABE71A10" class="Both" displayName="$(string.POL_BE4F0F6C_D751_4DFF_81C2_EDEAABE71A10)" explainText="$(string.POL_BE4F0F6C_D751_4DFF_81C2_EDEAABE71A10_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="HoldWinKey">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_99C5F566_5FE6_4135_B804_C2AB955EB1D6" class="Both" displayName="$(string.POL_99C5F566_5FE6_4135_B804_C2AB955EB1D6)" explainText="$(string.POL_99C5F566_5FE6_4135_B804_C2AB955EB1D6_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="HideUserPicture">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+    <policy name="POL_D8912AB6_876E_4AF9_B57C_177FA3694659" class="Both" displayName="$(string.POL_D8912AB6_876E_4AF9_B57C_177FA3694659)" explainText="$(string.POL_D8912AB6_876E_4AF9_B57C_177FA3694659_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="ShowWinX">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+<enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+     
+    </policy>
+    <policy name="POL_230E9B6B_40AF_49C1_A84C_D3C927B6C71D" class="User" displayName="$(string.POL_230E9B6B_40AF_49C1_A84C_D3C927B6C71D)" explainText="$(string.POL_230E9B6B_40AF_49C1_A84C_D3C927B6C71D_Help)" key="SOFTWARE\Stardock\Start8\Start8.ini\Start8" valueName="DisabledInAccount">
+      <parentCategory ref="CAT_05643AD4_856B_44EA_B6F7_575E0AB1F389" />
+      <supportedOn ref="windows:SUPPORTED_WindowsVista" />
+     <enabledValue>
+<string>1</string>
+</enabledValue>
+<disabledValue>
+<string>0</string>
+</disabledValue>
+    </policy>
+  </policies>
+</policyDefinitions>

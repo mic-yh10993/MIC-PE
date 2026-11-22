@@ -1,0 +1,166 @@
+{
+  "profile": "uwp-default-explorer",
+  "description": "WimBuilder2 profile reproduced by this chain: UWP default configuration, WinXShell shell slot set to Explorer, all UWP components on, Shell start menu off.",
+  "source": {
+    "project": "WimBuilder2-Full",
+    "projectPath": "Projects/WIN10XPE",
+    "importedWith": "tools/Import-Wb2UwpChain.ps1",
+    "importedForBuild": 26300,
+    "notes": "File lists and registry copy manifests in this folder are generated from the WimBuilder2 project; only reg/values and the runtime scripts are hand-written."
+  },
+  "shell": "explorer",
+  "uwpComponents": "all",
+  "startMenu": false,
+  "classicShellStartMenu": false,
+  "startAllBack": true,
+  "start11": false,
+  "wallpaper": "assets/wallpaper.jpg",
+  "runtimeScripts": "src/runtime/MICPE",
+  "steps": [
+    {
+      "name": "AppX runtime shims",
+      "kind": "files",
+      "file": "10-appx-runtime.txt"
+    },
+    {
+      "name": "AppX system layer",
+      "kind": "files",
+      "file": "11-appx-system.txt"
+    },
+    {
+      "name": "XAML core runtime",
+      "kind": "files",
+      "file": "15-xaml-core.txt"
+    },
+    {
+      "name": "AppX service hosts",
+      "kind": "files",
+      "file": "20-appx-services.txt"
+    },
+    {
+      "name": "UWP app runtime",
+      "kind": "files",
+      "file": "30-appx-apps.txt"
+    },
+    {
+      "name": "UWP app runtime (second pass)",
+      "kind": "files",
+      "file": "31-appx-apps-extra.txt"
+    },
+    {
+      "name": "AppX core and AppRepository",
+      "kind": "files",
+      "file": "40-appx-core.txt"
+    },
+    {
+      "name": "Shell components",
+      "kind": "files",
+      "file": "41-appx-shellcomponents.txt"
+    },
+    {
+      "name": "UWP Task Manager",
+      "kind": "files",
+      "file": "42-appx-taskmgr.txt"
+    },
+    {
+      "name": "Native taskbar",
+      "kind": "files",
+      "file": "50-taskbar.txt"
+    },
+    {
+      "name": "UWP Start menu",
+      "kind": "files",
+      "file": "51-startmenu.txt",
+      "enabled": false,
+      "requiresStartMenu": true
+    },
+    {
+      "name": "UWP Settings",
+      "kind": "files",
+      "file": "52-settings.txt"
+    },
+    {
+      "name": "Explorer shell files",
+      "kind": "files",
+      "file": "60-shell-explorer.txt"
+    },
+    {
+      "name": "Explorer shell application set",
+      "kind": "files",
+      "file": "61-shell-explorer-app.txt"
+    },
+    {
+      "name": "Desktop Window Manager",
+      "kind": "files",
+      "file": "70-dwm.txt"
+    },
+    {
+      "name": "LogonUI, credential provider and XAML runtime",
+      "kind": "files",
+      "file": "72-logon-ui.txt"
+    },
+    {
+      "name": "Service and AppModel registry trees",
+      "kind": "regcopy",
+      "services": "services.txt",
+      "keys": "keys.txt"
+    },
+    {
+      "name": "Explorer shell values",
+      "kind": "values",
+      "file": "10-shell-explorer.reg"
+    },
+    {
+      "name": "Taskbar values",
+      "kind": "values",
+      "file": "20-taskbar.reg"
+    },
+    {
+      "name": "Boot-time service allow list",
+      "kind": "values",
+      "file": "30-services-allowstart.reg"
+    },
+    {
+      "name": "Theme defaults",
+      "kind": "values",
+      "file": "40-themes-default.reg"
+    },
+    {
+      "name": "Shell runtime values (DWM, SYSTEM profile)",
+      "kind": "values",
+      "file": "50-wb2-shell-runtime.reg"
+    },
+    {
+      "name": "Logon service definitions (seclogon, SENS, Appinfo, Schedule)",
+      "kind": "values",
+      "file": "60-logon-services.reg"
+    },
+    {
+      "name": "Shell extension registration (NewBrowseDlg)",
+      "kind": "values",
+      "file": "61-newbrowsedlg.reg"
+    },
+    {
+      "name": "MICPE boot chain (startnet + phases + hooks, no PECMD)",
+      "kind": "runtime",
+      "dir": "src/runtime/MICPE"
+    },
+    {
+      "name": "StartAllBack 3.6 (Windows 11 taskbar + start menu)",
+      "kind": "app",
+      "install": "app/startallback/install.bat",
+      "reg": [
+        "app/startallback/reg/software.reg",
+        "app/startallback/reg/default.reg"
+      ],
+      "requiresFeature": "startAllBack"
+    },
+    {
+      "name": "Start11 1.3 (Stardock shell, alternative to StartAllBack)",
+      "kind": "app",
+      "install": "app/start11/install.bat",
+      "reg": [],
+      "requiresFeature": "start11"
+    }
+  ]
+}

@@ -18,6 +18,26 @@
 !app/chrome/*.7z.*
 !app/office/*.7z.*
 
+# Shell replacers are committed unpacked (user decision 2026-11-22): they are
+# small, and keeping the vendor directory layout in git is what makes "drop in
+# a newer StartAllBack folder" a copy instead of a re-pack.
+!app/startallback/files/**
+!app/start11/files/**
+
+# The UWP boot chain's own payload is committed too (user decision 2026-11-22).
+# src/uwp/payload/winshell/ is the WinXShell binary tree the chain installs
+# into "Program Files\WinXShell"; src/uwp/payload/apprepository/ holds the
+# StateRepository .srd databases AppX needs before any package can activate.
+# Without them the chain still builds, but it warns and the image loses the
+# shell helper and the AppRepository.
+!src/uwp/payload/**
+
+# The native-logon helper assets are REQUIRED by the build: src/build/lib/
+# Wim.ps1 asserts on LSAgetRights_x64.exe and Security.cab before it can
+# enable the built-in Administrator, so a checkout without them fails the
+# native-logon stage instead of degrading.
+!assets/logon/**
+
 # Local work directories
 /work/
 /out/

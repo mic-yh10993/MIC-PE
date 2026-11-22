@@ -1,0 +1,40 @@
+HKLM\SYSTEM\Setup\Service Reporting API
+HKLM\SOFTWARE\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications
+HKLM\SYSTEM\ResourcePolicyStore
+HKLM\System\ActivationBroker
+HKLM\System\ResourceManager
+HKLM\System\ControlSet001\Control\AppID
+HKLM\System\ControlSet001\Control\Srp
+HKLM\System\ControlSet001\Control\SrpExtensionConfig
+HKLM\System\Setup\Status
+HKLM\System\Input
+HKLM\System\Maps
+HKLM\System\State
+HKLM\SOFTWARE\Classes\*
+HKLM\SOFTWARE\Classes\DesktopBackground\Shell
+HKLM\Software\Microsoft\Direct3D
+HKLM\Software\Microsoft\DirectDraw
+HKLM\Software\Microsoft\DirectInput
+HKLM\Software\Microsoft\DirectMusic
+HKLM\Software\Microsoft\DirectPlay
+HKLM\Software\Microsoft\DirectPlay8
+HKLM\Software\Microsoft\DirectPlayNATHelp
+HKLM\Software\Microsoft\DirectShow
+HKLM\Software\Microsoft\DirectX
+HKLM\Software\Microsoft\RADAR
+HKLM\Software\Microsoft\Windows\CurrentVersion\Control Panel
+HKLM\Software\Microsoft\Windows\CurrentVersion\Controls Folder
+HKLM\Software\Microsoft\Windows\CurrentVersion\Themes
+HKLM\SYSTEM\ControlSet001\Services\CoreMessagingRegistrar
+HKLM\SYSTEM\ControlSet001\Services\Themes
+HKLM\SYSTEM\ControlSet001\Services\WindowsTrustedRT
+HKLM\Software\Microsoft\WindowsRuntime
+HKLM\Software\Microsoft\Windows\CurrentVersion\Explorer
+HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer
+HKLM\Software\Microsoft\Windows\CurrentVersion\CloudStore
+HKLM\SYSTEM\ControlSet001\Services\ShellHWDetection
+HKLM\Software\Microsoft\Windows\DWM

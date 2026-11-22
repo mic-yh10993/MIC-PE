@@ -1,111 +1,136 @@
-# Native WinPE logon feasibility and implementation gates
+# Native WinPE logon: measured facts and the v6 logon chain
 
-**Status: investigation / gate definition only.** This document does not claim that native interactive logon works in the current MICPE image. No runtime logon implementation is enabled by this change.
+**Status: v6 implemented, VM verification pending.** The previous path
+(`tsdiscon` / `seclogon` / `runas` from a SYSTEM bootstrap) is retired: it can
+never work on this base, for the reasons recorded below. What follows is the
+evidence, then the mechanism that replaces it.
 
-## Target
+## 1. Why the old path could not work
 
-On the x64 Windows 11 26H2 / 26300 WinPE image:
+Measured on the v5 boot log (`native-logon-bootstrap.log`) and the diag dump:
 
-1. Winlogon, not `startnet.cmd`, PECMD, or a helper process, owns the interactive logon sequence.
-2. Winlogon displays the genuine Windows LogonUI on the secure Winlogon desktop.
-3. The built-in local Administrator account is authenticated by the image's local security authority and SAM. The intended account has RID 500 and an empty password, with the image's local-account and blank-password policies explicitly verified.
-4. After successful authentication, the interactive token belongs to the built-in Administrator (`S-1-5-21-...-500`), never LocalSystem (`S-1-5-18`).
-5. User initialization, profile loading, Explorer, input methods, and the requested AppX/WinRT applications work inside that authenticated user session.
-6. The boot path does not invoke PECMD.
+- `sc start SamSs` returns 1056 (already running), `secedit /configure` returns
+  0 in ~6 s, `net user /active:yes` succeeds — the SYSTEM phase is healthy.
+- The bootstrap then blocks in `LSAgetRights.exe` (the process is still alive in
+  `native-logon-diag.txt`), so the script never reaches the step that cleared
+  `SystemSetupInProgress`. The hang is a symptom, not the disease.
+- `termsrv.dll` is absent and `TermService` has no `ImagePath`, so
+  `tsdiscon.exe` (`WTSDisconnectSession`) has no provider and returns
+  immediately — the console never leaves the SYSTEM session.
 
-## Current branch facts
+The disease is one registry state:
 
-The current implementation must not be mistaken for the target:
+| `HKLM\SYSTEM\Setup` | WinPE default | what it does |
+| --- | --- | --- |
+| `CmdLine` | `winpeshl.exe` | Winlogon runs this as the session shell |
+| `SetupType` | `1` | "setup is running" |
+| `SystemSetupInProgress` | `1` | short-circuits the logon path |
+| `FactoryPreInstallInProgress` | `1` | pre-install phase |
 
-- `src/shell/startnet.cmd` invokes `wpeinit`, then attempts to launch `PECMD.EXE`, falls back to `probe.cmd`, and finally runs `cmd.exe`.
-- `src/registry/10-pe-base.reg` sets Winlogon's `Shell` to `PECMD.EXE`.
-- `src/registry/20-explorer.reg` later changes `Shell` to `explorer.exe`, but explicitly sets `Userinit` to an empty string.
-- `src/build/lib/Shell.ps1::Set-BootShell` copies PECMD assets when present.
-- `src/filelists/70-logon.txt` lists candidate logon-related files, but the current build orchestration does not yet integrate this list as a complete Winlogon/Credential Provider/SAM implementation.
-- Copying `LogonUI.exe` or starting it with `CreateProcess` does not create a secure logon session. A real logon requires the Winlogon, LogonUI, Credential Provider, LSA/authentication package, SAM, profile and user-init path to work together.
+With `SystemSetupInProgress=1`, Winlogon **never** shows LogonUI and never
+creates an interactive session. That is exactly what the diag dump shows:
+`winlogon.exe` + `dwm.exe` alive in session 1, no `LogonUI.exe`, no
+`explorer.exe`, and Ctrl+Alt+Del doing nothing.
 
-## Hard gates
+Clearing `CmdLine` / `SetupType` at build time (v4) produced
+`CRITICAL_PROCESS_DIED (0xEF)` at the boot logo: Winlogon in the PE build wants
+a value there.
 
-Do not implement a “looks like logon” workaround. Each gate requires evidence from the exact 26300 source image and a booted VMware guest.
+## 2. The reference RAMOS (user-supplied `boot.wim`)
 
-### Gate A — donor-image and file-set integrity
+A working "logon + desktop" image, analysed read-only. Its `Setup` key:
 
-- Confirm every required binary, DLL, MUI, PRI, manifest, service, and registry dependency exists in the exact selected `install.wim` index.
-- Record file version, architecture, hash, and source path for each extracted item.
-- Do not reuse a 1909/22H2/25H2 file list as proof of 26300 compatibility.
-- Fail the build on any missing required item; do not silently skip it.
-
-### Gate B — actual WinPE logon path
-
-In the booted guest, prove that:
-
-- Winlogon is running and owns the interactive session.
-- `WinSta0\\Winlogon` and `WinSta0\\Default` have the expected security-desktop relationship.
-- LogonUI is started by the expected Winlogon path, not by `startnet.cmd`, PECMD, a scheduled task, or a service wrapper.
-- A credential submission is handled by a supported credential provider and authentication package.
-- Failed credentials remain at the logon screen and do not expose the user desktop.
-
-A visible LogonUI process alone is insufficient evidence.
-
-### Gate C — Administrator authentication and token
-
-After a successful logon, capture at least:
-
-```powershell
-whoami
-whoami /user
-whoami /groups
-whoami /priv
+```
+CmdLine                     = LogonUI
+SetupType                   = 2
+SystemSetupInProgress       = 0
+FactoryPreInstallInProgress = 0
 ```
 
-The user SID must end in `-500` and begin with the local machine SID. It must not equal `S-1-5-18`. Verify the local account is enabled, that the blank-password policy permits the intended local-console logon, and that a failed/non-empty password attempt is rejected as expected.
+`SetupType=2` + `CmdLine=LogonUI` is the "setup finished, draw the logon UI"
+state. `Winlogon\Shell=explorer.exe`, `Userinit=Userinit.exe,`, **no**
+`AutoAdminLogon` (it asks for a password at LogonUI).
 
-Do not assume `net user Administrator ""` is sufficient: first prove that the WinPE SAM contains the built-in account and that the account is enabled. Do not enable remote blank-password logon.
+Base type: `Installation Type: Client`, build 22621.1105, 12 021 files. It has
+`Windows\explorer.exe`, `Windows\System32\StartTileData` and a `COMPONENTS`
+hive (oobe / Panther / sysprep are stripped). The taskbar and Start menu come
+from **StartAllBack** — it is a classic-shell RAMOS, not a UWP shell.
 
-### Gate D — user initialization, Explorer, and UWP
+It carries **no UWP stack at all**:
 
-Verify all of the following in the authenticated Administrator session:
+| probe | result |
+| --- | --- |
+| `Windows\SystemApps` | only `MicrosoftWindows.Client.Core_cw5n1h2txyewy` |
+| `Program Files\WindowsApps` | absent |
+| `ProgramData\...\AppRepository` (StateRepository DB) | absent |
+| `AppXSvc` / `StateRepository` / `ClipSVC` / `TokenBroker` / `Themes` / `Appinfo` / `Schedule` / `SENS` | service keys absent |
+| `TermService` | `Start=4` (disabled) |
+| `seclogon` | `Start=3` (manual) |
+| `Appx` policy key | present, `PackageRoot=X:\Program Files\WindowsApps` (dangling) |
 
-- The expected user profile is loaded and `USERPROFILE` points to it.
-- The normal Userinit path completes; it is not an empty registry value.
-- Explorer is the user's shell, not a SYSTEM process running on the interactive desktop.
-- Start menu, taskbar, desktop, and shell experience components initialize without third-party shell replacement.
-- Calculator and Photos activate through AppX/WinRT in the same user session.
-- The Microsoft Pinyin input method can switch layouts and accept both English and Chinese input.
+So the RAMOS answers the logon question and nothing about UWP.
 
-### Gate E — VMware input and stability regression
+## 3. What the WinPE base is missing for UWP
 
-On the user's 8 GB VMware test VM:
+Same probes against our base `boot.wim` (26100.9457, `WindowsPE` flags):
 
-- Test English text input in Explorer search, Run, Notepad, and the Start menu.
-- Test Microsoft Pinyin composition, candidate selection, commit, and switching back to English.
-- Confirm mouse movement/clicks remain responsive while typing.
-- Capture guest logs and crash dumps for any input freeze.
-- Repeat cold boots; a single successful boot is not sufficient.
+- `AppXSvc`, `StateRepository`, `ClipSVC`, `TokenBroker`, `Themes`, `Appinfo`,
+  `Schedule`, `SENS`, `TextInputManagementService`, `BrokerInfrastructure`,
+  `ShellHWDetection`, `camsvc` — **service keys do not exist**, not even as
+  stubs.
+- No `Program Files\WindowsApps`, no `Windows\SystemApps` shell packages, no
+  `AppRepository` StateRepository database.
 
-## Safe implementation order
+Consequence: a native Windows 11 taskbar / Start menu / UWP activation on this
+base is not a "copy a few packages" problem. It needs the whole AppX stack
+(`AppXDeploymentServer`, `StateRepository.Core` + the svchost `appmodel` group,
+`ClipSVC` licensing, `TokenBroker`, `camsvc`), a StateRepository database
+consistent with the registered packages, and the framework packages. The
+database is generated by the OS while the AppX stack is healthy — it cannot be
+authored offline.
 
-1. Keep the current boot path unchanged while collecting Gate A/B evidence.
-2. Build a disposable test image from the exact 26300 donor. Do not replace the current working image until Gate B passes.
-3. Only after Gate B passes, implement and test the local Administrator account and authentication policy (Gate C).
-4. Only after Gate C passes, enable normal user initialization and Explorer in the authenticated session (Gate D).
-5. Run the VMware input regression (Gate E).
-6. Remove PECMD from the boot path only in the tested implementation, then add static tests proving there are no PECMD launch references in the native-logon boot path.
-7. Preserve a known-good rollback image and report each gate as PASS, FAIL, or BLOCKED with logs.
+This is why every working "UWP PE" (WIMBuilder2's `zp-UWPAppX`, the user's own
+test build) is derived from **install.wim (Client)**, not from `boot.wim`.
+The reference RAMOS is Client-based too.
 
-## Stop conditions and fallback
+**Decision: the UWP goal requires a Client base.** The v6 logon chain below is
+base-agnostic (registry + one script), so it carries over unchanged.
 
-Stop and do not claim native logon if any of these are true:
+## 4. v6 mechanism
 
-- WinPE does not create a supported local interactive Winlogon session.
-- The required Credential Provider or authentication package cannot operate in the WinPE configuration.
-- The built-in Administrator account is absent or cannot be authenticated locally.
-- The session token is SYSTEM rather than the RID-500 Administrator.
-- Userinit/profile/AppX initialization only works by bypassing the normal authenticated logon path.
+Build time (`-NativeLogonExperiment`):
 
-If the exact WinPE build cannot support the required logon semantics, the honest alternatives are:
+| file | role |
+| --- | --- |
+| `src/registry/25-native-logon-experiment.reg` | `Winlogon\Shell=explorer.exe`, stock `Userinit`, `AutoAdminLogon=1`, `DefaultUserName=Administrator`, empty `DefaultPassword`, `DisableCAD=1`, `Run\MICPEInit` |
+| `src/registry/26-native-logon.reg` | the four `Setup` values above, `LimitBlankPasswordUse=0`, service start types |
+| `src/registry/27-textinput-service.reg`, `28-logon-services.reg` | service definitions the logon/shell path needs |
+| `src/filelists/70-logon.txt` | LogonUI + credential provider + XAML runtime (`imageres.dll`, `CoreMessaging.dll`, `Windows.UI.Xaml.Resources*.dll`, …) |
+| `src/shell/run-hidden.vbs` | launches `logon-admin.cmd` from `Run` with no console window |
+| `src/shell/logon-admin.cmd` | runs inside the authenticated Administrator session: whoami evidence, session service starts, explicit Explorer start, ctfmon |
 
-1. Keep WinPE as a SYSTEM-based maintenance environment and clearly label any front-end as a custom UI, not a Windows user logon; or
-2. Use a full Windows-derived RAM-boot environment with a supported interactive logon stack.
+`startnet-native-logon.cmd` is still installed as `startnet.cmd` but is **dead
+code** on this path: with `CmdLine=LogonUI`, `winpeshl` never runs. It survives
+as the documented rescue route (set `CmdLine` back to `winpeshl.exe` and
+`SystemSetupInProgress=1` in a test image).
 
-Do not disguise either fallback as native WinPE Administrator authentication.
+`Set-OfflineAdminState` (`src/build/lib/AdminAccount.ps1`) tries to clear
+`ACB_DISABLED` on RID 500 in the image SAM as SYSTEM. **Measured: the WinPE SAM
+is an empty 8 KB hive with no subkeys**, so the step is a warn-only no-op — the
+built-in accounts are created by the SAM service when it starts. The flag to
+watch is the one LogonUI reports at boot.
+
+## 5. Verification gates for v6
+
+1. LogonUI appears (not a `startnet` window, not a black screen, no 0xEF).
+2. The logon proceeds without a password (AutoAdminLogon) **or** LogonUI shows
+   Administrator and accepts an empty password.
+3. `whoami /user` inside the session ends in `-500`, never `S-1-5-18`.
+4. `explorer.exe` is the shell (`native-logon-session.log`, `shell_started=1`).
+5. Ctrl+Alt+Del no longer needs to work (DisableCAD=1), but `Win+L` /
+   Task Manager should not crash the session.
+
+Gate 1 and the 0xEF risk are the reason `70-logon.txt` carries the Client
+image's XAML runtime: LogonUI is a XAML app and a missing resource PRI or
+CoreMessaging pair kills it at startup, which Winlogon reports as
+`CRITICAL_PROCESS_DIED`.

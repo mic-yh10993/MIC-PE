@@ -72,6 +72,18 @@ install.bat 按这个分工写目标路径：程序文件去 `\Program Files\MIC
 - 体积有上限（boot.wim ≤ 3GB，目标 ≤ 2.6GB；ISO ≤ 3.2GB），超限时按
   plan.md 的降级顺序处理：Office → Chrome → Photos → Media Player。
 
+## 组件的注册表与启动项（2026-11-22 补充）
+
+有些组件不是"拷文件就能用"（外壳替代品要写 CLSID、要有个进程在跑）。约定：
+
+- 注册表 `*.reg` 放组件自己的 `reg/` 子目录，由 `src/uwp/manifest.json` 里的
+  `app` 步骤的 `"reg": [...]` 列出，构建时按 `PE-SOFT` / `PE-DEF` / `PE-SYS`
+  别名导入挂载镜像的蜂巢。**不要**在 `install.bat` 里 `reg add`——那写的是
+  构建机自己的注册表，不是镜像的。
+- 需要在 PE 里常驻的进程，启动脚本放组件的 `hooks/` 子目录，由 `install.bat`
+  拷进镜像的 `System32\MICPE\hooks\<phase>\`。这样"组件装没装"和"启动项有没有"
+  永远是同一个开关。
+
 ## 组件清单（计划内）
 
 | 组件 | 来源 | 集成目标 | 状态 |
@@ -80,6 +92,8 @@ install.bat 按这个分工写目标路径：程序文件去 `\Program Files\MIC
 | Office 2016 | 自带安装包（安装脚本改成 CI 能运行的版本） | `\Program Files\Office2016`（厂商布局，见 `app/office/README.md`） | M5 已补 |
 | PE 工具 | 参考文件里的工具（见 `~/workspace/MIC-PE-recovery/`） | 按性质分两处 | M5 已集成（`app/payload/micpe-payload.7z`） |
 | PENetwork | 参考文件里的网络工具 | `\Program Files\MICPE` | M5 已集成（`app/payload/micpe-payload.7z`） |
+| StartAllBack 3.6 | 自带（用户 2026-11-22 提供） | `\Program Files\StartAllBack`（厂商布局） | 已集成，默认启用；注册表在 `app/startallback/reg/` |
+| Start11 1.3 | 自带（用户 2026-11-22 提供） | `\Program Files\Start11`（厂商布局） | 文件与启动钩子已集成，默认关闭，待实机验证 |
 | MICPE 装机软件 | 用户自写 | `\Program Files\MICPE` | M5 集成 |
 | UWP 核心文件 | install.wim 提取（M4）：照片、新版媒体播放器；**不含系统设置应用** | 系统位置（UWP 自带路径） | M4 |
 | 自实现设置工具 | 若 M4 决定做：改注册表实现基础设置 | `%System32%\MICPE` | M4 再定 |

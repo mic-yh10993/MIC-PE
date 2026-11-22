@@ -139,7 +139,12 @@ function Set-BootShell {
         [Parameter(Mandatory = $true)]
         [string] $RepoRoot,
 
-        [switch] $NativeLogonExperiment
+        [switch] $NativeLogonExperiment,
+
+        # wb2 / UWP profile: boot through src/runtime/MICPE/startnet.cmd and
+        # install none of the PECMD chain. The M2 startnet stays for the m*
+        # stages, which still drive the shell through PECMD.INI.
+        [switch] $UwpProfile
     )
 
     $shellSrc = Join-Path $RepoRoot 'src/shell'
@@ -151,10 +156,17 @@ function Set-BootShell {
     } else {
         'startnet.cmd'
     }
-    $startnetSource = Join-Path $shellSrc $startnetName
+    # One source file for both copies (System32 and System32\MICPE): the UWP
+    # profile boots src/runtime/MICPE/startnet.cmd, and the uwpchain step
+    # re-installs the same file together with the phase scripts.
+    $startnetSource = if ($UwpProfile) {
+        Join-Path $RepoRoot 'src/runtime/MICPE/startnet.cmd'
+    } else {
+        Join-Path $shellSrc $startnetName
+    }
     Assert-PathExists -Path $startnetSource -Label $startnetName
     Copy-Item -LiteralPath $startnetSource -Destination $startnet -Force
-    Write-SubStep "$startnetName installed"
+    Write-SubStep ("{0} installed{1}" -f $startnetName, $(if ($UwpProfile) { ' (UWP profile, no PECMD)' } else { '' }))
 
     # Replace the winpeshl-driven boot with our own entry point so the shell
     # launch order is under our control.
@@ -169,7 +181,7 @@ function Set-BootShell {
         New-Item -ItemType Directory -Path $peDir -Force | Out-Null
     }
 
-    if (-not $NativeLogonExperiment) {
+    if (-not $NativeLogonExperiment -and -not $UwpProfile) {
         foreach ($file in 'PECMD.INI', 'PECMD.EXE') {
             $source = Join-Path $shellSrc $file
             if (Test-Path -LiteralPath $source) {
@@ -201,11 +213,38 @@ function Set-BootShell {
     Copy-Item -LiteralPath $fixDrives -Destination (Join-Path $micpeDir 'Fix-DriveLetters.cmd') -Force
     Write-SubStep 'Fix-DriveLetters.cmd installed to System32\MICPE'
 
+    # The native logon path runs this from Userinit inside the authenticated
+    # Administrator session. It must be present or Userinit would have no
+    # follow-up process and Winlogon would log the session straight off.
+    if ($NativeLogonExperiment) {
+        $logonAdmin = Join-Path $shellSrc 'logon-admin.cmd'
+        Assert-PathExists -Path $logonAdmin -Label 'logon-admin.cmd'
+        Copy-Item -LiteralPath $logonAdmin -Destination (Join-Path $micpeDir 'logon-admin.cmd') -Force
+        Write-SubStep 'logon-admin.cmd installed to System32\MICPE'
+
+        # 25-native-logon-experiment.reg starts the session init from the
+        # HKLM Run key. A Run entry cannot launch a .cmd and a bare cmd.exe
+        # would paint a console over the desktop, so the shell host runs it
+        # hidden. Without this file the Run value is a silent no-op.
+        $runHidden = Join-Path $shellSrc 'run-hidden.vbs'
+        Assert-PathExists -Path $runHidden -Label 'run-hidden.vbs'
+        Copy-Item -LiteralPath $runHidden -Destination (Join-Path $micpeDir 'run-hidden.vbs') -Force
+        Write-SubStep 'run-hidden.vbs installed to System32\MICPE'
+
+        # Live log viewer: pops up its own console so the bootstrap and the
+        # authenticated session stay readable even when the desktop is black.
+        $showLog = Join-Path $shellSrc 'show-log.cmd'
+        Assert-PathExists -Path $showLog -Label 'show-log.cmd'
+        Copy-Item -LiteralPath $showLog -Destination (Join-Path $micpeDir 'show-log.cmd') -Force
+        Write-SubStep 'show-log.cmd installed to System32\MICPE'
+    }
+
     # PECMD.EXE is third-party freeware and deliberately not in git. Until a
     # step supplies it (payload asset or CI download, M5/M6), this M2 step
     # leaves the cmd fallback in place; a later step supplies the binary,
     # so this warning is about the M2 step only, not the finished image.
-    if (-not $NativeLogonExperiment -and
+    # The UWP profile never loads PECMD, so there is nothing to warn about.
+    if (-not $NativeLogonExperiment -and -not $UwpProfile -and
         -not (Test-Path -LiteralPath (Join-Path $shellSrc 'PECMD.EXE'))) {
         Write-Warn 'PECMD.EXE is not in src/shell; this M2 step leaves the cmd fallback in place until a later step supplies the PECMD binary'
     }
