@@ -151,6 +151,16 @@
       "file": "61-newbrowsedlg.reg"
     },
     {
+      "name": "Shell default-user values (wb2 Shell_RegDefault subset)",
+      "kind": "values",
+      "file": "64-wb2-shell-default.reg"
+    },
+    {
+      "name": "Shell software values (wb2 Shell_RegSoftware subset)",
+      "kind": "values",
+      "file": "65-wb2-shell-software.reg"
+    },
+    {
       "name": "MICPE boot chain (startnet + phases + hooks, no PECMD)",
       "kind": "runtime",
       "dir": "src/runtime/MICPE"

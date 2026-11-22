@@ -32,13 +32,17 @@ call :LOG "phase 20-preshell: USERPROFILE=%USERPROFILE%"
 if not exist "%TEMP%" md "%TEMP%" >nul 2>&1
 if not exist "%Desktop%" md "%Desktop%" >nul 2>&1
 
-rem -- desktop shortcut (round 3) --------------------------------------------
+rem -- desktop shortcuts (round 3: Command Prompt; round 5: Explorer) -------
 rem A .lnk on the desktop makes Explorer parse it at desktop init, which
 rem binds the X: drive namespace and triggers the Drive FolderExtension -
 rem the earliest reliable trigger for the StartAllBack loader. The .lnk
-rem ships in the runtime tree and is placed here, before the shell starts.
+rem files ship in the runtime tree and are placed here, before the shell
+rem starts. Two shortcuts (Explorer + Command Prompt) match the wb2
+rem _CustomDesktopItems.bat desktop set.
 if exist "%MICPE%\Command Prompt.lnk" copy /y "%MICPE%\Command Prompt.lnk" "%Desktop%\Command Prompt.lnk" >nul 2>&1
-if exist "%Desktop%\Command Prompt.lnk" call :LOG "desktop shortcut placed"
+if exist "%MICPE%\Explorer.lnk" copy /y "%MICPE%\Explorer.lnk" "%Desktop%\Explorer.lnk" >nul 2>&1
+if exist "%Desktop%\Command Prompt.lnk" call :LOG "desktop shortcut placed: Command Prompt"
+if exist "%Desktop%\Explorer.lnk" call :LOG "desktop shortcut placed: Explorer"
 
 rem -- input method host ------------------------------------------------------
 rem  DISABLED on purpose (user request 2026-11-22): starting ctfmon.exe in the

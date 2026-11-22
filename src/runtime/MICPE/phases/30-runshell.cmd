@@ -4,8 +4,10 @@ rem  Phase 30 - start the shell
 rem
 rem  The shell is whatever Winlogon says: with the "explorer" profile slot that
 rem  is %SystemRoot%\explorer.exe, the Win11 shell (XAML taskbar, needs DWM).
-rem  WinXShell is started next to it only as a helper daemon: it hides the boot
-rem  console and waits for the taskbar, it is not the shell in this profile.
+rem  WinXShell is NOT started here as a daemon: it only runs as the shell when
+rem  Winlogon asks for it, and 40-postshell.cmd calls it once to wait for the
+rem  taskbar and hide the boot console. There is no resident WinXShell daemon
+rem  in this profile (round 5: the README used to claim otherwise).
 rem
 rem  Boot runs as SYSTEM, so no logon happens and explorer is started directly
 rem  with this session's token - exactly the "PE_LOADER=SYSTEM" model.

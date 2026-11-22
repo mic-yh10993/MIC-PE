@@ -52,7 +52,17 @@ $script:StageProbeExpect = [ordered]@{
     # stays asserted: LogonUI.exe is in the image (72-logon-ui.txt) and
     # the probe only checks the file exists, so a missing logonui is a
     # real build regression, not a deferred feature.
-    wb2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; sab_mapped = '1'; logonui = '1'; seclogon = '1' }
+    #
+    # Round 5 adds desktop assertions (wallpaper_file, wallpaper_set,
+    # desktop_icons, startmenu_init, taskbar_values): before round 5 the
+    # CI had no assertion covering the desktop at all, so a black
+    # desktop with no icons and no wallpaper passed silently. All five
+    # are build-time properties - the wallpaper file, the Wallpaper
+    # registry value, the HideDesktopIcons / StartMenuInit / taskbar
+    # values the .reg steps write - so a 0 is a build regression, not
+    # a runtime failure. The runtime side (whether Themes actually
+    # applies the wallpaper) stays diagnostic (themes_run, themes_after).
+    wb2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; sab_mapped = '1'; logonui = '1'; seclogon = '1'; wallpaper_file = '1'; wallpaper_set = '1'; desktop_icons = '1'; startmenu_init = '1'; taskbar_values = '1' }
 }
 
 function Get-StageProbeExpect {

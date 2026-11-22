@@ -34,6 +34,7 @@ rem ==========================================================================
 
 set "LOG=%MICPE%\logs\boot.log"
 set "FLAG=%MICPE%\logs\logon-token.flag"
+set "RCFILE=%MICPE%\logs\scstart-rc.txt"
 set "SYS32=%SystemRoot%\System32"
 
 rem Phase 25 is skipped when the shell is already up (a re-run of the chain).
@@ -51,10 +52,12 @@ rem StateRepository, Schedule, AppReadiness), then the shell services
 rem (Themes, Appinfo, ShellHWDetection, ProfSvc). ProfSvc loads the user
 rem profile for the logon token; without it the logon falls back to a
 rem temporary profile.
-for %%S in (SamSs RPCSS seclogon SENS CoreMessagingRegistrar UserManager BrokerInfrastructure StateRepository Schedule AppReadiness Themes Appinfo ShellHWDetection ProfSvc) do (
-    sc.exe start %%S >>"%LOG%" 2>&1
-    call :LOG "  sc start %%S rc=%errorlevel%"
-)
+rem Each start goes through :SCSTART so the return code is captured once and
+rem written to BOTH boot.log and the machine-readable scstart-rc.txt (round
+rem 5). The probe copies the rc file into the probe output, so the host sees
+rem the boot-time start story even when boot.log never uploads.
+if exist "%RCFILE%" del "%RCFILE%" >nul 2>&1
+for %%S in (SamSs RPCSS seclogon SENS CoreMessagingRegistrar UserManager BrokerInfrastructure StateRepository Schedule AppReadiness Themes Appinfo ShellHWDetection ProfSvc) do call :SCSTART %%S
 
 rem -- 1b. wait for seclogon to be RUNNING ------------------------------------
 rem runas.exe calls CreateProcessWithLogonW, which fails at once when the
@@ -144,6 +147,17 @@ call :DIAG
 goto :EOF
 
 rem -- helpers ----------------------------------------------------------------
+
+:SCSTART
+rem Start one service, log the return code to boot.log AND to the
+rem machine-readable scstart-rc.txt. The rc is captured in a variable first:
+rem the :LOG call below would reset errorlevel to 0 (echo always succeeds),
+rem so the rc must be read before any other command runs.
+sc.exe start %~1 >>"%LOG%" 2>&1
+set "RC=%errorlevel%"
+call :LOG "  sc start %~1 rc=%RC%"
+>>"%RCFILE%" echo p25_%~1_rc=%RC%
+goto :EOF
 
 :DIAG
 rem Evidence of what actually runs. If the token route fails, this is the only

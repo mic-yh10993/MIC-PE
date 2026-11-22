@@ -671,6 +671,33 @@ function Install-MicpeRuntime {
         if (Set-UwpBinaryString -Path $dll -Find 'MiniNT' -Replace 'NiniNT') { $patched++ }
     }
     Write-SubStep ("WinPE marker patched (MiniNT -> NiniNT): {0}/2 DLL(s)" -f $patched)
+
+    # --- 6. Default taskbar pins (round 5) ------------------------------------
+    # wb2 pins Explorer + cmd to the taskbar at runtime through WinXShell;
+    # this image has no WinXShell daemon, so the pins are baked in as files
+    # instead: a LayoutModification.xml (the supported default-taskbar
+    # mechanism) plus .lnk seeds in the Default user's User Pinned\TaskBar
+    # folder. Explorer generates the Taskband registry itself on first
+    # logon; nothing here writes registry. The reference image carries no
+    # Taskband key at all, so there is no binary to transplant.
+    $taskbarSrc = Join-Path $payload 'taskbar'
+    if (Test-Path -LiteralPath $taskbarSrc) {
+        $layoutSrc = Join-Path $taskbarSrc 'Shell'
+        if (Test-Path -LiteralPath $layoutSrc) {
+            $shellDir = Join-Path $MountDir 'Users/Default/AppData/Local/Microsoft/Windows/Shell'
+            $count = Copy-UwpTreeTo -Source $layoutSrc -Destination $shellDir
+            Write-SubStep ("taskbar layout -> Default Shell: {0} file(s)" -f $count)
+        }
+        $pinnedSrc = Join-Path $taskbarSrc 'TaskBar'
+        if (Test-Path -LiteralPath $pinnedSrc) {
+            $pinnedDst = Join-Path $MountDir 'Users/Default/AppData/Roaming/Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar'
+            $count = Copy-UwpTreeTo -Source $pinnedSrc -Destination $pinnedDst
+            Write-SubStep ("taskbar pins -> Default User Pinned: {0} file(s)" -f $count)
+        }
+    }
+    else {
+        Write-Warn 'src/uwp/payload/taskbar is missing; the taskbar will have no pinned items'
+    }
 }
 
 function Measure-UwpChainCompleteness {

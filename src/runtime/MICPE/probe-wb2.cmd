@@ -150,6 +150,67 @@ sc.exe start SENS >nul 2>&1
 set "RC_SENS=!errorlevel!"
 >> "%PROBE_OUT%" echo scstart_sens_rc=!RC_SENS!
 >> "%PROBE_LOCAL%" echo scstart_sens_rc=!RC_SENS!
+sc.exe start Themes >nul 2>&1
+set "RC_THEMES=!errorlevel!"
+>> "%PROBE_OUT%" echo scstart_themes_rc=!RC_THEMES!
+>> "%PROBE_LOCAL%" echo scstart_themes_rc=!RC_THEMES!
+
+rem Start-timing re-check (round 5; not asserted). sc start returns before
+rem the service finishes starting, and a service can start and then die
+rem (svchost host crash, dependency loss). Wait 10 s, then re-check
+rem RUNNING: rc=0 + after=1 means the manual start worked and held;
+rem rc=0 + after=0 means it started and died; rc!=0 + after=0 means it
+rem never started.
+ping -n 11 127.0.0.1 >nul 2>&1
+sc.exe query seclogon 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo seclogon_after=0 >> "%PROBE_OUT%" & echo seclogon_after=0 >> "%PROBE_LOCAL%") else (echo seclogon_after=1 >> "%PROBE_OUT%" & echo seclogon_after=1 >> "%PROBE_LOCAL%")
+sc.exe query SENS 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo sens_after=0 >> "%PROBE_OUT%" & echo sens_after=0 >> "%PROBE_LOCAL%") else (echo sens_after=1 >> "%PROBE_OUT%" & echo sens_after=1 >> "%PROBE_LOCAL%")
+sc.exe query Themes 2>nul | find /i "RUNNING" >nul
+if errorlevel 1 (echo themes_after=0 >> "%PROBE_OUT%" & echo themes_after=0 >> "%PROBE_LOCAL%") else (echo themes_after=1 >> "%PROBE_OUT%" & echo themes_after=1 >> "%PROBE_LOCAL%")
+
+rem Phase 25 sc-start return codes (round 5; not asserted). Phase 25 writes
+rem one p25_<service>_rc=<code> line per service into scstart-rc.txt; the
+rem probe copies them into the probe file so the host sees the boot-time
+rem start story even when boot.log never uploads (artifact quota).
+if exist "%SystemRoot%\System32\MICPE\logs\scstart-rc.txt" (
+    type "%SystemRoot%\System32\MICPE\logs\scstart-rc.txt" >> "%PROBE_OUT%"
+    type "%SystemRoot%\System32\MICPE\logs\scstart-rc.txt" >> "%PROBE_LOCAL%"
+)
+
+rem Wallpaper diagnostics (round 5; asserted). The wallpaper file is copied
+rem by the Brand step and the Wallpaper registry value is written at build
+rem time (40-themes-default.reg), so a 0 here is a build regression, not a
+rem runtime failure. File 1 + value 0 means the .reg import failed.
+if exist "%SystemRoot%\Web\Wallpaper\Windows\img0.jpg" (echo wallpaper_file=1 >> "%PROBE_OUT%" & echo wallpaper_file=1 >> "%PROBE_LOCAL%") else (echo wallpaper_file=0 >> "%PROBE_OUT%" & echo wallpaper_file=0 >> "%PROBE_LOCAL%")
+reg query "HKU\.DEFAULT\Control Panel\Desktop" /v Wallpaper 2>nul | find /i "img0.jpg" >nul
+if errorlevel 1 (echo wallpaper_set=0 >> "%PROBE_OUT%" & echo wallpaper_set=0 >> "%PROBE_LOCAL%") else (echo wallpaper_set=1 >> "%PROBE_OUT%" & echo wallpaper_set=1 >> "%PROBE_LOCAL%")
+
+rem Desktop-init values (round 5; asserted). These are build-time registry
+rem values the image must carry, checked in HKU\.DEFAULT (the template hive
+rem the build writes): HideDesktopIcons (This PC + Recycle Bin shown),
+rem StartMenuInit (Start menu state initialised), and the taskbar values
+rem (TaskbarGlomLevel=1, TaskbarMn/ShowTaskViewButton off). A 0 here is a
+rem build regression - before round 5 the CI had no assertion covering the
+rem desktop at all, so a black desktop with no icons passed silently.
+set "ICONS_OK=1"
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" /v "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" 2>nul | find /i "0x0" >nul
+if errorlevel 1 set "ICONS_OK=0"
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" /v "{645FF040-5081-101B-9F08-00AA002F954E}" 2>nul | find /i "0x0" >nul
+if errorlevel 1 set "ICONS_OK=0"
+>> "%PROBE_OUT%" echo desktop_icons=!ICONS_OK!
+>> "%PROBE_LOCAL%" echo desktop_icons=!ICONS_OK!
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v StartMenuInit 2>nul | find /i "0xd" >nul
+if errorlevel 1 (echo startmenu_init=0 >> "%PROBE_OUT%" & echo startmenu_init=0 >> "%PROBE_LOCAL%") else (echo startmenu_init=1 >> "%PROBE_OUT%" & echo startmenu_init=1 >> "%PROBE_LOCAL%")
+set "TB_OK=1"
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v TaskbarGlomLevel 2>nul | find /i "0x1" >nul
+if errorlevel 1 set "TB_OK=0"
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v TaskbarMn 2>nul | find /i "0x0" >nul
+if errorlevel 1 set "TB_OK=0"
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v ShowTaskViewButton 2>nul | find /i "0x0" >nul
+if errorlevel 1 set "TB_OK=0"
+>> "%PROBE_OUT%" echo taskbar_values=!TB_OK!
+>> "%PROBE_LOCAL%" echo taskbar_values=!TB_OK!
 
 rem -- boot.log to the share (round 3) ---------------------------------------
 rem Phase 25 logs every sc start return code and the seclogon poll result

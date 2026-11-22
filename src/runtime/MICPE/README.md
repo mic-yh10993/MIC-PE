@@ -37,7 +37,7 @@ src/runtime/MICPE/
 | `10-osinit` | 内核起来、尚无用户环境 | `wpeinit.exe`（设备/网络/DHCP）、`Fix-DriveLetters.cmd`（把已装 Windows 留在 C:）、隐藏空启动文件夹、`WinXShell -regist -noaction` | 不碰用户目录、不启动 shell |
 | `20-preshell` | 环境变量就绪、shell 之前 | 设 `USERPROFILE=X:\Users\Default` `Desktop` `Programs` `APPDATA` `TEMP` | 不启动窗口，避免抢占前台 |
 | `25-logon` | shell 之前 | 起 `seclogon`/`Themes`/`SENS`/`Appinfo`，启用内置 Administrator，克隆 profile，用 `runas` 走 Secondary Logon 给 shell 一个**真正的登录令牌** | 失败不阻断：留不下 `logs\logon-token.flag`，`30-runshell` 照旧用 SYSTEM 拉 explorer |
-| `30-runshell` | 环境就绪 | 读 `HKLM\...\Winlogon\Shell`，启动 `explorer.exe`，最多轮询 20 秒确认存活；顺带起 `WinXShell -regist -daemon` 作为辅助 | 不重试、不循环重启（那会变成满屏弹窗）；`25-logon` 已经拉起过 explorer 时不再拉第二个 |
+| `30-runshell` | 环境就绪 | 读 `HKLM\...\Winlogon\Shell`，启动 `explorer.exe`，最多轮询 20 秒确认存活 | 不重试、不循环重启（那会变成满屏弹窗）；`25-logon` 已经拉起过 explorer 时不再拉第二个；WinXShell 只在 Shell 不是 explorer 时才作为外壳启动，不常驻 `-regist -daemon`（`40-postshell` 只用它做等任务栏、隐藏控制台的一次性调用） |
 | `40-postshell` | shell 起来之后 | `Taskbar:WaitForReady()`、清 `desktop.ini`、隐藏控制台；shell 没起来则**保留控制台**并打印日志位置 | 不静默失败 |
 
 ### 为什么需要 `25-logon`

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MICPE default taskbar layout (round 5, wb2 alignment).
+     wb2 pins Explorer + cmd to the taskbar at runtime through WinXShell;
+     this image has no WinXShell daemon, so the pins are baked in as files
+     instead. LayoutModification.xml is Microsoft's supported default
+     taskbar mechanism: Explorer applies it on first logon and generates
+     the Taskband registry itself. The .lnk seeds in TaskBar/ are the
+     belt-and-braces copy. No registry is written for the pins.
+     Explorer is pinned by its documented DesktopApplicationID; cmd is
+     pinned by link path to the Start Menu shortcut that already exists
+     in the image (Users\Default\...\Start Menu\Programs\System Tools\). -->
+<LayoutModificationTemplate xmlns="http://schemas.microsoft.com/Start/2014/LayoutModification"
+    xmlns:defaultlayout="http://schemas.microsoft.com/Start/2014/FullDefaultLayout"
+    xmlns:start="http://schemas.microsoft.com/Start/2014/StartLayout"
+    xmlns:taskbar="http://schemas.microsoft.com/Start/2014/TaskbarLayout"
+    Version="1">
+  <CustomTaskbarLayoutCollection>
+    <defaultlayout:TaskbarLayout>
+      <taskbar:TaskbarPinList>
+        <taskbar:DesktopApp DesktopApplicationID="Microsoft.Windows.Explorer" />
+        <taskbar:DesktopApp DesktopApplicationLinkPath="%APPDATA%\Microsoft\Windows\Start Menu\Programs\System Tools\Command Prompt.lnk" />
+      </taskbar:TaskbarPinList>
+    </defaultlayout:TaskbarLayout>
+  </CustomTaskbarLayoutCollection>
+</LayoutModificationTemplate>
