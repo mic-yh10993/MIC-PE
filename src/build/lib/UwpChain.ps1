@@ -710,6 +710,19 @@ function Install-MicpeRuntime {
     else {
         Write-Warn 'src/uwp/payload/taskbar is missing; the taskbar will have no pinned items'
     }
+
+    # --- 7. Task Scheduler folder (round 7) -----------------------------------
+    # schedsvc needs \Windows\System32\Tasks at runtime; the r65 WIM does
+    # not have it (tasks_folder=0 every round) and the service never
+    # creates it itself. Pre-create the root folder so the round-7 probe
+    # can tell whether the missing folder is why Schedule never starts.
+    # Minimal: just the root folder, no Microsoft\Windows sub-tree -
+    # schedsvc creates task folders on demand when a task is registered.
+    $tasksDir = Join-Path $MountDir 'Windows/System32/Tasks'
+    if (-not (Test-Path -LiteralPath $tasksDir)) {
+        New-Item -ItemType Directory -Path $tasksDir -Force | Out-Null
+    }
+    Write-SubStep 'Tasks folder pre-created (Schedule experiment, round 7)'
 }
 
 function Measure-UwpChainCompleteness {

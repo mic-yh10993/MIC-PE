@@ -277,6 +277,84 @@ rem \Windows\System32\Tasks does not exist in the r65 WIM). schedsvc may
 rem create it itself on start; a 0 here with Schedule still dead says not.
 if exist "%SystemRoot%\System32\Tasks" (echo tasks_folder=1 >> "%PROBE_OUT%" & echo tasks_folder=1 >> "%PROBE_LOCAL%") else (echo tasks_folder=0 >> "%PROBE_OUT%" & echo tasks_folder=0 >> "%PROBE_LOCAL%")
 
+rem --- sc query raw size (round 7; not asserted) ------------------------------
+rem r68 proved sc query and sc queryex are both silent in PE - but "silent"
+rem was measured by find counting lines, which cannot tell "no output" from
+rem "output in a format find cannot see" (UTF-16, no trailing newline).
+rem Redirect sc query to a file and record the byte size: 0 = sc truly
+rem produces nothing; >0 = sc produces output the parse cannot read
+rem (encoding or format). RPCSS is the control: it IS running (p25
+rem 1056 every round), so if its query is also 0 bytes, sc itself is
+rem broken in PE; if it is >0, sc works and the silence is
+rem service-specific. qrc is sc's own exit code.
+call :SCSIZE seclogon seclogon
+call :SCSIZE SENS sens
+call :SCSIZE Themes themes
+call :SCSIZE Appinfo appinfo
+call :SCSIZE Schedule schedule
+call :SCSIZE UserManager usermgr
+call :SCSIZE ShellHWDetection shhw
+call :SCSIZE EventLog eventlog
+call :SCSIZE RpcSs rpcss
+
+rem --- service DLLs in the live hosts (round 7; not asserted) -----------------
+rem r68 proved PID 748 (netsvcs) and PID 420 (EventLog) are alive, but a
+rem PID cannot tell RUNNING from START_PENDING. tasklist /m lists the
+rem modules a process loaded: if the service DLL is mapped, ServiceMain
+rem was at least entered (the DLL was loaded and its entry resolved); if
+rem the DLL is absent from a live host, the service never got that far.
+rem <prefix>_dll_any = the DLL is loaded in ANY svchost (no pid filter);
+rem <prefix>_dll_host = the DLL is loaded in THIS service's own host PID
+rem (na when the service has no host PID). any=1 + host=0 means tasklist's
+rem /fi pid filter is the problem, not the DLL load.
+call :SVCDLL seclogon seclogon.dll !PID_seclogon!
+call :SVCDLL sens Sens.dll !PID_sens!
+call :SVCDLL themes themeservice.dll !PID_themes!
+call :SVCDLL appinfo appinfo.dll !PID_appinfo!
+call :SVCDLL schedule schedsvc.dll !PID_schedule!
+call :SVCDLL usermgr usermgr.dll !PID_usermgr!
+call :SVCDLL shhw shsvcs.dll !PID_shhw!
+call :SVCDLL eventlog wevtsvc.dll !PID_eventlog!
+
+rem --- net start cross-check (round 7; not asserted) --------------------------
+rem net.exe + net1.exe are in the image (r65 boot.wim verified). net start
+rem lists running services by display name through a different SCM path
+rem than sc query. If sc is silent but net start lists Themes/UserManager/
+rem ShellHWDetection, those services ARE running and sc is the broken
+rem tool; if net start is also empty, the services really are not
+rem running. Display names: seclogon/SENS/Appinfo/Schedule have no
+rem DisplayName value in the r65 hive, so SCM falls back to the service
+rem key name; the other four resolve from their DLL string tables
+rem (Themes, User Manager, Shell Hardware Detection, Windows Event Log).
+rem :NETSVC checks both the display name and the key name.
+set "NET_TMP=%SystemDrive%\net-start-tmp.txt"
+set "NET_OK=0"
+set "NET_SIZE=missing"
+set "NET_RC=missing"
+if exist "%SystemRoot%\System32\net.exe" (
+    net start > "%NET_TMP%" 2>&1
+    set "NET_RC=!errorlevel!"
+    for %%F in ("%NET_TMP%") do set "NET_SIZE=%%~zF"
+    if !NET_SIZE! gtr 0 set "NET_OK=1"
+)
+>> "%PROBE_OUT%" echo net_ok=!NET_OK!
+>> "%PROBE_LOCAL%" echo net_ok=!NET_OK!
+>> "%PROBE_OUT%" echo net_size=!NET_SIZE!
+>> "%PROBE_LOCAL%" echo net_size=!NET_SIZE!
+>> "%PROBE_OUT%" echo net_rc=!NET_RC!
+>> "%PROBE_LOCAL%" echo net_rc=!NET_RC!
+if "!NET_OK!"=="1" (
+    echo --- net start --- >> "%TASKLIST_OUT%"
+    type "%NET_TMP%" >> "%TASKLIST_OUT%" 2>nul
+)
+call :NETSVC seclogon seclogon seclogon
+call :NETSVC sens SENS SENS
+call :NETSVC themes Themes Themes
+call :NETSVC appinfo Appinfo Appinfo
+call :NETSVC schedule Schedule Schedule
+call :NETSVC usermgr "User Manager" UserManager
+call :NETSVC shhw "Shell Hardware Detection" ShellHWDetection
+call :NETSVC eventlog "Windows Event Log" EventLog
 rem --- event log (round 6; not asserted) -------------------------------------
 rem wevtutil.exe + wevtapi.dll are in the base PE image (r65 boot.wim
 rem verified) and the EventLog service is Start=2, so no filelist change
@@ -396,6 +474,9 @@ set "SVC_PID="
 for /f "tokens=2" %%A in ('tasklist /fi "services eq %1" /nh 2^>nul ^| find /i "svchost.exe"') do set "SVC_PID=%%A"
 if not defined SVC_PID if "!SVC_STATE!"=="1_STOPPED" set "SVC_PID=0"
 if defined SVC_PID (echo %2_pid=!SVC_PID! >> "%PROBE_OUT%" & echo %2_pid=!SVC_PID! >> "%PROBE_LOCAL%") else (echo %2_pid=missing >> "%PROBE_OUT%" & echo %2_pid=missing >> "%PROBE_LOCAL%")
+rem Round 7: keep the PID in a named variable so the tasklist /m section
+rem below can check which service DLLs the live hosts loaded.
+if defined SVC_PID (set "PID_%2=!SVC_PID!") else (set "PID_%2=missing")
 set "SVC_ALIVE=missing"
 if not defined SVC_PID goto :SVCSTATE_ALIVE_DONE
 set "SVC_ALIVE=na"
@@ -416,4 +497,69 @@ sc.exe queryex %1 2>&1 | find /i "FAILED" >nul
 if not errorlevel 1 set "SVC_QXF=1"
 >> "%PROBE_OUT%" echo %2_qx_failed=!SVC_QXF!
 >> "%PROBE_LOCAL%" echo %2_qx_failed=!SVC_QXF!
+goto :EOF
+
+rem --- :SCSIZE -----------------------------------------------------------------
+rem Round 7: how many bytes does `sc query` actually produce for one service?
+rem %1 = service name, %2 = probe key prefix.
+rem Emits 2 keys: <prefix>_qsize (stdout+stderr byte count, redirected to a
+rem file), <prefix>_qrc (sc's exit code). 0 bytes + rc 0 = sc runs but
+rem outputs nothing; 0 bytes + rc != 0 = sc fails silently; >0 bytes =
+rem sc outputs something the find-based parse cannot see (encoding/format).
+rem The temp file is on X: (writable RAM disk) and is overwritten per call.
+:SCSIZE
+set "SC_TMP=%SystemDrive%\sc-query-tmp.txt"
+sc.exe query %1 > "%SC_TMP%" 2>&1
+set "SC_RC=!errorlevel!"
+set "SC_SIZE=missing"
+for %%F in ("%SC_TMP%") do set "SC_SIZE=%%~zF"
+>> "%PROBE_OUT%" echo %2_qsize=!SC_SIZE!
+>> "%PROBE_LOCAL%" echo %2_qsize=!SC_SIZE!
+>> "%PROBE_OUT%" echo %2_qrc=!SC_RC!
+>> "%PROBE_LOCAL%" echo %2_qrc=!SC_RC!
+goto :EOF
+
+rem --- :SVCDLL -----------------------------------------------------------------
+rem Round 7: is this service's DLL loaded in a live svchost?
+rem %1 = probe key prefix, %2 = service DLL file name, %3 = host PID
+rem (from PID_<prefix>, or "missing" when the service has no host).
+rem Emits 2 keys: <prefix>_dll_any (DLL loaded in ANY svchost),
+rem <prefix>_dll_host (DLL loaded in THIS service's own host PID;
+rem na when %3 is "missing"). The no-filter check is the cross-check:
+rem any=1 + host=0 means the /fi pid filter failed, not the DLL load.
+:SVCDLL
+tasklist /m %2 /nh 2>nul | find /i "svchost.exe" >nul
+if errorlevel 1 (echo %1_dll_any=0 >> "%PROBE_OUT%" & echo %1_dll_any=0 >> "%PROBE_LOCAL%") else (echo %1_dll_any=1 >> "%PROBE_OUT%" & echo %1_dll_any=1 >> "%PROBE_LOCAL%")
+if "%3"=="missing" goto :SVCDLL_NA
+tasklist /m %2 /fi "pid eq %3" /nh 2>nul | find /i "svchost.exe" >nul
+if errorlevel 1 (echo %1_dll_host=0 >> "%PROBE_OUT%" & echo %1_dll_host=0 >> "%PROBE_LOCAL%") else (echo %1_dll_host=1 >> "%PROBE_OUT%" & echo %1_dll_host=1 >> "%PROBE_LOCAL%")
+goto :EOF
+:SVCDLL_NA
+echo %1_dll_host=na >> "%PROBE_OUT%"
+echo %1_dll_host=na >> "%PROBE_LOCAL%"
+goto :EOF
+
+rem --- :NETSVC -----------------------------------------------------------------
+rem Round 7: does `net start` list this service as running?
+rem %1 = probe key prefix, %2 = display name (quoted if it has spaces),
+rem %3 = service key name. Emits 1 key: net_<prefix>. Checks the display
+rem name first, then the key name (SCM falls back to the key name when
+rem the service has no DisplayName value, which is the case for
+rem seclogon/SENS/Appinfo/Schedule). missing when net start produced no
+rem output (NET_OK=0).
+:NETSVC
+if "!NET_OK!"=="0" goto :NETSVC_MISSING
+set "NET_FOUND=0"
+find /i "%~2" "%NET_TMP%" >nul 2>&1
+if not errorlevel 1 set "NET_FOUND=1"
+if "!NET_FOUND!"=="0" (
+    find /i "%3" "%NET_TMP%" >nul 2>&1
+    if not errorlevel 1 set "NET_FOUND=1"
+)
+>> "%PROBE_OUT%" echo net_%1=!NET_FOUND!
+>> "%PROBE_LOCAL%" echo net_%1=!NET_FOUND!
+goto :EOF
+:NETSVC_MISSING
+echo net_%1=missing >> "%PROBE_OUT%"
+echo net_%1=missing >> "%PROBE_LOCAL%"
 goto :EOF
