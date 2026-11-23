@@ -777,6 +777,20 @@ function Invoke-QemuVerify {
         }
     }
 
+    # Round 9 (A8): enable the postshell self-test
+    # (hooks/postshell/90-selftest.cmd). The guest runs it only when
+    # this flag file exists on the first writable non-X: volume; the
+    # share is C: in the guest. A stale self-test file from a previous
+    # run in a reused ShareDir would fake a result, so it is removed
+    # here like the probe files above. The self-test writes
+    # micpe-selftest.txt back to the same volume; it is read after
+    # QEMU exits (see below) and printed by Test-Stage.ps1.
+    $selftestPath = Join-Path $ShareDir 'micpe-selftest.txt'
+    if (Test-Path -LiteralPath $selftestPath) {
+        Remove-Item -LiteralPath $selftestPath -Force
+    }
+    Set-Content -LiteralPath (Join-Path $ShareDir 'micpe-selftest.flag') -Value 'MICPE self-test enabled' -Encoding ascii
+
     if (-not $FirmwarePath) {
         switch ($Firmware) {
             'bios' {
@@ -1008,6 +1022,15 @@ function Invoke-QemuVerify {
     }
     else { $null }
 
+    # Round 9 (A8): read after QEMU exits, like the local probe copy
+    # above -- a clean guest shutdown flushes the vvfat share, so this
+    # is the freshest view the host will ever see. Do NOT read it in
+    # the wait loop: the share view can stall mid-run (run 47).
+    $selftestContent = if (Test-Path -LiteralPath $selftestPath) {
+        Get-Content -LiteralPath $selftestPath -Raw
+    }
+    else { $null }
+
     return [pscustomobject]@{
         ProbePath   = $probePath
         ProbeText   = $content
@@ -1015,6 +1038,9 @@ function Invoke-QemuVerify {
         ProbeLocalPath = $probeLocalPath
         ProbeLocalText = $localContent
         LocalProbeSeen = ($null -ne $localContent)
+        SelftestPath = $selftestPath
+        SelftestText = $selftestContent
+        SelftestSeen = ($null -ne $selftestContent)
         Screenshots = if ($ScreenshotDir) { @(Get-ChildItem -LiteralPath $ScreenshotDir -Filter '*.ppm' -File) } else { @() }
         QemuLog     = $LogPath
     }

@@ -739,6 +739,31 @@ function Install-MicpeRuntime {
     }
     Copy-Item -LiteralPath $evtSeed -Destination (Join-Path $evtLogs 'System.evtx') -Force
     Write-SubStep 'System.evtx seeded (EventLog experiment, round 8)'
+
+    # --- 8b. EventLog service ACE restore (round 9) ---------------------------
+    # Round 9 analysis (eventlog-writepath-analysis.md section 3.2): between
+    # r65 and r71 the winevt\Logs security descriptor was rewritten during
+    # the build -- the NT SERVICE\EventLog Full Control ACE is gone from
+    # both the directory and the seeded file (the parent winevt\ directory
+    # still has it). The seed inherits the broken ACL from the directory.
+    # Whether that is why wevtsvc never writes is unproven (the file's
+    # Authenticated Users ACE also grants write, and F4 decides), but the
+    # missing service ACE is a confirmed regression against a standard
+    # Windows ACL, so restore it here. No takeown: the directory already
+    # grants Administrators Full Control, so the build account can add an
+    # ACE without changing the owner. /T covers the just-copied seed file.
+    # The service SID is S-1-5-80-880578595-1860270145-482643319-2788375705-
+    # 1540778122 (SHA-1("EVENTLOG".UTF-16LE) verified, round 9 analysis).
+    # A failure here warns but does not fail the build: the F4 probe still
+    # runs and reports whether the service can write.
+    $eventLogSid = 'S-1-5-80-880578595-1860270145-482643319-2788375705-1540778122'
+    $icaclsOut = & icacls.exe $evtLogs /Grant "*${eventLogSid}:(OI)(CI)F" /T /C 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-SubStep 'NT SERVICE\EventLog ACE restored on winevt\Logs (round 9)'
+    }
+    else {
+        Write-Warn "icacls grant for NT SERVICE\EventLog failed (exit $LASTEXITCODE): $icaclsOut"
+    }
 }
 
 function Measure-UwpChainCompleteness {
@@ -997,6 +1022,29 @@ function Install-WbUwpChain {
                 }
             }
         }
+    }
+
+    # --- EventLog write-path probe (round 9, F4) -----------------------------
+    # eventcreate.exe is the only inbox tool that writes a classic event
+    # without going through SCM, so it separates "SCM never sends" (F3)
+    # from "wevtsvc cannot write". It is not in any filelist (the lists
+    # are generated; do not hand-edit them) and wb2 never ships it, so
+    # pull it straight from the source install.wim. --nullglob (inside
+    # Export-WimFiles) means a missing file does not fail the batch; the
+    # probe records eventcreate_present and skips if it is absent.
+    # NOTE: eventcreate /id accepts 1-1000 only (Microsoft Learn); the
+    # round-8 draft used 9999, which is out of range - the probe uses 999.
+    Export-WimFiles -WimPath $InstallWim -Index $SourceIndex `
+        -Destination $MountDir -Patterns @(
+            'Windows/System32/eventcreate.exe',
+            'Windows/System32/zh-CN/eventcreate.exe.mui'
+        )
+    $eventcreate = Join-Path $MountDir 'Windows/System32/eventcreate.exe'
+    if (Test-Path -LiteralPath $eventcreate) {
+        Write-SubStep 'eventcreate.exe staged (EventLog F4 probe)'
+    }
+    else {
+        Write-Warn 'eventcreate.exe not in source install.wim; F4 probe will skip'
     }
 
     Assert-UwpChainReady -MountDir $MountDir

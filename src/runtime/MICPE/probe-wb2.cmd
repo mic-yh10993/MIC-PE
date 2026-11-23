@@ -61,6 +61,12 @@ if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
 >> "%PROBE_LOCAL%" echo mark_probe_start=%TIME: =0%
 >> "%PROBE_OUT%" echo mark_probe_start=%TIME: =0%
 
+rem Round 9 (A9): early window snapshot, the first thing the probe does.
+rem Together with the t0 snapshot (phase 40, right after WaitForReady)
+rem and the late A1 snapshot below, this brackets the window's lifetime:
+rem t0 exists + early/late missing means created then destroyed (H2).
+call :WINPROBE early_ winprobe_early_ok
+
 rem --- shell -----------------------------------------------------------------
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo explorer=0 >> "%PROBE_OUT%" & echo explorer=0 >> "%PROBE_LOCAL%") else (echo explorer=1 >> "%PROBE_OUT%" & echo explorer=1 >> "%PROBE_LOCAL%")
@@ -76,6 +82,13 @@ if errorlevel 1 (echo shell_ready=0 >> "%PROBE_OUT%" & echo shell_ready=0 >> "%P
 
 >> "%PROBE_LOCAL%" echo mark_shell_ready=%TIME: =0%
 >> "%PROBE_OUT%" echo mark_shell_ready=%TIME: =0%
+
+rem Round 9 (A7): explorer CPU time, start sample. Taken AFTER the 15 s
+rem settle (not at probe start): the postshell self-test
+rem (90-selftest.cmd) opens two explorer windows during the settle, and
+rem its CPU burst must not pollute the baseline. End sample is just
+rem before mark_probe_end; the delta says blocked (near 0) vs spinning.
+call :EXPLORER_CPU start
 
 rem --- wb2-specific ----------------------------------------------------------
 rem logon_token: phase 25 wrote the flag when runas started explorer under
@@ -105,24 +118,10 @@ rem not the trigger, is broken.
 tasklist /m StartAllBackX64.dll /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo sab_hook=0 >> "%PROBE_OUT%" & echo sab_hook=0 >> "%PROBE_LOCAL%") else (echo sab_hook=1 >> "%PROBE_OUT%" & echo sab_hook=1 >> "%PROBE_LOCAL%")
 
-rem Round 8 (A1): window probe via WinXShell Lua. Shell_TrayWnd exists +
-rem visible distinguishes H1 (UI thread blocked after creating the window)
-rem from H2 (window created then destroyed); Progman is the desktop window;
-rem screen_x/screen_y are the QEMU resolution (H4 rectangle check).
-rem The Lua script writes key=value lines to micpe-winprobe.txt; this
-rem section appends them to both probe files (dual-write).
-set "WINPROBE_OK=0"
-if exist "%ProgramFiles%\WinXShell\WinXShell.exe" if exist "%SystemRoot%\System32\MICPE\winprobe.lua" (
-    if exist "%SystemDrive%\micpe-winprobe.txt" del "%SystemDrive%\micpe-winprobe.txt" >nul 2>&1
-    "%ProgramFiles%\WinXShell\WinXShell.exe" -script "%SystemRoot%\System32\MICPE\winprobe.lua" >nul 2>&1
-    if exist "%SystemDrive%\micpe-winprobe.txt" set "WINPROBE_OK=1"
-)
->> "%PROBE_OUT%" echo winprobe_ok=!WINPROBE_OK!
->> "%PROBE_LOCAL%" echo winprobe_ok=!WINPROBE_OK!
-if "!WINPROBE_OK!"=="1" (
-    type "%SystemDrive%\micpe-winprobe.txt" >> "%PROBE_OUT%"
-    type "%SystemDrive%\micpe-winprobe.txt" >> "%PROBE_LOCAL%"
-)
+rem Round 8 (A1): late window snapshot via WinXShell Lua (see :WINPROBE).
+rem Plain keys (no prefix): this is the snapshot r71 already has, so the
+rem key names stay comparable across rounds.
+call :WINPROBE "" winprobe_ok
 
 rem Round 8 (A2): sab_darkmagic - is DarkMagicX64.dll mapped into explorer?
 rem The main SAB DLL dynamically loads DarkMagic for theme/compositing
@@ -241,9 +240,17 @@ rem uploads (artifact quota). Shot-02 analysis (round 6) showed the
 rem r65/r66 timing flip is host speed, not a guest stall - these keys
 rem let the next round prove it directly instead of inferring from
 rem the vvfat warning.
-if exist "%SystemRoot%\System32\MICPE\logs	askbar-wait.txt" (
-    type "%SystemRoot%\System32\MICPE\logs	askbar-wait.txt" >> "%PROBE_OUT%"
-    type "%SystemRoot%\System32\MICPE\logs	askbar-wait.txt" >> "%PROBE_LOCAL%"
+if exist "%SystemRoot%\System32\MICPE\logs\taskbar-wait.txt" (
+    type "%SystemRoot%\System32\MICPE\logs\taskbar-wait.txt" >> "%PROBE_OUT%"
+    type "%SystemRoot%\System32\MICPE\logs\taskbar-wait.txt" >> "%PROBE_LOCAL%"
+)
+
+rem Round 9 (A9): t0 window snapshot (phase 40, right after WaitForReady).
+rem Copied verbatim like taskbar-wait.txt above; its keys carry the t0_
+rem prefix, so they cannot collide with the probe's own snapshots.
+if exist "%SystemRoot%\System32\MICPE\logs\winprobe-t0.txt" (
+    type "%SystemRoot%\System32\MICPE\logs\winprobe-t0.txt" >> "%PROBE_OUT%"
+    type "%SystemRoot%\System32\MICPE\logs\winprobe-t0.txt" >> "%PROBE_LOCAL%"
 )
 
 rem Wallpaper diagnostics (round 5; asserted). The wallpaper file is copied
@@ -462,6 +469,65 @@ if exist "%SystemRoot%\System32\wevtutil.exe" (
 >> "%PROBE_LOCAL%" echo wevtutil_gl_app_rc=!WEVTUTIL_GL_APP_RC!
 >> "%PROBE_OUT%" echo wevtutil_gl_app_size=!WEVTUTIL_GL_APP_SIZE!
 >> "%PROBE_LOCAL%" echo wevtutil_gl_app_size=!WEVTUTIL_GL_APP_SIZE!
+
+rem Round 9 (F5): full get-log dump + runtime channel state. F2 only
+rem recorded rc/size, and its text dump never left the image (the
+rem events file copies to the share only when wevtutil_ok=1). Copy the
+rem gl files unconditionally. /f:xml is locale-independent for the
+rem field names it shows; the reg query is the authoritative enabled
+rem check (0x1/0x0 digits, no locale dependence) because the text
+rem labels may be localized (zh-CN MUI present in this image).
+set "WEVTUTIL_GL_XML_RC=missing"
+set "WEVTUTIL_GLI_SYS_RC=missing"
+set "WEVTUTIL_GLI_SYS_SIZE=missing"
+set "EVT_SYS_ENABLED=missing"
+if exist "%SystemRoot%\System32\wevtutil.exe" (
+    wevtutil gl System /f:xml > "%SystemDrive%\micpe-wevt-gl-sys.xml" 2>nul
+    set "WEVTUTIL_GL_XML_RC=!ERRORLEVEL!"
+    wevtutil gli System > "%SystemDrive%\micpe-wevt-gli-sys.txt" 2>nul
+    set "WEVTUTIL_GLI_SYS_RC=!ERRORLEVEL!"
+    for %%F in ("%SystemDrive%\micpe-wevt-gli-sys.txt") do set "WEVTUTIL_GLI_SYS_SIZE=%%~zF"
+    if defined PROBE_DIR copy /y "%SystemDrive%\micpe-wevt-gl-sys.txt" "%PROBE_DIR%\micpe-wevt-gl-sys.txt" >nul 2>&1
+    if defined PROBE_DIR copy /y "%SystemDrive%\micpe-wevt-gl-sys.xml" "%PROBE_DIR%\micpe-wevt-gl-sys.xml" >nul 2>&1
+    if defined PROBE_DIR copy /y "%SystemDrive%\micpe-wevt-gli-sys.txt" "%PROBE_DIR%\micpe-wevt-gli-sys.txt" >nul 2>&1
+)
+rem Runtime channel key: wevtsvc creates WINEVT\Channels\System at
+rem startup (it is NOT in the offline hive, round 9 analysis section
+rem 2.2). Enabled=0x1 means the channel accepts writes; 0x0 means the
+rem channel itself is disabled; a missing key means wevtsvc never
+rem initialized the System channel at all. reg.exe output digits are
+rem locale-independent (same pattern as the sab_hkcu probe).
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\System" /v Enabled 2>nul | find "0x1" >nul
+if not errorlevel 1 set "EVT_SYS_ENABLED=1"
+if "!EVT_SYS_ENABLED!"=="missing" (
+    reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\System" /v Enabled 2>nul | find "0x0" >nul
+    if not errorlevel 1 set "EVT_SYS_ENABLED=0"
+)
+>> "%PROBE_OUT%" echo wevtutil_gl_xml_rc=!WEVTUTIL_GL_XML_RC!
+>> "%PROBE_LOCAL%" echo wevtutil_gl_xml_rc=!WEVTUTIL_GL_XML_RC!
+>> "%PROBE_OUT%" echo wevtutil_gli_sys_rc=!WEVTUTIL_GLI_SYS_RC!
+>> "%PROBE_LOCAL%" echo wevtutil_gli_sys_rc=!WEVTUTIL_GLI_SYS_RC!
+>> "%PROBE_OUT%" echo wevtutil_gli_sys_size=!WEVTUTIL_GLI_SYS_SIZE!
+>> "%PROBE_LOCAL%" echo wevtutil_gli_sys_size=!WEVTUTIL_GLI_SYS_SIZE!
+>> "%PROBE_OUT%" echo evt_sys_enabled=!EVT_SYS_ENABLED!
+>> "%PROBE_LOCAL%" echo evt_sys_enabled=!EVT_SYS_ENABLED!
+
+rem Round 9 (F5): grep the text gl output for the enabled line. This is
+rem the secondary check: if the text labels are localized (zh-CN MUI),
+rem "enabled" will not match and the key stays missing, in which case
+rem evt_sys_enabled (reg query above) is authoritative.
+set "EVT_SYS_ENABLED_TXT=missing"
+if exist "%SystemDrive%\micpe-wevt-gl-sys.txt" (
+    type "%SystemDrive%\micpe-wevt-gl-sys.txt" | findstr /i /c:"enabled: true" >nul
+    if not errorlevel 1 set "EVT_SYS_ENABLED_TXT=1"
+    if "!EVT_SYS_ENABLED_TXT!"=="missing" (
+        type "%SystemDrive%\micpe-wevt-gl-sys.txt" | findstr /i /c:"enabled: false" >nul
+        if not errorlevel 1 set "EVT_SYS_ENABLED_TXT=0"
+    )
+)
+>> "%PROBE_OUT%" echo evt_sys_enabled_txt=!EVT_SYS_ENABLED_TXT!
+>> "%PROBE_LOCAL%" echo evt_sys_enabled_txt=!EVT_SYS_ENABLED_TXT!
+
 set "EVT_7000=missing"
 set "EVT_7009=missing"
 set "EVT_7023=missing"
@@ -515,6 +581,8 @@ rem Phase 25 logs every sc start return code and the seclogon poll result
 rem into boot.log; the probe file alone cannot say WHY a service failed.
 rem Copy it to the share so the host can read the service start story.
 if defined PROBE_DIR if exist "%SystemRoot%\System32\MICPE\logs\boot.log" copy /y "%SystemRoot%\System32\MICPE\logs\boot.log" "%PROBE_DIR%\micpe-boot.log" >nul 2>&1
+rem Round 9 (A9): WaitForReady raw output (Lua errors, if any) to the share.
+if defined PROBE_DIR if exist "%SystemRoot%\System32\MICPE\logs\taskbar-wait-out.txt" copy /y "%SystemRoot%\System32\MICPE\logs\taskbar-wait-out.txt" "%PROBE_DIR%\micpe-taskbar-wait-out.txt" >nul 2>&1
 
 rem --- force SCM to write an event (round 8, F3) -----------------------------
 rem Last probe section: restarting Themes makes SCM log two 7036 events
@@ -550,10 +618,53 @@ if exist "%SystemRoot%\System32\wevtutil.exe" (
 >> "%PROBE_OUT%" echo wevtutil_ok_after=!WEVTUTIL_OK_AFTER!
 >> "%PROBE_LOCAL%" echo wevtutil_ok_after=!WEVTUTIL_OK_AFTER!
 
+rem --- eventcreate write-path probe (round 9, F4) ---------------------------
+rem F3 proved SCM restarts do not grow System.evtx. eventcreate writes a
+rem classic event through wevtapi -> RPC -> wevtsvc WITHOUT SCM, so it
+rem separates "SCM never sends" from "wevtsvc cannot write". MUST run
+rem after F3's after-checks above, or its one event pollutes the F3
+rem before/after size comparison. /id range is 1-1000 (Microsoft Learn);
+rem /so uses a fresh source name so the SCM source key is never touched.
+rem NOTE: .evtx files grow in 64 KB chunks, so one event does NOT change
+rem the file size -- the verdict comes from wevtutil_ok_f4 (qe reads the
+rem event back), not from evtx_system_size_f4, which is recorded only.
+set "EVENTCREATE_PRESENT=0"
+set "EVENTCREATE_RC=missing"
+set "EVTX_SYSTEM_F4=missing"
+set "EVTX_SYSTEM_SIZE_F4=missing"
+set "WEVTUTIL_OK_F4=0"
+if exist "%SystemRoot%\System32\eventcreate.exe" set "EVENTCREATE_PRESENT=1"
+if "!EVENTCREATE_PRESENT!"=="1" (
+    eventcreate /l SYSTEM /so MICPE-Probe /t INFORMATION /id 999 /d "MICPE F4 write-path probe" > "%SystemDrive%\micpe-eventcreate.txt" 2>&1
+    set "EVENTCREATE_RC=!ERRORLEVEL!"
+    ping -n 6 127.0.0.1 >nul 2>&1
+    if exist "%SystemRoot%\System32\winevt\Logs\System.evtx" set "EVTX_SYSTEM_F4=1"
+    if "!EVTX_SYSTEM_F4!"=="1" for %%F in ("%SystemRoot%\System32\winevt\Logs\System.evtx") do set "EVTX_SYSTEM_SIZE_F4=%%~zF"
+    wevtutil qe System /c:10 /rd:true /f:text > "%SystemDrive%\micpe-events-f4.txt" 2>nul
+    for %%F in ("%SystemDrive%\micpe-events-f4.txt") do if %%~zF gtr 0 set "WEVTUTIL_OK_F4=1"
+    if defined PROBE_DIR copy /y "%SystemDrive%\micpe-eventcreate.txt" "%PROBE_DIR%\micpe-eventcreate.txt" >nul 2>&1
+)
+>> "%PROBE_OUT%" echo eventcreate_present=!EVENTCREATE_PRESENT!
+>> "%PROBE_LOCAL%" echo eventcreate_present=!EVENTCREATE_PRESENT!
+>> "%PROBE_OUT%" echo eventcreate_rc=!EVENTCREATE_RC!
+>> "%PROBE_LOCAL%" echo eventcreate_rc=!EVENTCREATE_RC!
+>> "%PROBE_OUT%" echo evtx_system_size_f4=!EVTX_SYSTEM_SIZE_F4!
+>> "%PROBE_LOCAL%" echo evtx_system_size_f4=!EVTX_SYSTEM_SIZE_F4!
+>> "%PROBE_OUT%" echo wevtutil_ok_f4=!WEVTUTIL_OK_F4!
+>> "%PROBE_LOCAL%" echo wevtutil_ok_f4=!WEVTUTIL_OK_F4!
+
 rem --- done ------------------------------------------------------------------
 rem No shutdown: the harness takes the final screenshot, then quits QEMU.
 rem probe_done goes to the local file FIRST, then the share (run 48 fix),
 rem and the local copy is refreshed by a detached copy, never a share append.
+rem Round 9 (A7): end sample + delta. F3 (Themes restart) is already
+rem done and does not touch explorer, so the interval covers the whole
+rem probe body after the settle.
+call :EXPLORER_CPU end
+set "CPU_DELTA=missing"
+if "!CPU_MS_start!" neq "missing" if "!CPU_MS_end!" neq "missing" set /a "CPU_DELTA=!CPU_MS_end!-!CPU_MS_start!"
+>> "%PROBE_OUT%" echo explorer_cpu_delta_ms=!CPU_DELTA!
+>> "%PROBE_LOCAL%" echo explorer_cpu_delta_ms=!CPU_DELTA!
 >> "%PROBE_LOCAL%" echo mark_probe_end=%TIME: =0%
 >> "%PROBE_OUT%" echo mark_probe_end=%TIME: =0%
 >> "%PROBE_LOCAL%" echo probe_done=1
@@ -683,4 +794,66 @@ goto :EOF
 :NETSVC_MISSING
 echo net_%1=missing >> "%PROBE_OUT%"
 echo net_%1=missing >> "%PROBE_LOCAL%"
+goto :EOF
+
+rem --- :EXPLORER_CPU -----------------------------------------------------------
+rem Round 9 (A7): sample explorer.exe CPU time once.
+rem %1 = start|end. Emits 2 keys: explorer_cpu_%1 (raw H:MM:SS) and
+rem explorer_pid_%1, and keeps the millisecond value in CPU_MS_%1 for
+rem the delta computation at the end of the probe.
+rem Parse failure emits "missing", never 0: 0 ms means the process
+rem genuinely consumed no CPU (blocked), missing means the probe failed.
+rem tasklist /v /fo list prints one "CPU Time:     H:MM:SS" line per
+rem process; tokens=3-5 with delims ": " give H, MM, SS. The 1%%X-100
+rem trick defeats set /a octal parsing of zero-padded 08/09.
+rem First match wins when two explorer.exe processes exist (second-shell
+rem bug); the self-test file says whether that happened.
+:EXPLORER_CPU
+set "CPU_TMP=%SystemDrive%\micpe-cpu-tmp.txt"
+tasklist /v /fi "imagename eq explorer.exe" /fo list > "%CPU_TMP%" 2>nul
+set "CPU_RAW="
+set "CPU_H="
+set "CPU_M="
+set "CPU_S="
+for /f "tokens=3-5 delims=: " %%H in ('type "%CPU_TMP%" ^| find /i "CPU Time"') do if not defined CPU_RAW (
+    set "CPU_RAW=%%H:%%I:%%J"
+    set "CPU_H=%%H"
+    set "CPU_M=%%I"
+    set "CPU_S=%%J"
+)
+set "CPU_MS=missing"
+if defined CPU_RAW set /a "CPU_MS=((!CPU_H!*3600)+(1!CPU_M!-100)*60+(1!CPU_S!-100))*1000"
+set "CPU_MS_%1=!CPU_MS!"
+if not defined CPU_RAW set "CPU_RAW=missing"
+>> "%PROBE_OUT%" echo explorer_cpu_%1=!CPU_RAW!
+>> "%PROBE_LOCAL%" echo explorer_cpu_%1=!CPU_RAW!
+set "CPU_PID="
+for /f "tokens=2 delims=: " %%P in ('type "%CPU_TMP%" ^| find /i "PID:"') do if not defined CPU_PID set "CPU_PID=%%P"
+if not defined CPU_PID set "CPU_PID=missing"
+>> "%PROBE_OUT%" echo explorer_pid_%1=!CPU_PID!
+>> "%PROBE_LOCAL%" echo explorer_pid_%1=!CPU_PID!
+goto :EOF
+
+rem --- :WINPROBE ---------------------------------------------------------------
+rem Round 9 (A9): one window snapshot with a key prefix.
+rem %1 = key prefix for the Lua output ("" = plain keys), %2 = ok key name.
+rem Emits %2 (1 = the Lua script ran and wrote its file) plus the 8
+rem winprobe keys (prefixed) to both probe files. The prefix travels by
+rem environment variable (WINPROBE_PREFIX), which WinXShell inherits;
+rem it is cleared right after the call so the next snapshot starts clean.
+:WINPROBE
+set "WP_OK=0"
+set "WINPROBE_PREFIX=%~1"
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" if exist "%SystemRoot%\System32\MICPE\winprobe.lua" (
+    if exist "%SystemDrive%\micpe-winprobe.txt" del "%SystemDrive%\micpe-winprobe.txt" >nul 2>&1
+    "%ProgramFiles%\WinXShell\WinXShell.exe" -script "%SystemRoot%\System32\MICPE\winprobe.lua" >nul 2>&1
+    if exist "%SystemDrive%\micpe-winprobe.txt" set "WP_OK=1"
+)
+set "WINPROBE_PREFIX="
+>> "%PROBE_OUT%" echo %2=!WP_OK!
+>> "%PROBE_LOCAL%" echo %2=!WP_OK!
+if "!WP_OK!"=="1" (
+    type "%SystemDrive%\micpe-winprobe.txt" >> "%PROBE_OUT%"
+    type "%SystemDrive%\micpe-winprobe.txt" >> "%PROBE_LOCAL%"
+)
 goto :EOF

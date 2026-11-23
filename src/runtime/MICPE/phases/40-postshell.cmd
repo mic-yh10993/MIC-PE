@@ -26,12 +26,22 @@ rem Round 6: time the unbounded Taskbar:WaitForReady() call. Single-line
 rem ifs on purpose: %TIME% inside a parenthesised block expands once at
 rem parse time, so start and end would read the same. The probe copies
 rem this file into micpe-probe.txt (see probe-wb2.cmd).
-if exist "%ProgramFiles%\WinXShell\WinXShell.exe" echo taskbar_wait_start=%TIME: =0% > "%MICPE%\logs	askbar-wait.txt"
-if exist "%ProgramFiles%\WinXShell\WinXShell.exe" (
-    "%ProgramFiles%\WinXShell\WinXShell.exe" -luacode Taskbar:WaitForReady() >>"%LOG%" 2>&1
-    call :LOG "taskbar ready"
-)
-if exist "%ProgramFiles%\WinXShell\WinXShell.exe" echo taskbar_wait_end=%TIME: =0% >> "%MICPE%\logs	askbar-wait.txt"
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" echo taskbar_wait_start=%TIME: =0% > "%MICPE%\logs\taskbar-wait.txt"
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" call :WAIT_TASKBAR
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" echo taskbar_wait_end=%TIME: =0% >> "%MICPE%\logs\taskbar-wait.txt"
+
+rem Round 9 (A9): t0 window snapshot, seconds after WaitForReady returns.
+rem This closes the ~22 s gap between the WaitForReady return and the
+rem probe's first possible sample (mark_probe_start). Single-line ifs:
+rem %TIME% is not used here, but the file's no-delayed-expansion rule
+rem still applies -- no delayed-expansion syntax anywhere. WINPROBE_PREFIX
+rem is cleared right after the call: the hooks below inherit this
+rem session's environment, and a leaked t0_ prefix would rename the
+rem probe's own keys.
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" if exist "%MICPE%\winprobe.lua" set "WINPROBE_PREFIX=t0_"
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" if exist "%MICPE%\winprobe.lua" "%ProgramFiles%\WinXShell\WinXShell.exe" -script "%MICPE%\winprobe.lua" >>"%LOG%" 2>&1
+if exist "%SystemDrive%\micpe-winprobe.txt" copy /y "%SystemDrive%\micpe-winprobe.txt" "%MICPE%\logs\winprobe-t0.txt" >nul 2>&1
+set "WINPROBE_PREFIX="
 
 rem Leave no desktop.ini behind: Explorer would show it as a file on the
 rem desktop of a RAM-disk profile.
@@ -80,4 +90,24 @@ goto :EOF
 
 :LOG
 >>"%LOG%" echo [%DATE% %TIME%] %~1
+goto :EOF
+
+:WAIT_TASKBAR
+rem Round 9 (A9): capture the WaitForReady exit code and output size.
+rem No delayed expansion in this file (phases run under startnet.cmd
+rem without it), so the call lives in a subroutine: each line is parsed
+rem at execution time, and %errorlevel% on the line right after the
+rem call is WinXShell's own exit code.
+rem Output goes to taskbar-wait-out.txt first, then into boot.log, so
+rem boot.log keeps its old content AND the probe can size/copy the raw
+rem output. Only numeric keys go into taskbar-wait.txt: raw output may
+rem contain '=' and would inject junk keys into the probe file.
+"%ProgramFiles%\WinXShell\WinXShell.exe" -luacode Taskbar:WaitForReady() > "%MICPE%\logs\taskbar-wait-out.txt" 2>&1
+set "WAIT_RC=%errorlevel%"
+type "%MICPE%\logs\taskbar-wait-out.txt" >> "%LOG%" 2>nul
+set "WAIT_OUT_SIZE=missing"
+for %%F in ("%MICPE%\logs\taskbar-wait-out.txt") do set "WAIT_OUT_SIZE=%%~zF"
+echo taskbar_wait_rc=%WAIT_RC% >> "%MICPE%\logs\taskbar-wait.txt"
+echo taskbar_wait_out_size=%WAIT_OUT_SIZE% >> "%MICPE%\logs\taskbar-wait.txt"
+if "%WAIT_RC%"=="0" (call :LOG "taskbar ready") else (call :LOG "taskbar wait FAILED rc=%WAIT_RC%")
 goto :EOF

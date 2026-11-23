@@ -139,6 +139,19 @@ foreach ($key in ($probe.Keys | Sort-Object)) {
     Write-Host ("  {0,-22} {1}" -f $key, $probe[$key])
 }
 
+# Round 9 (A8): the postshell self-test runs in the guest when the
+# harness plants micpe-selftest.flag (Invoke-QemuVerify.ps1). Print it
+# here, next to the probe: it holds the explorer process count and the
+# full module list, which the probe file does not carry.
+if ($result.SelftestSeen) {
+    Write-Host ''
+    Write-Host 'self-test received:'
+    Write-Host $result.SelftestText
+}
+else {
+    Write-Host 'self-test: no micpe-selftest.txt was written by the PE'
+}
+
 $failures = Assert-ProbeResult -Probe $probe -Expected $expected
 
 if ($failures.Count -gt 0) {
