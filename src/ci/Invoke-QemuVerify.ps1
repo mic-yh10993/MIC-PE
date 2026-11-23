@@ -942,6 +942,15 @@ function Invoke-QemuVerify {
                         $probeText = $probeLocal
                         $probeLength = $probeLocal.Length
                     }
+                    # Round 6: log the guest's probe progress with every
+                    # screenshot, so a shot's content can be matched to
+                    # the probe step without inferring from the vvfat
+                    # warning (shot-02 analysis: the r65/r66 flip was a
+                    # host-speed race against the fixed 10-minute shot
+                    # cadence, and the probe position is the direct
+                    # evidence). Zero guest changes; Write-Host only.
+                    $lastKey = if ($probeText) { ($probeText -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1).Trim() } else { '(no probe)' }
+                    Write-Host ("    probe at shot-{0:d2}: {1} chars, last key: {2}" -f $shotIndex, $probeLength, $lastKey)
                     $heartbeatExists = Test-Path -LiteralPath $heartbeatPath
                     $heartbeatLength = if ($heartbeatExists) { (Get-Item -LiteralPath $heartbeatPath).Length } else { -1 }
                     $shotHash = (Get-FileHash -LiteralPath $shotPath -Algorithm MD5).Hash

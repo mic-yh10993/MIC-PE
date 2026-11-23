@@ -49,11 +49,17 @@ if not defined PROBE_DIR (
 )
 
 set "PROBE_LOCAL=%SystemDrive%\micpe-probe-local.txt"
+set "TASKLIST_OUT=%SystemDrive%\micpe-tasklist.txt"
+if defined PROBE_DIR set "TASKLIST_OUT=%PROBE_DIR%micpe-tasklist.txt"
+> "%TASKLIST_OUT%" echo --- micpe tasklist ---
 
 > "%PROBE_LOCAL%" echo boot=1 & > "%PROBE_OUT%" echo boot=1
 >> "%PROBE_LOCAL%" echo share=%SHARE% & >> "%PROBE_OUT%" echo share=%SHARE%
 if defined PROBE_DIR >> "%PROBE_LOCAL%" echo share_drive=%PROBE_DIR%
 if defined PROBE_DIR >> "%PROBE_OUT%" echo share_drive=%PROBE_DIR%
+
+>> "%PROBE_LOCAL%" echo mark_probe_start=%TIME: =0%
+>> "%PROBE_OUT%" echo mark_probe_start=%TIME: =0%
 
 rem --- shell -----------------------------------------------------------------
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
@@ -67,6 +73,9 @@ rem a crash-on-start explorer still appears in tasklist for a second or two.
 ping -n 16 127.0.0.1 >nul 2>&1
 tasklist /fi "imagename eq explorer.exe" /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo shell_ready=0 >> "%PROBE_OUT%" & echo shell_ready=0 >> "%PROBE_LOCAL%") else (echo shell_ready=1 >> "%PROBE_OUT%" & echo shell_ready=1 >> "%PROBE_LOCAL%")
+
+>> "%PROBE_LOCAL%" echo mark_shell_ready=%TIME: =0%
+>> "%PROBE_OUT%" echo mark_shell_ready=%TIME: =0%
 
 rem --- wb2-specific ----------------------------------------------------------
 rem logon_token: phase 25 wrote the flag when runas started explorer under
@@ -178,6 +187,19 @@ if exist "%SystemRoot%\System32\MICPE\logs\scstart-rc.txt" (
     type "%SystemRoot%\System32\MICPE\logs\scstart-rc.txt" >> "%PROBE_LOCAL%"
 )
 
+rem Phase 40 taskbar-wait timestamps (round 6; not asserted). Phase 40
+rem writes taskbar_wait_start/end around the unbounded WinXShell
+rem Taskbar:WaitForReady() call; the probe copies them here so the
+rem wait duration is visible in the CI log even when boot.log never
+rem uploads (artifact quota). Shot-02 analysis (round 6) showed the
+rem r65/r66 timing flip is host speed, not a guest stall - these keys
+rem let the next round prove it directly instead of inferring from
+rem the vvfat warning.
+if exist "%SystemRoot%\System32\MICPE\logs	askbar-wait.txt" (
+    type "%SystemRoot%\System32\MICPE\logs	askbar-wait.txt" >> "%PROBE_OUT%"
+    type "%SystemRoot%\System32\MICPE\logs	askbar-wait.txt" >> "%PROBE_LOCAL%"
+)
+
 rem Wallpaper diagnostics (round 5; asserted). The wallpaper file is copied
 rem by the Brand step and the Wallpaper registry value is written at build
 rem time (40-themes-default.reg), so a 0 here is a build regression, not a
@@ -212,6 +234,109 @@ if errorlevel 1 set "TB_OK=0"
 >> "%PROBE_OUT%" echo taskbar_values=!TB_OK!
 >> "%PROBE_LOCAL%" echo taskbar_values=!TB_OK!
 
+rem --- service state capture (round 6; not asserted) -------------------------
+rem sc queryex gives the full picture the RUNNING checks above cannot:
+rem STATE (1 STOPPED / 2 START_PENDING / 4 RUNNING), WIN32_EXIT_CODE,
+rem SERVICE_EXIT_CODE and the hosting svchost PID. r66 proved the two
+rem death modes are different - Themes stuck START_PENDING (sc start
+rem returns 1056, never RUNNING) vs seclogon/SENS dying after start
+rem (sc start returns 0, still not RUNNING 10 s later) - and only the
+rem STATE + exit codes say which mode each service is in. The raw
+rem queryex output is dumped to the tasklist file first (run 44386689307:
+rem the parse can come back missing while the raw text still tells).
+rem EventLog is included: if wevtutil fails below, its STATE says whether
+rem the event log service itself is down.
+>> "%PROBE_LOCAL%" echo mark_svcstate_start=%TIME: =0%
+>> "%PROBE_OUT%" echo mark_svcstate_start=%TIME: =0%
+echo --- tasklist /svc --- >> "%TASKLIST_OUT%"
+tasklist /svc >> "%TASKLIST_OUT%" 2>&1
+echo --- tasklist /v --- >> "%TASKLIST_OUT%"
+tasklist /v >> "%TASKLIST_OUT%" 2>&1
+set "SVCHOST_COUNT="
+for /f %%A in ('tasklist /fi "imagename eq svchost.exe" /nh 2^>nul ^| find /c "svchost.exe"') do set "SVCHOST_COUNT=%%A"
+if defined SVCHOST_COUNT (echo svchost_count=!SVCHOST_COUNT! >> "%PROBE_OUT%" & echo svchost_count=!SVCHOST_COUNT! >> "%PROBE_LOCAL%") else (echo svchost_count=missing >> "%PROBE_OUT%" & echo svchost_count=missing >> "%PROBE_LOCAL%")
+call :SVCSTATE seclogon seclogon
+call :SVCSTATE SENS sens
+call :SVCSTATE Themes themes
+call :SVCSTATE Appinfo appinfo
+call :SVCSTATE Schedule schedule
+call :SVCSTATE UserManager usermgr
+call :SVCSTATE ShellHWDetection shhw
+call :SVCSTATE EventLog eventlog
+
+rem Schedule needs its Tasks folder at runtime (round 6 offline finding:
+rem \Windows\System32\Tasks does not exist in the r65 WIM). schedsvc may
+rem create it itself on start; a 0 here with Schedule still dead says not.
+if exist "%SystemRoot%\System32\Tasks" (echo tasks_folder=1 >> "%PROBE_OUT%" & echo tasks_folder=1 >> "%PROBE_LOCAL%") else (echo tasks_folder=0 >> "%PROBE_OUT%" & echo tasks_folder=0 >> "%PROBE_LOCAL%")
+
+rem --- event log (round 6; not asserted) -------------------------------------
+rem wevtutil.exe + wevtapi.dll are in the base PE image (r65 boot.wim
+rem verified) and the EventLog service is Start=2, so no filelist change
+rem was needed. Dump the newest 200 System events, count the Service
+rem Control Manager error IDs (7000 start failed, 7009 start timeout,
+rem 7023 terminated with error, 7031 terminated unexpectedly, 7034
+rem terminated unexpectedly), and copy the dump to the share as
+rem micpe-events.txt (build.yml uploads it). The .evtx files are copied
+rem too (classic probe pattern) for offline parsing when the artifact
+rem quota recovers. If wevtutil fails (EventLog down), the counts stay
+rem missing and wevtutil_ok=0 says so.
+set "EVT_TXT=%SystemDrive%\micpe-events.txt"
+if exist "%EVT_TXT%" del "%EVT_TXT%" >nul 2>&1
+set "WEVTUTIL_OK=0"
+if exist "%SystemRoot%\System32\wevtutil.exe" (
+    wevtutil qe System /c:200 /rd:true /f:text > "%EVT_TXT%" 2>nul
+    for %%F in ("%EVT_TXT%") do if %%~zF gtr 0 set "WEVTUTIL_OK=1"
+)
+>> "%PROBE_OUT%" echo wevtutil_ok=!WEVTUTIL_OK!
+>> "%PROBE_LOCAL%" echo wevtutil_ok=!WEVTUTIL_OK!
+set "EVT_7000=missing"
+set "EVT_7009=missing"
+set "EVT_7023=missing"
+set "EVT_7031=missing"
+set "EVT_7034=missing"
+if "!WEVTUTIL_OK!"=="1" for /f %%A in ('type "%EVT_TXT%" ^| find /i /c "Event ID: 7000"') do set "EVT_7000=%%A"
+if "!WEVTUTIL_OK!"=="1" for /f %%A in ('type "%EVT_TXT%" ^| find /i /c "Event ID: 7009"') do set "EVT_7009=%%A"
+if "!WEVTUTIL_OK!"=="1" for /f %%A in ('type "%EVT_TXT%" ^| find /i /c "Event ID: 7023"') do set "EVT_7023=%%A"
+if "!WEVTUTIL_OK!"=="1" for /f %%A in ('type "%EVT_TXT%" ^| find /i /c "Event ID: 7031"') do set "EVT_7031=%%A"
+if "!WEVTUTIL_OK!"=="1" for /f %%A in ('type "%EVT_TXT%" ^| find /i /c "Event ID: 7034"') do set "EVT_7034=%%A"
+>> "%PROBE_OUT%" echo evt_7000=!EVT_7000!
+>> "%PROBE_LOCAL%" echo evt_7000=!EVT_7000!
+>> "%PROBE_OUT%" echo evt_7009=!EVT_7009!
+>> "%PROBE_LOCAL%" echo evt_7009=!EVT_7009!
+>> "%PROBE_OUT%" echo evt_7023=!EVT_7023!
+>> "%PROBE_LOCAL%" echo evt_7023=!EVT_7023!
+>> "%PROBE_OUT%" echo evt_7031=!EVT_7031!
+>> "%PROBE_LOCAL%" echo evt_7031=!EVT_7031!
+>> "%PROBE_OUT%" echo evt_7034=!EVT_7034!
+>> "%PROBE_LOCAL%" echo evt_7034=!EVT_7034!
+set "EVT_COPY=0"
+if "!WEVTUTIL_OK!"=="1" if defined PROBE_DIR copy /y "%EVT_TXT%" "%PROBE_DIR%\micpe-events.txt" >nul 2>&1
+if "!WEVTUTIL_OK!"=="1" if defined PROBE_DIR if exist "%PROBE_DIR%\micpe-events.txt" set "EVT_COPY=1"
+>> "%PROBE_OUT%" echo evt_dump_copy=!EVT_COPY!
+>> "%PROBE_LOCAL%" echo evt_dump_copy=!EVT_COPY!
+set "EVTX_SYSTEM=0"
+if exist "%SystemRoot%\System32\winevt\Logs\System.evtx" set "EVTX_SYSTEM=1"
+>> "%PROBE_OUT%" echo evtx_system=!EVTX_SYSTEM!
+>> "%PROBE_LOCAL%" echo evtx_system=!EVTX_SYSTEM!
+if "!EVTX_SYSTEM!"=="1" for %%F in ("%SystemRoot%\System32\winevt\Logs\System.evtx") do echo evtx_system_size=%%~zF >> "%PROBE_OUT%"
+if "!EVTX_SYSTEM!"=="1" for %%F in ("%SystemRoot%\System32\winevt\Logs\System.evtx") do echo evtx_system_size=%%~zF >> "%PROBE_LOCAL%"
+set "EVTX_SYSTEM_COPY=0"
+if "!EVTX_SYSTEM!"=="1" if defined PROBE_DIR copy /y "%SystemRoot%\System32\winevt\Logs\System.evtx" "%PROBE_DIR%\micpe-system.evtx" >nul 2>&1
+if "!EVTX_SYSTEM!"=="1" if defined PROBE_DIR if exist "%PROBE_DIR%\micpe-system.evtx" set "EVTX_SYSTEM_COPY=1"
+>> "%PROBE_OUT%" echo evtx_system_copy=!EVTX_SYSTEM_COPY!
+>> "%PROBE_LOCAL%" echo evtx_system_copy=!EVTX_SYSTEM_COPY!
+set "EVTX_APP=0"
+if exist "%SystemRoot%\System32\winevt\Logs\Application.evtx" set "EVTX_APP=1"
+>> "%PROBE_OUT%" echo evtx_app=!EVTX_APP!
+>> "%PROBE_LOCAL%" echo evtx_app=!EVTX_APP!
+if "!EVTX_APP!"=="1" for %%F in ("%SystemRoot%\System32\winevt\Logs\Application.evtx") do echo evtx_app_size=%%~zF >> "%PROBE_OUT%"
+if "!EVTX_APP!"=="1" for %%F in ("%SystemRoot%\System32\winevt\Logs\Application.evtx") do echo evtx_app_size=%%~zF >> "%PROBE_LOCAL%"
+set "EVTX_APP_COPY=0"
+if "!EVTX_APP!"=="1" if defined PROBE_DIR copy /y "%SystemRoot%\System32\winevt\Logs\Application.evtx" "%PROBE_DIR%\micpe-application.evtx" >nul 2>&1
+if "!EVTX_APP!"=="1" if defined PROBE_DIR if exist "%PROBE_DIR%\micpe-application.evtx" set "EVTX_APP_COPY=1"
+>> "%PROBE_OUT%" echo evtx_app_copy=!EVTX_APP_COPY!
+>> "%PROBE_LOCAL%" echo evtx_app_copy=!EVTX_APP_COPY!
+
 rem -- boot.log to the share (round 3) ---------------------------------------
 rem Phase 25 logs every sc start return code and the seclogon poll result
 rem into boot.log; the probe file alone cannot say WHY a service failed.
@@ -222,9 +347,46 @@ rem --- done ------------------------------------------------------------------
 rem No shutdown: the harness takes the final screenshot, then quits QEMU.
 rem probe_done goes to the local file FIRST, then the share (run 48 fix),
 rem and the local copy is refreshed by a detached copy, never a share append.
+>> "%PROBE_LOCAL%" echo mark_probe_end=%TIME: =0%
+>> "%PROBE_OUT%" echo mark_probe_end=%TIME: =0%
 >> "%PROBE_LOCAL%" echo probe_done=1
 >> "%PROBE_OUT%" echo probe_done=1
 if defined PROBE_DIR start "" /min cmd /c copy /y "%PROBE_LOCAL%" "%PROBE_DIR%micpe-probe-local.txt" >nul 2>&1
 
 endlocal
 exit /b 0
+
+rem --- :SVCSTATE ---------------------------------------------------------------
+rem Round 6: capture the full sc queryex picture for one service.
+rem %1 = service name (as sc knows it), %2 = probe key prefix.
+rem Emits 5 keys: <prefix>_state (numeric code + text, e.g. 1_STOPPED),
+rem <prefix>_win32exit, <prefix>_svcexit, <prefix>_pid, <prefix>_pid_alive.
+rem The raw queryex output is dumped to the tasklist file first: run
+rem 44386689307 proved the parse can come back missing while the raw
+rem text still says what happened. pid_alive is na when the service is
+rem STOPPED (PID 0) and missing when queryex itself failed.
+:SVCSTATE
+echo --- sc queryex %1 --- >> "%TASKLIST_OUT%"
+sc queryex %1 >> "%TASKLIST_OUT%" 2>&1
+set "SVC_STATE="
+for /f "tokens=3,4" %%A in ('sc queryex %1 2^>nul ^| find /i "STATE"') do set "SVC_STATE=%%A_%%B"
+if defined SVC_STATE (echo %2_state=!SVC_STATE! >> "%PROBE_OUT%" & echo %2_state=!SVC_STATE! >> "%PROBE_LOCAL%") else (echo %2_state=missing >> "%PROBE_OUT%" & echo %2_state=missing >> "%PROBE_LOCAL%")
+set "SVC_WIN32="
+for /f "tokens=3" %%A in ('sc queryex %1 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "SVC_WIN32=%%A"
+if defined SVC_WIN32 (echo %2_win32exit=!SVC_WIN32! >> "%PROBE_OUT%" & echo %2_win32exit=!SVC_WIN32! >> "%PROBE_LOCAL%") else (echo %2_win32exit=missing >> "%PROBE_OUT%" & echo %2_win32exit=missing >> "%PROBE_LOCAL%")
+set "SVC_EXIT="
+for /f "tokens=3" %%A in ('sc queryex %1 2^>nul ^| find /i "SERVICE_EXIT_CODE"') do set "SVC_EXIT=%%A"
+if defined SVC_EXIT (echo %2_svcexit=!SVC_EXIT! >> "%PROBE_OUT%" & echo %2_svcexit=!SVC_EXIT! >> "%PROBE_LOCAL%") else (echo %2_svcexit=missing >> "%PROBE_OUT%" & echo %2_svcexit=missing >> "%PROBE_LOCAL%")
+set "SVC_PID="
+for /f "tokens=3" %%A in ('sc queryex %1 2^>nul ^| find /i "PID"') do set "SVC_PID=%%A"
+if defined SVC_PID (echo %2_pid=!SVC_PID! >> "%PROBE_OUT%" & echo %2_pid=!SVC_PID! >> "%PROBE_LOCAL%") else (echo %2_pid=missing >> "%PROBE_OUT%" & echo %2_pid=missing >> "%PROBE_LOCAL%")
+set "SVC_ALIVE=missing"
+if not defined SVC_PID goto :SVCSTATE_ALIVE_DONE
+set "SVC_ALIVE=na"
+if "!SVC_PID!"=="0" goto :SVCSTATE_ALIVE_DONE
+tasklist /fi "pid eq !SVC_PID!" /nh 2>nul | find /i "svchost.exe" >nul
+if errorlevel 1 (set "SVC_ALIVE=0") else (set "SVC_ALIVE=1")
+:SVCSTATE_ALIVE_DONE
+>> "%PROBE_OUT%" echo %2_pid_alive=!SVC_ALIVE!
+>> "%PROBE_LOCAL%" echo %2_pid_alive=!SVC_ALIVE!
+goto :EOF

@@ -22,10 +22,16 @@ if not defined SHELL_OK goto :NO_SHELL
 rem -- shell is up -------------------------------------------------------------
 rem The taskbar is a separate XAML process: waiting for it here is what makes
 rem the first paint look finished instead of an empty bar for a few seconds.
+rem Round 6: time the unbounded Taskbar:WaitForReady() call. Single-line
+rem ifs on purpose: %TIME% inside a parenthesised block expands once at
+rem parse time, so start and end would read the same. The probe copies
+rem this file into micpe-probe.txt (see probe-wb2.cmd).
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" echo taskbar_wait_start=%TIME: =0% > "%MICPE%\logs	askbar-wait.txt"
 if exist "%ProgramFiles%\WinXShell\WinXShell.exe" (
     "%ProgramFiles%\WinXShell\WinXShell.exe" -luacode Taskbar:WaitForReady() >>"%LOG%" 2>&1
     call :LOG "taskbar ready"
 )
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" echo taskbar_wait_end=%TIME: =0% >> "%MICPE%\logs	askbar-wait.txt"
 
 rem Leave no desktop.ini behind: Explorer would show it as a file on the
 rem desktop of a RAM-disk profile.

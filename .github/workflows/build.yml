@@ -343,6 +343,7 @@ jobs:
             verify-out/share/micpe-boot.log
             verify-out/share/micpe-watchdog-heartbeat.txt
             verify-out/share/micpe-tasklist.txt
+            verify-out/share/micpe-events.txt
             verify-out/share/micpe-system.evtx
             verify-out/share/micpe-application.evtx
             verify-out/share/micpe-system-diag.evtx
