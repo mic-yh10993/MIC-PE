@@ -105,10 +105,56 @@ rem not the trigger, is broken.
 tasklist /m StartAllBackX64.dll /nh 2>nul | find /i "explorer.exe" >nul
 if errorlevel 1 (echo sab_hook=0 >> "%PROBE_OUT%" & echo sab_hook=0 >> "%PROBE_LOCAL%") else (echo sab_hook=1 >> "%PROBE_OUT%" & echo sab_hook=1 >> "%PROBE_LOCAL%")
 
+rem Round 8 (A1): window probe via WinXShell Lua. Shell_TrayWnd exists +
+rem visible distinguishes H1 (UI thread blocked after creating the window)
+rem from H2 (window created then destroyed); Progman is the desktop window;
+rem screen_x/screen_y are the QEMU resolution (H4 rectangle check).
+rem The Lua script writes key=value lines to micpe-winprobe.txt; this
+rem section appends them to both probe files (dual-write).
+set "WINPROBE_OK=0"
+if exist "%ProgramFiles%\WinXShell\WinXShell.exe" if exist "%SystemRoot%\System32\MICPE\winprobe.lua" (
+    if exist "%SystemDrive%\micpe-winprobe.txt" del "%SystemDrive%\micpe-winprobe.txt" >nul 2>&1
+    "%ProgramFiles%\WinXShell\WinXShell.exe" -script "%SystemRoot%\System32\MICPE\winprobe.lua" >nul 2>&1
+    if exist "%SystemDrive%\micpe-winprobe.txt" set "WINPROBE_OK=1"
+)
+>> "%PROBE_OUT%" echo winprobe_ok=!WINPROBE_OK!
+>> "%PROBE_LOCAL%" echo winprobe_ok=!WINPROBE_OK!
+if "!WINPROBE_OK!"=="1" (
+    type "%SystemDrive%\micpe-winprobe.txt" >> "%PROBE_OUT%"
+    type "%SystemDrive%\micpe-winprobe.txt" >> "%PROBE_LOCAL%"
+)
+
+rem Round 8 (A2): sab_darkmagic - is DarkMagicX64.dll mapped into explorer?
+rem The main SAB DLL dynamically loads DarkMagic for theme/compositing
+rem decisions (IsCompositedTheme). 0 means the dynamic load failed (H3).
+tasklist /m DarkMagicX64.dll /nh 2>nul | find /i "explorer.exe" >nul
+if errorlevel 1 (echo sab_darkmagic=0 >> "%PROBE_OUT%" & echo sab_darkmagic=0 >> "%PROBE_LOCAL%") else (echo sab_darkmagic=1 >> "%PROBE_OUT%" & echo sab_darkmagic=1 >> "%PROBE_LOCAL%")
+
+rem Round 8 (A3): sab_taskbarsib - did SAB write its taskbar runtime state?
+rem TaskbarSIB is written by SAB taskbar code; its presence means SAB
+rem initialization reached the "write state" step.
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\Streams\Desktop" /v TaskbarSIB 2>nul | find /i "TaskbarSIB" >nul
+if errorlevel 1 (echo sab_taskbarsib=0 >> "%PROBE_OUT%" & echo sab_taskbarsib=0 >> "%PROBE_LOCAL%") else (echo sab_taskbarsib=1 >> "%PROBE_OUT%" & echo sab_taskbarsib=1 >> "%PROBE_LOCAL%")
+
+rem Round 8 (A4): stuckrects3 - did the tray positioning complete?
+reg query "HKU\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3" /v Settings 2>nul | find /i "Settings" >nul
+if errorlevel 1 (echo stuckrects3=0 >> "%PROBE_OUT%" & echo stuckrects3=0 >> "%PROBE_LOCAL%") else (echo stuckrects3=1 >> "%PROBE_OUT%" & echo stuckrects3=1 >> "%PROBE_LOCAL%")
+
+rem Round 8 (A5): sab_hkcu - is the SAB setting visible to the live HKCU?
+rem Decides whether live HKCU is the mounted DEFAULT hive. If 0, SYSTEM
+rem explorer cannot read the baked SAB settings (LegacyTaskbar=1 not in
+rem effect, SAB runs in XAML mode) and "HKCU is not DEFAULT" becomes the
+rem primary root cause.
+reg query "HKCU\Software\StartIsBack" /v LegacyTaskbar 2>nul | find "0x1" >nul
+if errorlevel 1 (echo sab_hkcu=0 >> "%PROBE_OUT%" & echo sab_hkcu=0 >> "%PROBE_LOCAL%") else (echo sab_hkcu=1 >> "%PROBE_OUT%" & echo sab_hkcu=1 >> "%PROBE_LOCAL%")
+
 rem logonui: LogonUI.exe present in the image (72-logon-ui.txt).
 if exist "%SystemRoot%\System32\LogonUI.exe" (echo logonui=1 >> "%PROBE_OUT%" & echo logonui=1 >> "%PROBE_LOCAL%") else (echo logonui=0 >> "%PROBE_OUT%" & echo logonui=0 >> "%PROBE_LOCAL%")
 
-rem seclogon: Secondary Logon service RUNNING (phase 25 starts it).
+rem seclogon: sc-based RUNNING check (phase 25 starts it). Round 7 proved
+rem sc query in this PE returns exit 0 with zero bytes of stdout, so this
+rem key is always 0 here and is NOT asserted (Assert-Probe uses
+rem net_seclogon instead). Kept as a diagnostic of sc itself.
 sc.exe query seclogon 2>nul | find /i "RUNNING" >nul
 if errorlevel 1 (echo seclogon=0 >> "%PROBE_OUT%" & echo seclogon=0 >> "%PROBE_LOCAL%") else (echo seclogon=1 >> "%PROBE_OUT%" & echo seclogon=1 >> "%PROBE_LOCAL%")
 
@@ -355,6 +401,7 @@ call :NETSVC schedule Schedule Schedule
 call :NETSVC usermgr "User Manager" UserManager
 call :NETSVC shhw "Shell Hardware Detection" ShellHWDetection
 call :NETSVC eventlog "Windows Event Log" EventLog
+call :NETSVC appreadiness "App Readiness" AppReadiness
 rem --- event log (round 6; not asserted) -------------------------------------
 rem wevtutil.exe + wevtapi.dll are in the base PE image (r65 boot.wim
 rem verified) and the EventLog service is Start=2, so no filelist change
@@ -375,6 +422,46 @@ if exist "%SystemRoot%\System32\wevtutil.exe" (
 )
 >> "%PROBE_OUT%" echo wevtutil_ok=!WEVTUTIL_OK!
 >> "%PROBE_LOCAL%" echo wevtutil_ok=!WEVTUTIL_OK!
+rem Round 8 (F2): wevtutil channel diagnostics. qe says whether events
+rem can be READ; el/gl say whether the channels EXIST and are ENABLED.
+rem gl System reporting the channel missing means the log definition is
+rem broken (1a/1b); enabled=false is 1b confirmed; gl succeeding with 0
+rem records and no file means the write path itself is broken (1d/1e/1f).
+rem Output goes to the events dump (micpe-events.txt, uploaded by build.yml).
+set "WEVTUTIL_EL_RC=missing"
+set "WEVTUTIL_EL_SIZE=missing"
+set "WEVTUTIL_GL_SYS_RC=missing"
+set "WEVTUTIL_GL_SYS_SIZE=missing"
+set "WEVTUTIL_GL_APP_RC=missing"
+set "WEVTUTIL_GL_APP_SIZE=missing"
+if exist "%SystemRoot%\System32\wevtutil.exe" (
+    wevtutil el > "%SystemDrive%\micpe-wevt-el.txt" 2>nul
+    set "WEVTUTIL_EL_RC=!ERRORLEVEL!"
+    for %%F in ("%SystemDrive%\micpe-wevt-el.txt") do set "WEVTUTIL_EL_SIZE=%%~zF"
+    wevtutil gl System > "%SystemDrive%\micpe-wevt-gl-sys.txt" 2>nul
+    set "WEVTUTIL_GL_SYS_RC=!ERRORLEVEL!"
+    for %%F in ("%SystemDrive%\micpe-wevt-gl-sys.txt") do set "WEVTUTIL_GL_SYS_SIZE=%%~zF"
+    wevtutil gl Application > "%SystemDrive%\micpe-wevt-gl-app.txt" 2>nul
+    set "WEVTUTIL_GL_APP_RC=!ERRORLEVEL!"
+    for %%F in ("%SystemDrive%\micpe-wevt-gl-app.txt") do set "WEVTUTIL_GL_APP_SIZE=%%~zF"
+    type "%SystemDrive%\micpe-wevt-el.txt" >> "%EVT_TXT%" 2>nul
+    echo --- wevtutil gl System --- >> "%EVT_TXT%"
+    type "%SystemDrive%\micpe-wevt-gl-sys.txt" >> "%EVT_TXT%" 2>nul
+    echo --- wevtutil gl Application --- >> "%EVT_TXT%"
+    type "%SystemDrive%\micpe-wevt-gl-app.txt" >> "%EVT_TXT%" 2>nul
+)
+>> "%PROBE_OUT%" echo wevtutil_el_rc=!WEVTUTIL_EL_RC!
+>> "%PROBE_LOCAL%" echo wevtutil_el_rc=!WEVTUTIL_EL_RC!
+>> "%PROBE_OUT%" echo wevtutil_el_size=!WEVTUTIL_EL_SIZE!
+>> "%PROBE_LOCAL%" echo wevtutil_el_size=!WEVTUTIL_EL_SIZE!
+>> "%PROBE_OUT%" echo wevtutil_gl_system_rc=!WEVTUTIL_GL_SYS_RC!
+>> "%PROBE_LOCAL%" echo wevtutil_gl_system_rc=!WEVTUTIL_GL_SYS_RC!
+>> "%PROBE_OUT%" echo wevtutil_gl_system_size=!WEVTUTIL_GL_SYS_SIZE!
+>> "%PROBE_LOCAL%" echo wevtutil_gl_system_size=!WEVTUTIL_GL_SYS_SIZE!
+>> "%PROBE_OUT%" echo wevtutil_gl_app_rc=!WEVTUTIL_GL_APP_RC!
+>> "%PROBE_LOCAL%" echo wevtutil_gl_app_rc=!WEVTUTIL_GL_APP_RC!
+>> "%PROBE_OUT%" echo wevtutil_gl_app_size=!WEVTUTIL_GL_APP_SIZE!
+>> "%PROBE_LOCAL%" echo wevtutil_gl_app_size=!WEVTUTIL_GL_APP_SIZE!
 set "EVT_7000=missing"
 set "EVT_7009=missing"
 set "EVT_7023=missing"
@@ -428,6 +515,40 @@ rem Phase 25 logs every sc start return code and the seclogon poll result
 rem into boot.log; the probe file alone cannot say WHY a service failed.
 rem Copy it to the share so the host can read the service start story.
 if defined PROBE_DIR if exist "%SystemRoot%\System32\MICPE\logs\boot.log" copy /y "%SystemRoot%\System32\MICPE\logs\boot.log" "%PROBE_DIR%\micpe-boot.log" >nul 2>&1
+
+rem --- force SCM to write an event (round 8, F3) -----------------------------
+rem Last probe section: restarting Themes makes SCM log two 7036 events
+rem (stop + start). If System.evtx appears/grows afterwards, the write
+rem path works and the log was just empty because nobody wrote; if it
+rem stays 69,632 bytes (seed) or absent, the write path itself is broken.
+rem MUST be last: stopping Themes changes themes-related keys. /y avoids
+rem the dependent-services prompt in a non-interactive probe.
+set "NET_STOP_THEMES_RC=missing"
+set "NET_START_THEMES_RC=missing"
+net stop Themes /y >nul 2>&1
+set "NET_STOP_THEMES_RC=!ERRORLEVEL!"
+net start Themes >nul 2>&1
+set "NET_START_THEMES_RC=!ERRORLEVEL!"
+ping -n 11 127.0.0.1 >nul 2>&1
+set "EVTX_SYSTEM_AFTER=0"
+if exist "%SystemRoot%\System32\winevt\Logs\System.evtx" set "EVTX_SYSTEM_AFTER=1"
+set "EVTX_SYSTEM_SIZE_AFTER=missing"
+if "!EVTX_SYSTEM_AFTER!"=="1" for %%F in ("%SystemRoot%\System32\winevt\Logs\System.evtx") do set "EVTX_SYSTEM_SIZE_AFTER=%%~zF"
+set "WEVTUTIL_OK_AFTER=0"
+if exist "%SystemRoot%\System32\wevtutil.exe" (
+    wevtutil qe System /c:10 /rd:true /f:text > "%SystemDrive%\micpe-events-after.txt" 2>nul
+    for %%F in ("%SystemDrive%\micpe-events-after.txt") do if %%~zF gtr 0 set "WEVTUTIL_OK_AFTER=1"
+)
+>> "%PROBE_OUT%" echo net_stop_themes_rc=!NET_STOP_THEMES_RC!
+>> "%PROBE_LOCAL%" echo net_stop_themes_rc=!NET_STOP_THEMES_RC!
+>> "%PROBE_OUT%" echo net_start_themes_rc=!NET_START_THEMES_RC!
+>> "%PROBE_LOCAL%" echo net_start_themes_rc=!NET_START_THEMES_RC!
+>> "%PROBE_OUT%" echo evtx_system_after=!EVTX_SYSTEM_AFTER!
+>> "%PROBE_LOCAL%" echo evtx_system_after=!EVTX_SYSTEM_AFTER!
+>> "%PROBE_OUT%" echo evtx_system_size_after=!EVTX_SYSTEM_SIZE_AFTER!
+>> "%PROBE_LOCAL%" echo evtx_system_size_after=!EVTX_SYSTEM_SIZE_AFTER!
+>> "%PROBE_OUT%" echo wevtutil_ok_after=!WEVTUTIL_OK_AFTER!
+>> "%PROBE_LOCAL%" echo wevtutil_ok_after=!WEVTUTIL_OK_AFTER!
 
 rem --- done ------------------------------------------------------------------
 rem No shutdown: the harness takes the final screenshot, then quits QEMU.

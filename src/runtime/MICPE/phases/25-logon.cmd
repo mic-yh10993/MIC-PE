@@ -102,6 +102,12 @@ if not exist "%SystemDrive%\Users\Administrator" md "%SystemDrive%\Users\Adminis
 if exist "%SYS32%\config\Default" (
     copy /y "%SYS32%\config\Default" "%SystemDrive%\Users\Administrator\NTUSER.DAT" >>"%LOG%" 2>&1
     call :LOG "  cloned config\Default to the Administrator profile"
+    rem Round 8 (C1): sync the Default profile template too (wb2
+    rem LogonAdmin.bat does the same). The stock template NTUSER.DAT has
+    rem no SAB settings; a future real logon would build the profile from
+    rem it and lose them.
+    copy /y "%SYS32%\config\Default" "%SystemDrive%\Users\Default\NTUSER.DAT" >>"%LOG%" 2>&1
+    call :LOG "  synced config\Default to the Default profile template"
 )
 if not exist "%SystemDrive%\Users\Administrator\AppData\Local\Microsoft\Windows" (
     md "%SystemDrive%\Users\Administrator\AppData\Local\Microsoft\Windows" >nul 2>&1

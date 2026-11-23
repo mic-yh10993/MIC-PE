@@ -37,9 +37,15 @@ $script:StageProbeExpect = [ordered]@{
     # probe runs as a postshell hook (10-probe.cmd) and writes the same
     # micpe-probe.txt format. sab_mapped = StartAllBackLoaderX64.dll is
     # mapped in the explorer process; logonui = LogonUI.exe is present in
-    # the image; seclogon = the Secondary Logon service is RUNNING. The
-    # probe does NOT shut the guest down: the harness takes the final
-    # screenshot first, then quits QEMU.
+    # the image; net_seclogon = the Secondary Logon service is listed by
+    # `net start` (round 8: the sc-based `seclogon` key is void — round 7
+    # proved `sc query` in this PE returns exit code 0 with zero bytes of
+    # stdout for every service, including the RpcSs control group, so the
+    # old seclogon assertion measured sc's output, not the service state;
+    # `net start` is the trustworthy SCM query path). The probe still
+    # writes the sc-based `seclogon` key as a diagnostic (it stays 0 in
+    # PE and is not asserted). The probe does NOT shut the guest down:
+    # the harness takes the final screenshot first, then quits QEMU.
     #
     # logon_token is deliberately NOT asserted here (round-2 decision,
     # run 62): phase 25 builds the Administrator logon token through
@@ -62,7 +68,7 @@ $script:StageProbeExpect = [ordered]@{
     # values the .reg steps write - so a 0 is a build regression, not
     # a runtime failure. The runtime side (whether Themes actually
     # applies the wallpaper) stays diagnostic (themes_run, themes_after).
-    wb2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; sab_mapped = '1'; logonui = '1'; seclogon = '1'; wallpaper_file = '1'; wallpaper_set = '1'; desktop_icons = '1'; startmenu_init = '1'; taskbar_values = '1' }
+    wb2 = @{ boot = '1'; share = '1'; explorer = '1'; shell_ready = '1'; dwm = '1'; sab_mapped = '1'; logonui = '1'; net_seclogon = '1'; wallpaper_file = '1'; wallpaper_set = '1'; desktop_icons = '1'; startmenu_init = '1'; taskbar_values = '1' }
 }
 
 function Get-StageProbeExpect {

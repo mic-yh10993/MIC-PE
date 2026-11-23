@@ -723,6 +723,22 @@ function Install-MicpeRuntime {
         New-Item -ItemType Directory -Path $tasksDir -Force | Out-Null
     }
     Write-SubStep 'Tasks folder pre-created (Schedule experiment, round 7)'
+
+    # --- 8. EventLog seed file (round 8) --------------------------------------
+    # wevtsvc creates .evtx files lazily on first write; in this PE it never
+    # writes one (r70: service RUNNING, zero .evtx). WimBuilder2 ships a
+    # pre-built empty System.evtx for the same reason (00-Configures/System).
+    # Seed it so SCM 7000/7023 events have somewhere to land. The seed is a
+    # pristine empty log (69,632 bytes, zero records); the service appends to
+    # an existing file even when it will not create one. Only System.evtx is
+    # seeded (SCM events only go to the System log; Application is not needed).
+    $evtSeed = Join-Path $payload 'eventlog\System.evtx'
+    $evtLogs = Join-Path $MountDir 'Windows/System32/winevt/Logs'
+    if (-not (Test-Path -LiteralPath $evtSeed)) {
+        throw "EventLog seed missing: $evtSeed"
+    }
+    Copy-Item -LiteralPath $evtSeed -Destination (Join-Path $evtLogs 'System.evtx') -Force
+    Write-SubStep 'System.evtx seeded (EventLog experiment, round 8)'
 }
 
 function Measure-UwpChainCompleteness {
