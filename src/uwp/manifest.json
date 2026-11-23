@@ -166,7 +166,7 @@
       "dir": "src/runtime/MICPE"
     },
     {
-      "name": "StartAllBack 3.6 (Windows 11 taskbar + start menu)",
+      "name": "StartAllBack 3.9 (Windows 11 taskbar + start menu)",
       "kind": "app",
       "install": "app/startallback/install.bat",
       "reg": [

@@ -22,6 +22,7 @@
 # small, and keeping the vendor directory layout in git is what makes "drop in
 # a newer StartAllBack folder" a copy instead of a re-pack.
 !app/startallback/files/**
+!app/startallback/vendor/**
 !app/start11/files/**
 
 # The UWP boot chain's own payload is committed too (user decision 2026-11-22).

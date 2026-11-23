@@ -21,11 +21,20 @@
   exit 2，丢了 A64 全套）。wb2 靠文件名排序恰好避开它（选中 3.9.28）。
   不要把它拷进来。
 
+## 当前状态（2026-11-23）
+
+- **`24H2/StartAllBack_3.9.28_setup.exe` 已就位**（2,139,368 字节，用户亲手确认
+  能用；`7z t` 通过）。构建号 `>= 26100` 时 `install.bat` 会选中它
+  （`dir /b /on` 取最后一位）；3.9.28 满足 26H2 要求（正式支持从 3.9.26 起）。
+- `reg/default.reg` 的 `CurrentVersion` 已改成 `"3.9"`（DLL 3.9.28.5423）。
+- `src/uwp/manifest.json` 里步骤名已改成 `StartAllBack 3.9`。
+- `files/`（3.6 预解压）原地保留作回退，直到 3.9.x 验证通过再由用户定夺
+  是否删除。
+
 ## 包到了之后还要做的事（不要只放包）
 
-1. `reg/default.reg` 的 `CurrentVersion` 改成 DLL 的主版本号
-   （3.9.x → `"3.9"`；`install.bat` 会校验，不一致构建失败）。
-2. `src/uwp/manifest.json` 里 `StartAllBack 3.6 (...)` 的名字改成实际版本。
+1. ~~`reg/default.reg` 的 `CurrentVersion` 改成 DLL 的主版本号~~——已做（`"3.9"`）。
+2. ~~`src/uwp/manifest.json` 里 `StartAllBack 3.6 (...)` 的名字改成实际版本~~——已做。
 3. 构建成功后按探针验收：`sab_files=1`、`sab_reg=1`、`sab_mapped=1`、
    **`sab_hook=1`**（`StartAllBackX64.dll` 进 explorer 进程——3.6 在 26300 上
    一直缺的那一项）。`sab_hook` 从 0 变 1 才是换版生效的证据。
