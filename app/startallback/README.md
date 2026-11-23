@@ -21,7 +21,9 @@ app/startallback/
     StartAllBackX64.dll        # 外壳钩子，explorer 加载它
     StartAllBackLoaderX64.dll  # 由 Drive\shellex\FolderExtensions 载入
     StartAllBackCfg.exe        # 设置界面
-    Styles/  Orbs/  Ribbon/  lang/  StartButtons/
+    Styles/  Orbs/  Ribbon/
+  vendor/              # 官方安装包（构建时 7z 现解，见下）；3.9.x 没到之前是空的
+    24H2/              # 构建号 >= 26100 用的包（如 3.9.x）
   reg/
     software.reg       # Classes 注册（CLSID / shellex / App Paths），必需
     default.reg        # 外观与默认项（HKCU = PE 的 DEFAULT 蜂巢），可随便改
@@ -62,6 +64,17 @@ ContextMenuHandlers 把自己的 DLL 载进去。
 再按需改 `default.reg` 里的 `CurrentVersion`（现在是 `3.6`，版本对不上会
 触发它的"设置已重置"提示）。
 
+**版本门禁（round 7，按 WimBuilder2 的做法）**：`install.bat` 接受第 3 个
+参数——目标 Windows 构建号（UwpChain 从构建参数传进来）。构建号
+`>= 26100` 时优先解压 `vendor/24H2/` 里的官方安装包（`7z x -aoa`，
+安装程序本身不运行）；没有包时回退到 `files/`（3.6）。包没到之前，
+构建产物与以前完全一致。包到了之后：把 3.9.x 的 `.exe` 放进
+`vendor/24H2/`（先 `7z t` 验完整性），再把 `default.reg` 的
+`CurrentVersion` 改成 `"3.9"`、`manifest.json` 里的名字改成实际版本，
+构建会自动走 vendor 路径；`install.bat` 会校验 DLL 版本与
+`CurrentVersion` 一致，不一致构建失败。`vendor/24H2/README-vendor.md`
+有放包规则（**不要放 `StartAllBack_3.9.20_Setup.exe`，那个文件已损坏**）。
+
 ## 与 WimBuilder2 的关系
 
 注册表 `software.reg` 是从 WimBuilder2
@@ -69,6 +82,17 @@ ContextMenuHandlers 把自己的 DLL 载进去。
 的：只把 `Tmp_Software` 换成这个项目挂载镜像用的 `PE-SOFT` 别名，删掉纯
 占位的空父键，其余保持等价。`default.reg` 是重写的——wb2 那份把外观锁在
 `Plain8`（Win8 任务栏），不符合"要 Win11 样式"的需求。
+
+**2026-11-23 逐项核对结论**（`micpe-wb2-round6/sab-wb2-analysis.md`）：
+`software.reg` 与 wb2 在值层面逐值相同（76=76，零差异），键数差全是空父键；
+`default.reg` 的 54 个值差距里，`AlterStyle`/`TaskbarStyle` 是有意的风格分叉
+（不补）、`LegacyTaskbar` 是我方多且参考镜像也有、其余约 50 个值基本是 SAB
+内置默认的显式复述（不写即默认）。`files/` 与 wb2 的 x64 保留集只差 3 个文件
+（`DarkMagicLoaderX64.exe`、`DarkMagicX64.dll`、`UpdateCheck.exe`），但参考镜像
+（能工作）同样没有前两个，所以缺它们不是当前故障。Plain10/Windows 10 样式文件
+在任何官方包、wb2 树、参考镜像里都不存在——参考镜像的注册表指向它们但文件缺失，
+SAB 容错回落，不要从不明来源补。任务栏不出的最可能原因仍是版本（3.6 不支持 26300），
+等 3.9.x 包。
 
 ## 已知前提 / 坑
 

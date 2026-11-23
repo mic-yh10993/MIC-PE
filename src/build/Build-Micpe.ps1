@@ -511,7 +511,7 @@ function Invoke-UwpChainStep {
 
     Mount-WimImage -WimPath $mediaBoot -Index 1 -MountDir $paths.Mount
     try {
-        Install-WbUwpChain -InstallWim $installWim -MountDir $paths.Mount -RepoRoot $repoRoot
+        Install-WbUwpChain -InstallWim $installWim -MountDir $paths.Mount -RepoRoot $repoRoot -Build $Build
     }
     catch {
         Dismount-WimImage -MountDir $paths.Mount

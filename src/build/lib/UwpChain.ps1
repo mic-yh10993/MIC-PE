@@ -516,16 +516,20 @@ function Invoke-AppInstaller {
             author can run by hand from a build shell, so there is no second,
             PowerShell-only code path that could drift from it.
 
-            Contract (see app/README.md): install.bat <mount-dir> <repo-root>,
+            Contract (see app/README.md): install.bat <mount-dir> <repo-root> [build],
             idempotent, exit 0 on success. The exit code is checked, and its
             stdout is forwarded line by line so a failed xcopy is readable in
-            the build log instead of a silent "step finished".
+            the build log instead of a silent "step finished". The optional
+            build number is the version gate's input (see Invoke-AppInstaller
+            $Build); without it the installer falls back to its pre-extracted
+            files.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string] $InstallBat,
         [Parameter(Mandatory = $true)][string] $MountDir,
-        [Parameter(Mandatory = $true)][string] $RepoRoot
+        [Parameter(Mandatory = $true)][string] $RepoRoot,
+        [string] $Build = ''
     )
 
     Assert-PathExists -Path $InstallBat -Label 'app installer'
@@ -533,7 +537,15 @@ function Invoke-AppInstaller {
         throw "app installer needs a mounted image: $MountDir"
     }
 
-    $command = '"{0}" "{1}" "{2}"' -f $InstallBat, $MountDir, $RepoRoot
+    # The build number is the version gate's input (StartAllBack: build >=
+    # 26100 takes the vendor 24H2 package). It is optional: a hand run
+    # without it falls back to the pre-extracted files.
+    $command = if ($Build) {
+        '"{0}" "{1}" "{2}" "{3}"' -f $InstallBat, $MountDir, $RepoRoot, $Build
+    }
+    else {
+        '"{0}" "{1}" "{2}"' -f $InstallBat, $MountDir, $RepoRoot
+    }
     $output = & cmd.exe /c $command 2>&1
     foreach ($line in @($output)) {
         if ("$line".Trim()) { Write-SubStep ("  {0}" -f $line) }
@@ -921,7 +933,8 @@ function Install-WbUwpChain {
         [Parameter(Mandatory = $true)][string] $MountDir,
         [Parameter(Mandatory = $true)][string] $RepoRoot,
         [int] $SourceIndex = 1,
-        [string] $ScratchDir
+        [string] $ScratchDir,
+        [string] $Build = ''
     )
 
     $manifest = Get-UwpChainManifest -RepoRoot $RepoRoot
@@ -949,7 +962,7 @@ function Install-WbUwpChain {
                 Install-MicpeRuntime -MountDir $MountDir -SourceDir $step.Path -RepoRoot $RepoRoot
             }
             'app' {
-                Invoke-AppInstaller -InstallBat $step.Install -MountDir $MountDir -RepoRoot $RepoRoot
+                Invoke-AppInstaller -InstallBat $step.Install -MountDir $MountDir -RepoRoot $RepoRoot -Build $Build
                 if ($step.Reg.Count -gt 0) {
                     Invoke-RegistryScript -MountDir $MountDir -RegFiles $step.Reg
                 }

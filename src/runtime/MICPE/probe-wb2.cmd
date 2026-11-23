@@ -235,15 +235,23 @@ if errorlevel 1 set "TB_OK=0"
 >> "%PROBE_LOCAL%" echo taskbar_values=!TB_OK!
 
 rem --- service state capture (round 6; not asserted) -------------------------
-rem sc queryex gives the full picture the RUNNING checks above cannot:
+rem sc query gives the full picture the RUNNING checks above cannot:
 rem STATE (1 STOPPED / 2 START_PENDING / 4 RUNNING), WIN32_EXIT_CODE,
 rem SERVICE_EXIT_CODE and the hosting svchost PID. r66 proved the two
 rem death modes are different - Themes stuck START_PENDING (sc start
 rem returns 1056, never RUNNING) vs seclogon/SENS dying after start
 rem (sc start returns 0, still not RUNNING 10 s later) - and only the
-rem STATE + exit codes say which mode each service is in. The raw
-rem queryex output is dumped to the tasklist file first (run 44386689307:
-rem the parse can come back missing while the raw text still tells).
+rem STATE + exit codes say which mode each service is in.
+rem Round 7: the round-6 version parsed `sc queryex` for all four fields
+rem and every parse came back missing for all 8 services (r67), while
+rem the same file's for/f over tasklist worked (svchost_count=14) and
+rem sc.exe is the full binary. So STATE/exit codes now come from
+rem `sc query` (the command the old _run keys already use), PID from
+rem tasklist's services filter, and queryex is kept only as a diagnostic
+rem (qx_lines / qx_state / qx_failed) to pin down how it fails. The raw
+rem query AND queryex output are dumped to the tasklist file first
+rem (run 44386689307: the parse can come back missing while the raw
+rem text still tells).
 rem EventLog is included: if wevtutil fails below, its STATE says whether
 rem the event log service itself is down.
 >> "%PROBE_LOCAL%" echo mark_svcstate_start=%TIME: =0%
@@ -357,28 +365,36 @@ endlocal
 exit /b 0
 
 rem --- :SVCSTATE ---------------------------------------------------------------
-rem Round 6: capture the full sc queryex picture for one service.
+rem Round 6/7: capture the full sc query picture for one service.
 rem %1 = service name (as sc knows it), %2 = probe key prefix.
-rem Emits 5 keys: <prefix>_state (numeric code + text, e.g. 1_STOPPED),
-rem <prefix>_win32exit, <prefix>_svcexit, <prefix>_pid, <prefix>_pid_alive.
-rem The raw queryex output is dumped to the tasklist file first: run
-rem 44386689307 proved the parse can come back missing while the raw
-rem text still says what happened. pid_alive is na when the service is
-rem STOPPED (PID 0) and missing when queryex itself failed.
+rem Emits 8 keys: <prefix>_state (numeric code + text, e.g. 1_STOPPED),
+rem <prefix>_win32exit, <prefix>_svcexit, <prefix>_pid, <prefix>_pid_alive,
+rem <prefix>_qx_lines, <prefix>_qx_state, <prefix>_qx_failed.
+rem STATE and the exit codes come from `sc query` (proven: the old _run keys
+rem use it); PID comes from tasklist's services filter. queryex is only a
+rem diagnostic now: qx_lines counts its stdout lines, qx_state counts its
+rem STATE lines, qx_failed says whether its merged output contains FAILED.
+rem The raw query and queryex output are both dumped to the tasklist file
+rem first: run 44386689307 proved the parse can come back missing while the
+rem raw text still says what happened. pid_alive is na when the service is
+rem STOPPED (PID 0) and missing when neither tasklist nor queryex found a PID.
 :SVCSTATE
+echo --- sc query %1 --- >> "%TASKLIST_OUT%"
+sc.exe query %1 >> "%TASKLIST_OUT%" 2>&1
 echo --- sc queryex %1 --- >> "%TASKLIST_OUT%"
-sc queryex %1 >> "%TASKLIST_OUT%" 2>&1
+sc.exe queryex %1 >> "%TASKLIST_OUT%" 2>&1
 set "SVC_STATE="
-for /f "tokens=3,4" %%A in ('sc queryex %1 2^>nul ^| find /i "STATE"') do set "SVC_STATE=%%A_%%B"
+for /f "tokens=3,4" %%A in ('sc.exe query %1 2^>nul ^| find /i "STATE"') do set "SVC_STATE=%%A_%%B"
 if defined SVC_STATE (echo %2_state=!SVC_STATE! >> "%PROBE_OUT%" & echo %2_state=!SVC_STATE! >> "%PROBE_LOCAL%") else (echo %2_state=missing >> "%PROBE_OUT%" & echo %2_state=missing >> "%PROBE_LOCAL%")
 set "SVC_WIN32="
-for /f "tokens=3" %%A in ('sc queryex %1 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "SVC_WIN32=%%A"
+for /f "tokens=3" %%A in ('sc.exe query %1 2^>nul ^| find /i "WIN32_EXIT_CODE"') do set "SVC_WIN32=%%A"
 if defined SVC_WIN32 (echo %2_win32exit=!SVC_WIN32! >> "%PROBE_OUT%" & echo %2_win32exit=!SVC_WIN32! >> "%PROBE_LOCAL%") else (echo %2_win32exit=missing >> "%PROBE_OUT%" & echo %2_win32exit=missing >> "%PROBE_LOCAL%")
 set "SVC_EXIT="
-for /f "tokens=3" %%A in ('sc queryex %1 2^>nul ^| find /i "SERVICE_EXIT_CODE"') do set "SVC_EXIT=%%A"
+for /f "tokens=3" %%A in ('sc.exe query %1 2^>nul ^| find /i "SERVICE_EXIT_CODE"') do set "SVC_EXIT=%%A"
 if defined SVC_EXIT (echo %2_svcexit=!SVC_EXIT! >> "%PROBE_OUT%" & echo %2_svcexit=!SVC_EXIT! >> "%PROBE_LOCAL%") else (echo %2_svcexit=missing >> "%PROBE_OUT%" & echo %2_svcexit=missing >> "%PROBE_LOCAL%")
 set "SVC_PID="
-for /f "tokens=3" %%A in ('sc queryex %1 2^>nul ^| find /i "PID"') do set "SVC_PID=%%A"
+for /f "tokens=2" %%A in ('tasklist /fi "services eq %1" /nh 2^>nul ^| find /i "svchost.exe"') do set "SVC_PID=%%A"
+if not defined SVC_PID if "!SVC_STATE!"=="1_STOPPED" set "SVC_PID=0"
 if defined SVC_PID (echo %2_pid=!SVC_PID! >> "%PROBE_OUT%" & echo %2_pid=!SVC_PID! >> "%PROBE_LOCAL%") else (echo %2_pid=missing >> "%PROBE_OUT%" & echo %2_pid=missing >> "%PROBE_LOCAL%")
 set "SVC_ALIVE=missing"
 if not defined SVC_PID goto :SVCSTATE_ALIVE_DONE
@@ -389,4 +405,15 @@ if errorlevel 1 (set "SVC_ALIVE=0") else (set "SVC_ALIVE=1")
 :SVCSTATE_ALIVE_DONE
 >> "%PROBE_OUT%" echo %2_pid_alive=!SVC_ALIVE!
 >> "%PROBE_LOCAL%" echo %2_pid_alive=!SVC_ALIVE!
+set "SVC_QXL="
+for /f %%A in ('sc.exe queryex %1 2^>nul ^| find /c /v "zzzqqq"') do set "SVC_QXL=%%A"
+if defined SVC_QXL (echo %2_qx_lines=!SVC_QXL! >> "%PROBE_OUT%" & echo %2_qx_lines=!SVC_QXL! >> "%PROBE_LOCAL%") else (echo %2_qx_lines=missing >> "%PROBE_OUT%" & echo %2_qx_lines=missing >> "%PROBE_LOCAL%")
+set "SVC_QXS="
+for /f %%A in ('sc.exe queryex %1 2^>nul ^| find /i /c "STATE"') do set "SVC_QXS=%%A"
+if defined SVC_QXS (echo %2_qx_state=!SVC_QXS! >> "%PROBE_OUT%" & echo %2_qx_state=!SVC_QXS! >> "%PROBE_LOCAL%") else (echo %2_qx_state=missing >> "%PROBE_OUT%" & echo %2_qx_state=missing >> "%PROBE_LOCAL%")
+set "SVC_QXF=0"
+sc.exe queryex %1 2>&1 | find /i "FAILED" >nul
+if not errorlevel 1 set "SVC_QXF=1"
+>> "%PROBE_OUT%" echo %2_qx_failed=!SVC_QXF!
+>> "%PROBE_LOCAL%" echo %2_qx_failed=!SVC_QXF!
 goto :EOF
