@@ -49,6 +49,18 @@ BeforeAll {
         Set-Content -LiteralPath $checksums -Value 'fake checksums' -Encoding ASCII
         return @{ Dir = $dir; Iso = $iso; Wim = $wim; Checksums = $checksums }
     }
+
+    function New-FakeAssetLister {
+        # A fake asset lister: reports the given name -> size table, or
+        # $null when $Assets is $null (release missing / unlistable).
+        param($Assets)
+        $table = $Assets
+        $lister = {
+            param([string] $Tag, [string] $Repository)
+            return $table
+        }.GetNewClosure()
+        return $lister
+    }
 }
 
 Describe 'Select-NonEmptyReleaseFile' {
@@ -227,16 +239,105 @@ Describe 'Publish-CleanRelease' {
         }
     }
 
-    It 'a failing core upload still throws' {
+    It 'a failing create whose release and core files already landed still uploads the extras (run 45463045449)' {
+        # Run 45463045449: `gh release create` returned non-zero even
+        # though the release and all three core files had landed, and
+        # the old code threw there — which skipped the extras loop and
+        # lost all 7 screenshots a third time. A failed create is now
+        # verified first; when the release is really there, the extras
+        # still go up.
         $rel = New-TestReleaseDir
         try {
             $fake = New-FakeGh
             $fake.State.FailCreate = $true
+            $lister = New-FakeAssetLister -Assets @{
+                'MICPE-clean.iso'  = (Get-Item -LiteralPath $rel.Iso).Length
+                'boot.wim'         = (Get-Item -LiteralPath $rel.Wim).Length
+                'checksums.sha256' = (Get-Item -LiteralPath $rel.Checksums).Length
+            }
+            $extra1 = Join-Path $rel.Dir 'shot-01.png'
+            $extra2 = Join-Path $rel.Dir 'shot-02.png'
+            Set-Content -LiteralPath $extra1 -Value 'fake png 1' -Encoding ASCII
+            Set-Content -LiteralPath $extra2 -Value 'fake png 2' -Encoding ASCII
+            Publish-CleanRelease -Tag 'micpe-clean-22621.1105-20261125-r83' `
+                -CoreFiles @($rel.Iso, $rel.Wim, $rel.Checksums) `
+                -ExtraFiles @($extra1, $extra2) `
+                -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker -AssetLister $lister `
+                -WarningVariable warnings
+            # view + create (failed) + two extra uploads: no throw, all attempted.
+            $fake.State.Calls.Count | Should -Be 4
+            ($fake.State.Calls[2] -join ' ') | Should -Be "release upload micpe-clean-22621.1105-20261125-r83 $extra1 --repo mic-yh10993/MIC-PE --clobber"
+            ($fake.State.Calls[3] -join ' ') | Should -Be "release upload micpe-clean-22621.1105-20261125-r83 $extra2 --repo mic-yh10993/MIC-PE --clobber"
+            "$warnings" | Should -Match 'already in place'
+        }
+        finally {
+            Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'a failing create with no release behind it throws "create failed", not "upload failed" (run 45463045449)' {
+        $rel = New-TestReleaseDir
+        try {
+            $fake = New-FakeGh
+            $fake.State.FailCreate = $true
+            $lister = New-FakeAssetLister -Assets $null
+            $caught = $null
+            try {
+                Publish-CleanRelease -Tag 'micpe-clean-22621.1105-20261125-r83' `
+                    -CoreFiles @($rel.Iso, $rel.Wim, $rel.Checksums) `
+                    -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker -AssetLister $lister
+            }
+            catch {
+                $caught = $_.Exception.Message
+            }
+            $caught | Should -Not -BeNullOrEmpty
+            $caught | Should -Match 'gh release create failed'
+            $caught | Should -Not -Match 'upload failed'
+            # view + create only: no extra uploads were attempted.
+            $fake.State.Calls.Count | Should -Be 2
+        }
+        finally {
+            Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'a failing create with a wrong-sized core file still throws (run 45463045449)' {
+        $rel = New-TestReleaseDir
+        try {
+            $fake = New-FakeGh
+            $fake.State.FailCreate = $true
+            $lister = New-FakeAssetLister -Assets @{
+                'MICPE-clean.iso'  = (Get-Item -LiteralPath $rel.Iso).Length
+                'boot.wim'         = (Get-Item -LiteralPath $rel.Wim).Length + 1
+                'checksums.sha256' = (Get-Item -LiteralPath $rel.Checksums).Length
+            }
             {
                 Publish-CleanRelease -Tag 'micpe-clean-22621.1105-20261125-r83' `
                     -CoreFiles @($rel.Iso, $rel.Wim, $rel.Checksums) `
-                    -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker
-            } | Should -Throw -ExpectedMessage '*gh release upload failed*'
+                    -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker -AssetLister $lister
+            } | Should -Throw -ExpectedMessage '*gh release create failed*'
+            $fake.State.Calls.Count | Should -Be 2
+        }
+        finally {
+            Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'a failing create with a core file missing from the release still throws (run 45463045449)' {
+        $rel = New-TestReleaseDir
+        try {
+            $fake = New-FakeGh
+            $fake.State.FailCreate = $true
+            $lister = New-FakeAssetLister -Assets @{
+                'MICPE-clean.iso'  = (Get-Item -LiteralPath $rel.Iso).Length
+                'checksums.sha256' = (Get-Item -LiteralPath $rel.Checksums).Length
+            }
+            {
+                Publish-CleanRelease -Tag 'micpe-clean-22621.1105-20261125-r83' `
+                    -CoreFiles @($rel.Iso, $rel.Wim, $rel.Checksums) `
+                    -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker -AssetLister $lister
+            } | Should -Throw -ExpectedMessage '*gh release create failed*'
+            $fake.State.Calls.Count | Should -Be 2
         }
         finally {
             Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue
@@ -281,5 +382,11 @@ Describe 'Publish-CleanRelease wiring' {
         $script:buildYml | Should -Match '-CoreFiles'
         $script:buildYml | Should -Match '-ExtraFiles'
         $script:buildYml | Should -Not -Match '@releaseFiles'
+    }
+
+    It 'verifies a failed create by listing release assets before giving up (run 45463045449)' {
+        $script:publishScript | Should -Match 'Test-CoreFilesLanded'
+        $script:publishScript | Should -Match '--json assets'
+        $script:publishScript | Should -Match "gh release create failed"
     }
 }

@@ -24,6 +24,14 @@
     upload rejects 0-byte files. Empty files are therefore skipped with a
     warning before anything is uploaded, and even a non-empty file that
     fails to upload can no longer take the release down with it.
+
+    A non-zero `gh release create` is also not proof the release is
+    missing: run 45463045449 returned non-zero even though the release
+    and all three core files had actually landed, and the old code threw
+    there — which skipped the extras loop and lost all 7 screenshots a
+    third time. A failed create is therefore verified first (release
+    exists? core files present with matching sizes?) and only a release
+    that truly is not there fails the step.
 #>
 
 [CmdletBinding()]
@@ -62,6 +70,42 @@ function Select-NonEmptyReleaseFile {
     return $kept
 }
 
+function Test-CoreFilesLanded {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Tag,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $CoreFiles,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Repository,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $AssetLister
+    )
+    # Verify a release's core files by listing its assets and matching
+    # every core file by leaf name and byte size. Anything the lister
+    # cannot answer (no such release, bad JSON, gh itself failing) is
+    # "not landed" and the caller throws — verification failing closed.
+    $assets = $null
+    try {
+        $assets = & $AssetLister $Tag $Repository
+    }
+    catch {
+        $assets = $null
+    }
+    if ($null -eq $assets) { return $false }
+    foreach ($file in $CoreFiles) {
+        $name = Split-Path -Leaf $file
+        if (-not $assets.ContainsKey($name)) { return $false }
+        if ([long]$assets[$name] -ne (Get-Item -LiteralPath $file).Length) { return $false }
+    }
+    return $true
+}
+
 function Publish-CleanRelease {
     [CmdletBinding()]
     param(
@@ -90,13 +134,40 @@ function Publish-CleanRelease {
         # first element and drops the rest (verified 2026-11-25 — a
         # create call arrived as just @('release')). A literal array
         # (@('release', 'view', ...)) binds whole, but variables do not.
-        [scriptblock] $GhInvoker = $null
+        [scriptblock] $GhInvoker = $null,
+
+        # Test seam: a scriptblock that lists a release's assets as a
+        # name -> size hashtable, or $null when the release does not
+        # exist or cannot be listed. Used only to verify a failed
+        # `gh release create` before giving up (run 45463045449).
+        # Defaults to `gh release view --json assets`.
+        [scriptblock] $AssetLister = $null
     )
     if ($null -eq $GhInvoker) {
         $GhInvoker = {
             param([string[]] $GhArgs)
             & gh @GhArgs
             return [int]$LASTEXITCODE
+        }
+    }
+    if ($null -eq $AssetLister) {
+        $AssetLister = {
+            param([string] $Tag, [string] $Repository)
+            $json = & gh release view $Tag --repo $Repository --json assets 2>$null
+            if ($LASTEXITCODE -ne 0) { return $null }
+            $text = ($json -join "`n").Trim()
+            if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+            try {
+                $data = $text | ConvertFrom-Json -ErrorAction Stop
+            }
+            catch {
+                return $null
+            }
+            $assets = @{}
+            foreach ($asset in $data.assets) {
+                $assets[$asset.name] = [long]$asset.size
+            }
+            return $assets
         }
     }
 
@@ -123,7 +194,20 @@ function Publish-CleanRelease {
         if (-not [string]::IsNullOrEmpty($Title)) { $createArgs += @('--title', $Title) }
         if (-not [string]::IsNullOrEmpty($Notes)) { $createArgs += @('--notes', $Notes) }
         $createExit = & $GhInvoker $createArgs
-        if ($createExit -ne 0) { throw "gh release upload failed for $tag" }
+        if ($createExit -ne 0) {
+            # A non-zero create is not proof the release is missing:
+            # run 45463045449 returned non-zero even though the release
+            # and all core files had landed, and the old code threw
+            # here — which skipped the extras loop and lost all 7
+            # screenshots a third time. Verify first (the lister is
+            # `gh release view --json assets`, so a missing release
+            # and a size mismatch both come back as "not landed");
+            # only a release that truly is not there fails the step.
+            if (-not (Test-CoreFilesLanded -Tag $Tag -CoreFiles $core -Repository $Repository -AssetLister $AssetLister)) {
+                throw "gh release create failed for $tag"
+            }
+            Write-Warning ("release upload: 'gh release create' for {0} reported failure, but the release and core files are already in place; continuing with the extras" -f $Tag)
+        }
     }
 
     # Extras ride one by one: a single bad file (a truncated PNG, a
