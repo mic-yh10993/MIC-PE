@@ -266,6 +266,21 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'install\.wim is NOT included'
     }
 
+    It 'uploads the clean QEMU screenshots to the Release as PNGs (run 45432615549)' {
+        # Run 45432615549 captured all 7 screenshots, but the
+        # `micpe-clean-verify` artifact upload hit the storage-quota
+        # counter and the runner was destroyed with the screenshots on
+        # it — no copy survived. The Release is the durable channel:
+        # the screenshots are converted to PNG and attached to the same
+        # release as the ISO and boot.wim (the artifact upload stays
+        # as a backup).
+        $script:buildYml | Should -Match 'Export-CleanScreenshots'
+        $script:buildYml | Should -Match 'screenshots-png'
+        $script:buildYml | Should -Match 'release extras'
+        $script:buildYml | Should -Match '@releaseFiles'
+        $script:buildYml | Should -Match 'Screenshots go to the Release for this run'
+    }
+
     It 'passes the data disks to the verifier and gives the deploy run two hours' {
         $script:buildYml | Should -Match 'DataDisks'
         $script:buildYml | Should -Match 'TimeoutMin\s*=\s*120'

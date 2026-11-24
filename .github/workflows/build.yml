@@ -360,7 +360,7 @@ jobs:
             @(
               '## MICPE clean rebuild — QEMU screenshots'
               ''
-              'Screenshots are in the `micpe-clean-verify` artifact (shot-01..03 boot -> LogonUI, shot-04..05 desktop after login, shot-06 Start menu, shot-07 desktop). Review them for: Explorer up, taskbar rendered, desktop icons, LogonUI login, StartAllBack/Start11 in effect.'
+              'Screenshots go to the Release for this run as shot-01..07.png (backup: the `micpe-clean-verify` artifact). shot-01..03 boot -> LogonUI, shot-04..05 desktop after login, shot-06 Start menu, shot-07 desktop. Review them for: Explorer up, taskbar rendered, desktop icons, LogonUI login, StartAllBack/Start11 in effect.'
               ''
               "| Shots captured | ``$($result.ShotsTaken) of $($result.ShotsExpected)`` |"
             ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
@@ -486,6 +486,30 @@ jobs:
           $checksums = Join-Path $env:GITHUB_WORKSPACE 'checksums.sha256'
           @("$isoHash  MICPE.iso", "$wimHash  boot.wim") |
               Set-Content -LiteralPath $checksums -Encoding ASCII
+          # QEMU screenshots (clean rebuild only): convert the PPM evidence
+          # to PNG and attach it to this same Release. Run 45432615549
+          # captured all 7 screenshots, but the `micpe-clean-verify`
+          # artifact upload hit the storage-quota counter ("Artifact
+          # storage quota has been hit") and the runner was destroyed with
+          # the screenshots on it — no copy survived. The Release is the
+          # durable channel (the ISO and boot.wim survived exactly because
+          # they rode the Release); the artifact upload stays as a backup.
+          # Missing screenshots (static/none verify, QEMU never came up)
+          # simply mean no extras; the release still goes out.
+          $releaseExtras = @()
+          $shotDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out\screenshots'
+          if (Test-Path -LiteralPath $shotDir) {
+            $pngDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out\screenshots-png'
+            . ./src/ci/Export-CleanScreenshots.ps1
+            $releaseExtras = @(Export-CleanScreenshots -ScreenshotDir $shotDir -OutputDir $pngDir)
+            foreach ($logName in 'micpe-serial.log', 'micpe-qemu.log') {
+              $logPath = Join-Path $env:GITHUB_WORKSPACE "verify-clean-out\$logName"
+              if (Test-Path -LiteralPath $logPath) { $releaseExtras += $logPath }
+            }
+            if ($releaseExtras.Count -gt 0) {
+              Write-Host ("release extras: {0} files" -f $releaseExtras.Count)
+            }
+          }
           $notes = @"
           MICPE $stage $build ($date), run $runNumber.
           ISO: $([math]::Round($isoBytes / 1MB, 1)) MB, SHA256 $isoHash
@@ -493,13 +517,17 @@ jobs:
           The ISO carries only boot.wim (user decision 2026-11-17 15:09);
           install.wim is NOT included — supply your own.
           "@
+          if ($releaseExtras.Count -gt 0) {
+            $notes += "`nQEMU screenshots from the clean verify run are attached to this release."
+          }
+          $releaseFiles = @($iso, $wim, $checksums) + $releaseExtras
           $existing = & gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) {
             # Re-run of the same workflow run: upload into the existing
             # release instead of failing on the duplicate tag.
-            & gh release upload $tag $iso $wim $checksums --repo $env:GITHUB_REPOSITORY --clobber
+            & gh release upload $tag @releaseFiles --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            & gh release create $tag $iso $wim $checksums --repo $env:GITHUB_REPOSITORY `
+            & gh release create $tag @releaseFiles --repo $env:GITHUB_REPOSITORY `
               --title "MICPE $stage $build ($date)" --notes $notes
           }
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag" }
