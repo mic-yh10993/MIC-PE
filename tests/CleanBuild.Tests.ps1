@@ -136,6 +136,25 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $script:CleanScriptText | Should -Match 'SAM service creates the built-in accounts at boot'
     }
 
+    It 'relaxes the registry read-back to warnings (early debugging: a failed check must not block QEMU)' {
+        # User decision 2026-11-24 23:18 (reply to the round 5 failure
+        # report): the clean rebuild is in early debugging, so a
+        # read-back mismatch is logged loudly and the build continues to
+        # the ISO and the QEMU screenshot verification. Only the
+        # read-back section is relaxed; the extract / copy / registry
+        # import / SAM steps keep their hard Assert-True failures.
+        $readBack = ($script:CleanScriptText -split 'function Assert-CleanRegistry')[1] -split 'function Invoke-CleanCaptureStep' | Select-Object -First 1
+        $readBack | Should -Match 'Assert-ReadBack'
+        $readBack | Should -Not -Match 'Assert-True'
+        $readBack | Should -Match 'readBackFailures'
+        # The helper (defined just above Assert-CleanRegistry) logs the
+        # failure loudly and keeps going instead of throwing.
+        $script:CleanScriptText | Should -Match 'read-back FAILED \(warning only, build continues\)'
+        $script:CleanScriptText | Should -Match 'Assert-ReadBack'
+        # The hard failures outside the read-back section are untouched.
+        $script:CleanScriptText | Should -Match 'Assert-True -Condition \(\$bootIndex -eq 1\)'
+    }
+
     It 'captures the staging tree into a fresh boot.wim and packages a boot.wim-only ISO' {
         $script:CleanScriptText | Should -Match 'New-WimCapture'
         $script:CleanScriptText | Should -Match 'Set-WimBootIndex'

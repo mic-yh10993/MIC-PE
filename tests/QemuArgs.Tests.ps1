@@ -354,6 +354,101 @@ Describe 'Find-OvmfVars' {
     }
 }
 
+Describe 'Find-CleanOvmfVars' {
+    BeforeAll {
+        # The clean verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly (same pattern as Invoke-QemuVerify.ps1). The
+        # mandatory paths must exist: the top-level Assert-PathExists
+        # runs even under -ParseOnly, so hand it real temp files.
+        $script:cleanDir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-ovmf-$(Get-Random)"
+        $script:cleanShare = Join-Path $script:cleanDir 'share'
+        New-Item -ItemType Directory -Path $script:cleanShare -Force | Out-Null
+        $script:cleanIso = Join-Path $script:cleanDir 'test.iso'
+        New-Item -ItemType File -Path $script:cleanIso -Force | Out-Null
+        $script:cleanWork = Join-Path $script:cleanDir 'work'
+        New-Item -ItemType Directory -Path $script:cleanWork -Force | Out-Null
+        $script:cleanCode = Join-Path $script:cleanShare 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:cleanCode, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:cleanIso -OvmfPath $script:cleanCode -WorkDir $script:cleanWork
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:cleanDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'prefers the i386 vars template next to the x86_64 code file, even when the 64 MB aarch64 template sorts first' {
+        # Run 45416116043: the old first-*vars*.fd-by-name pick took
+        # edk2-aarch64-vars.fd (64 MB); code + vars then exceeded QEMU's
+        # 8 MiB firmware cap and QEMU refused to start with "combined
+        # size of system firmware exceeds 8388608 bytes". QEMU's firmware
+        # descriptor 60-edk2-x86_64.json pairs edk2-x86_64-code.fd with
+        # edk2-i386-vars.fd (540,672 bytes; combined 4 MiB exactly).
+        # The files are sparse (SetLength): they report their real size
+        # but take no disk -- /tmp is a 512 MB tmpfs and a real 64 MB
+        # vars file per run fills it.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-ovmf-aarch64-$(Get-Random)"
+        try {
+            $shareDir = Join-Path $dir 'share'
+            New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+            $code = Join-Path $shareDir 'edk2-x86_64-code.fd'
+            $fs = [System.IO.File]::Create($code); $fs.SetLength(3653632); $fs.Close()
+            $vars = Join-Path $shareDir 'edk2-i386-vars.fd'
+            $fs = [System.IO.File]::Create($vars); $fs.SetLength(540672); $fs.Close()
+            $aarch64 = Join-Path $shareDir 'edk2-aarch64-vars.fd'
+            $fs = [System.IO.File]::Create($aarch64); $fs.SetLength(67108864); $fs.Close()
+            Find-CleanOvmfVars -CodePath $code | Should -Be $vars
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'falls back to OVMF_VARS.fd when the i386 template is absent' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-ovmf-fallback-$(Get-Random)"
+        try {
+            $shareDir = Join-Path $dir 'share'
+            New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+            $code = Join-Path $shareDir 'edk2-x86_64-code.fd'
+            $fs = [System.IO.File]::Create($code); $fs.SetLength(3653632); $fs.Close()
+            $vars = Join-Path $shareDir 'OVMF_VARS.fd'
+            $fs = [System.IO.File]::Create($vars); $fs.SetLength(540672); $fs.Close()
+            Find-CleanOvmfVars -CodePath $code | Should -Be $vars
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'refuses a code + vars pair over the 8 MiB firmware cap instead of letting QEMU die on it' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-ovmf-oversize-$(Get-Random)"
+        try {
+            $shareDir = Join-Path $dir 'share'
+            New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+            $code = Join-Path $shareDir 'edk2-x86_64-code.fd'
+            $fs = [System.IO.File]::Create($code); $fs.SetLength(3653632); $fs.Close()
+            $vars = Join-Path $shareDir 'edk2-aarch64-vars.fd'
+            $fs = [System.IO.File]::Create($vars); $fs.SetLength(67108864); $fs.Close()
+            { Find-CleanOvmfVars -CodePath $code } | Should -Throw '*exceed the 8 MiB*'
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws when no vars template sits next to the code file' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-ovmf-novars-$(Get-Random)"
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $code = Join-Path $dir 'edk2-x86_64-code.fd'
+            $fs = [System.IO.File]::Create($code); $fs.SetLength(3653632); $fs.Close()
+            { Find-CleanOvmfVars -CodePath $code } | Should -Throw '*no OVMF vars template*'
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'Format-MonitorReply' {
     It 'strips ANSI colour and cursor escapes from the monitor reply' {
         $reply = "$([char]27)[31;1mQEMU 11.1.0 monitor$([char]27)[0m (qemu) "

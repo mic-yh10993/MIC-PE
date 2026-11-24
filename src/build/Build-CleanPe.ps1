@@ -550,6 +550,32 @@ function Invoke-CleanRegistryStep {
     Assert-PathExists -Path (Join-Path $paths.Staging 'Windows\System32\unattend.xml') -Label 'staged unattend.xml'
 }
 
+function Assert-ReadBack {
+    # Registry read-back check, relaxed to a warning by user decision
+    # (2026-11-24 23:18, reply to the round 5 failure report): the clean
+    # rebuild is in early debugging, so a read-back mismatch must not fail
+    # the build -- it is logged loudly and the build continues to the ISO
+    # and the QEMU screenshot verification, which is the real evidence.
+    # Only the read-back section uses this; the extract / copy / registry
+    # import / SAM steps keep their hard Assert-True failures.
+    # To tighten again, make this throw (or swap the calls back to
+    # Assert-True): replace the Write-Warn below with a throw of
+    # [System.InvalidOperationException].
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool] $Condition,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Message
+    )
+
+    if (-not $Condition) {
+        $script:readBackFailures++
+        Write-Warn "read-back FAILED (warning only, build continues): $Message"
+    }
+}
+
 function Assert-CleanRegistry {
     # Read back the values the clean patches must have landed, through the
     # mounted staging hives (reg.exe query, never the PowerShell provider:
@@ -564,6 +590,7 @@ function Assert-CleanRegistry {
     )
 
     $configDir = Join-Path $paths.Staging 'Windows\System32\config'
+    $script:readBackFailures = 0
     $loaded = [System.Collections.Generic.List[string]]::new()
     try {
         foreach ($hive in (Get-PeHiveMap)) {
@@ -577,31 +604,31 @@ function Assert-CleanRegistry {
         }
 
         $setup = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey 'Setup'
-        Assert-True -Condition ($null -ne $setup) -Message 'read-back: PE-SYS\Setup is missing'
-        Assert-True -Condition ($setup['SetupType'] -eq '0x2') -Message "read-back: SetupType is '$($setup['SetupType'])', expected 0x2"
-        Assert-True -Condition ($setup['CmdLine'] -eq 'LogonUI') -Message "read-back: CmdLine is '$($setup['CmdLine'])', expected LogonUI"
-        Assert-True -Condition ($setup['SystemSetupInProgress'] -eq '0x0') -Message "read-back: SystemSetupInProgress is '$($setup['SystemSetupInProgress'])', expected 0x0"
+        Assert-ReadBack -Condition ($null -ne $setup) -Message 'read-back: PE-SYS\Setup is missing'
+        Assert-ReadBack -Condition ($setup['SetupType'] -eq '0x2') -Message "read-back: SetupType is '$($setup['SetupType'])', expected 0x2"
+        Assert-ReadBack -Condition ($setup['CmdLine'] -eq 'LogonUI') -Message "read-back: CmdLine is '$($setup['CmdLine'])', expected LogonUI"
+        Assert-ReadBack -Condition ($setup['SystemSetupInProgress'] -eq '0x0') -Message "read-back: SystemSetupInProgress is '$($setup['SystemSetupInProgress'])', expected 0x0"
 
         $winlogon = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon'
-        Assert-True -Condition ($null -ne $winlogon) -Message 'read-back: PE-SOFT Winlogon is missing'
-        Assert-True -Condition ($winlogon['Shell'] -eq 'explorer.exe') -Message "read-back: Winlogon Shell is '$($winlogon['Shell'])', expected explorer.exe"
-        Assert-True -Condition ($winlogon['AutoRestartShell'] -eq '0x1') -Message "read-back: AutoRestartShell is '$($winlogon['AutoRestartShell'])', expected 0x1"
+        Assert-ReadBack -Condition ($null -ne $winlogon) -Message 'read-back: PE-SOFT Winlogon is missing'
+        Assert-ReadBack -Condition ($winlogon['Shell'] -eq 'explorer.exe') -Message "read-back: Winlogon Shell is '$($winlogon['Shell'])', expected explorer.exe"
+        Assert-ReadBack -Condition ($winlogon['AutoRestartShell'] -eq '0x1') -Message "read-back: AutoRestartShell is '$($winlogon['AutoRestartShell'])', expected 0x1"
 
         $currentVersion = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows NT\CurrentVersion'
-        Assert-True -Condition ($currentVersion['RegisteredOwner'] -eq 'SYSTEM-Intel-MIC') -Message "read-back: RegisteredOwner is '$($currentVersion['RegisteredOwner'])', expected SYSTEM-Intel-MIC"
-        Assert-True -Condition ($currentVersion['SystemRoot'] -eq 'X:\Windows') -Message "read-back: SystemRoot is '$($currentVersion['SystemRoot'])', expected X:\Windows"
+        Assert-ReadBack -Condition ($currentVersion['RegisteredOwner'] -eq 'SYSTEM-Intel-MIC') -Message "read-back: RegisteredOwner is '$($currentVersion['RegisteredOwner'])', expected SYSTEM-Intel-MIC"
+        Assert-ReadBack -Condition ($currentVersion['SystemRoot'] -eq 'X:\Windows') -Message "read-back: SystemRoot is '$($currentVersion['SystemRoot'])', expected X:\Windows"
 
         $loader = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\CLSID\{117E3954-5034-453A-A18B-7B79493646E6}\InprocServer32'
-        Assert-True -Condition ($null -ne $loader) -Message 'read-back: StartAllBack loader CLSID is missing'
-        Assert-True -Condition ($loader['(Default)'] -match 'MICPE\\StartAllBack\\StartAllBackLoaderX64\.dll') -Message "read-back: loader CLSID points at '$($loader['(Default)'])', expected the MICPE path"
+        Assert-ReadBack -Condition ($null -ne $loader) -Message 'read-back: StartAllBack loader CLSID is missing'
+        Assert-ReadBack -Condition ($loader['(Default)'] -match 'MICPE\\StartAllBack\\StartAllBackLoaderX64\.dll') -Message "read-back: loader CLSID points at '$($loader['(Default)'])', expected the MICPE path"
 
         $startIsBack = Get-RegistryKeyValues -KeyName 'PE-DEF' -SubKey 'Software\StartIsBack'
-        Assert-True -Condition ($null -ne $startIsBack) -Message 'read-back: PE-DEF Software\StartIsBack is missing'
-        Assert-True -Condition ($startIsBack['Disabled'] -eq '0x0') -Message "read-back: StartIsBack Disabled is '$($startIsBack['Disabled'])', expected 0x0"
+        Assert-ReadBack -Condition ($null -ne $startIsBack) -Message 'read-back: PE-DEF Software\StartIsBack is missing'
+        Assert-ReadBack -Condition ($startIsBack['Disabled'] -eq '0x0') -Message "read-back: StartIsBack Disabled is '$($startIsBack['Disabled'])', expected 0x0"
 
         $start8 = Get-RegistryKeyValues -KeyName 'PE-DEF' -SubKey 'Software\Stardock\Start8\Start8.ini\Start8'
-        Assert-True -Condition ($null -ne $start8) -Message 'read-back: PE-DEF Start11 Start8.ini\Start8 is missing'
-        Assert-True -Condition ($start8['Image'] -match 'MICPE\\Start11\\StartButtons\\default\.png') -Message "read-back: Start11 Image is '$($start8['Image'])', expected the MICPE path"
+        Assert-ReadBack -Condition ($null -ne $start8) -Message 'read-back: PE-DEF Start11 Start8.ini\Start8 is missing'
+        Assert-ReadBack -Condition ($start8['Image'] -match 'MICPE\\Start11\\StartButtons\\default\.png') -Message "read-back: Start11 Image is '$($start8['Image'])', expected the MICPE path"
 
         # App registry (only the apps Invoke-CleanAppStep installed): the
         # App Paths entry proves the app .reg landed; the file-association
@@ -609,29 +636,34 @@ function Assert-CleanRegistry {
         foreach ($appName in $AppNames) {
             if ($appName -eq 'chrome') {
                 $chromePaths = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows\CurrentVersion\App Paths\chrome.exe'
-                Assert-True -Condition ($null -ne $chromePaths) -Message 'read-back: PE-SOFT App Paths\chrome.exe is missing'
-                Assert-True -Condition ($chromePaths['(Default)'] -eq 'X:\Program Files\Google\Chrome\Application\chrome.exe') -Message "read-back: chrome.exe App Paths is '$($chromePaths['(Default)'])', expected the Chrome Application path"
+                Assert-ReadBack -Condition ($null -ne $chromePaths) -Message 'read-back: PE-SOFT App Paths\chrome.exe is missing'
+                Assert-ReadBack -Condition ($chromePaths['(Default)'] -eq 'X:\Program Files\Google\Chrome\Application\chrome.exe') -Message "read-back: chrome.exe App Paths is '$($chromePaths['(Default)'])', expected the Chrome Application path"
                 $chromeHtml = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\ChromeHTML'
-                Assert-True -Condition ($null -ne $chromeHtml) -Message 'read-back: PE-SOFT Classes\ChromeHTML is missing'
-                Assert-True -Condition ($chromeHtml['(Default)'] -eq 'Chrome HTML Document') -Message "read-back: ChromeHTML is '$($chromeHtml['(Default)'])', expected 'Chrome HTML Document'"
+                Assert-ReadBack -Condition ($null -ne $chromeHtml) -Message 'read-back: PE-SOFT Classes\ChromeHTML is missing'
+                Assert-ReadBack -Condition ($chromeHtml['(Default)'] -eq 'Chrome HTML Document') -Message "read-back: ChromeHTML is '$($chromeHtml['(Default)'])', expected 'Chrome HTML Document'"
                 $htmlAssoc = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\.html'
-                Assert-True -Condition ($null -ne $htmlAssoc) -Message 'read-back: PE-SOFT Classes\.html is missing'
-                Assert-True -Condition ($htmlAssoc['(Default)'] -eq 'ChromeHTML') -Message "read-back: .html is '$($htmlAssoc['(Default)'])', expected ChromeHTML"
+                Assert-ReadBack -Condition ($null -ne $htmlAssoc) -Message 'read-back: PE-SOFT Classes\.html is missing'
+                Assert-ReadBack -Condition ($htmlAssoc['(Default)'] -eq 'ChromeHTML') -Message "read-back: .html is '$($htmlAssoc['(Default)'])', expected ChromeHTML"
             }
             elseif ($appName -eq 'office') {
                 $wordPaths = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows\CurrentVersion\App Paths\WINWORD.EXE'
-                Assert-True -Condition ($null -ne $wordPaths) -Message 'read-back: PE-SOFT App Paths\WINWORD.EXE is missing'
-                Assert-True -Condition ($wordPaths['(Default)'] -eq 'X:\Program Files\Office2016\Office16\WINWORD.EXE') -Message "read-back: WINWORD.EXE App Paths is '$($wordPaths['(Default)'])', expected the Office2016 path"
+                Assert-ReadBack -Condition ($null -ne $wordPaths) -Message 'read-back: PE-SOFT App Paths\WINWORD.EXE is missing'
+                Assert-ReadBack -Condition ($wordPaths['(Default)'] -eq 'X:\Program Files\Office2016\Office16\WINWORD.EXE') -Message "read-back: WINWORD.EXE App Paths is '$($wordPaths['(Default)'])', expected the Office2016 path"
                 $docxAssoc = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\.docx'
-                Assert-True -Condition ($null -ne $docxAssoc) -Message 'read-back: PE-SOFT Classes\.docx is missing'
-                Assert-True -Condition ($docxAssoc['(Default)'] -eq 'Word.Document.12') -Message "read-back: .docx is '$($docxAssoc['(Default)'])', expected Word.Document.12"
+                Assert-ReadBack -Condition ($null -ne $docxAssoc) -Message 'read-back: PE-SOFT Classes\.docx is missing'
+                Assert-ReadBack -Condition ($docxAssoc['(Default)'] -eq 'Word.Document.12') -Message "read-back: .docx is '$($docxAssoc['(Default)'])', expected Word.Document.12"
             }
             else {
                 Write-Warn "read-back: no registry assertions defined for app '$appName'; its .reg import was verified by reg.exe exit code only"
             }
         }
 
-        Write-SubStep 'registry read-back: boot chain, author, StartAllBack loader, Start11 image all landed'
+        if ($script:readBackFailures -gt 0) {
+            Write-Warn "registry read-back: $($script:readBackFailures) check(s) failed (warnings only, build continues to QEMU); review the !!! lines above"
+        }
+        else {
+            Write-SubStep 'registry read-back: boot chain, author, StartAllBack loader, Start11 image all landed'
+        }
     }
     finally {
         for ($index = $loaded.Count - 1; $index -ge 0; $index--) {

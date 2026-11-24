@@ -61,7 +61,12 @@ param(
     # screenshots, and after the Windows key before the Start menu shot.
     [int] $LoginWaitSec = 45,
 
-    [int] $StartMenuWaitSec = 8
+    [int] $StartMenuWaitSec = 8,
+
+    # Dot-source only (tests): define the helpers above without launching
+    # QEMU. Same pattern as Invoke-QemuVerify.ps1 -ParseOnly. The three
+    # mandatory paths must still be passed (bind-time), but nothing runs.
+    [switch] $ParseOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -206,6 +211,21 @@ function Send-CleanKey {
 }
 
 function Find-CleanOvmfVars {
+    # Resolve the OVMF variable-store template that pairs with $CodePath.
+    #
+    # Run 45416116043 lesson: the old code took the first *vars*.fd file
+    # in the directory sorted by name. QEMU ships firmware for every
+    # architecture in the same share/ directory, and the aarch64 vars
+    # template (edk2-aarch64-vars.fd, 64 MB) sorts before the x86_64 one,
+    # so the verifier handed QEMU a 64 MB vars file next to the 3.5 MB
+    # code file -- and QEMU refused to start: "combined size of system
+    # firmware exceeds 8388608 bytes" (the x86 firmware flash is capped
+    # at 8 MiB, see FLASH_SIZE_LIMIT in hw/i386/pc_sysfw.c).
+    #
+    # The correct pairing is QEMU's own firmware descriptor
+    # share/firmware/60-edk2-x86_64.json: edk2-x86_64-code.fd pairs with
+    # edk2-i386-vars.fd (540,672 bytes; code + vars = 4 MiB exactly).
+    # Same logic as Find-OvmfVars in Invoke-QemuVerify.ps1.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -213,17 +233,49 @@ function Find-CleanOvmfVars {
     )
 
     $dir = Split-Path -Parent $CodePath
-    $candidates = Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '(?i)vars' -and $_.Name -match '\.fd$' } |
-        Sort-Object Name
-    if ($candidates.Count -eq 0) {
-        throw [System.InvalidOperationException]::new(
-            "no OVMF vars template found next to $CodePath (looked for *vars*.fd)")
+    $varsPath = $null
+    foreach ($name in @('edk2-i386-vars.fd', 'OVMF_VARS.fd')) {
+        $candidate = Join-Path $dir $name
+        if (Test-Path -LiteralPath $candidate) {
+            $varsPath = $candidate
+            break
+        }
     }
-    return $candidates[0].FullName
+    if (-not $varsPath) {
+        # Last resort: any *vars*.fd in the directory. @() forces an
+        # array: a single match comes back as a scalar FileInfo, which
+        # has no .Count under Set-StrictMode.
+        $candidates = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)vars' -and $_.Name -match '\.fd$' } |
+            Sort-Object Name)
+        if ($candidates.Count -eq 0) {
+            throw [System.InvalidOperationException]::new(
+                "no OVMF vars template found next to $CodePath (looked for edk2-i386-vars.fd, OVMF_VARS.fd, then *vars*.fd)")
+        }
+        $varsPath = $candidates[0].FullName
+    }
+
+    # Guard: QEMU caps the combined x86 firmware at 8 MiB. Fail here with
+    # both file sizes named, instead of QEMU's bare "combined size of
+    # system firmware exceeds 8388608 bytes" ten seconds into the run.
+    $codeSize = (Get-Item -LiteralPath $CodePath).Length
+    $varsSize = (Get-Item -LiteralPath $varsPath).Length
+    $limit = 8 * 1024 * 1024
+    Write-Host ("    OVMF vars: {0} ({1:N0} bytes); code {2:N0} bytes; combined {3:N0} bytes (limit {4:N0})" -f (Split-Path -Leaf $varsPath), $varsSize, $codeSize, ($codeSize + $varsSize), $limit)
+    if (($codeSize + $varsSize) -gt $limit) {
+        # Build the message first: inside ::new(...) the commas would be
+        # read as argument separators, so the -f list must not sit bare
+        # in the constructor call.
+        $detail = ("OVMF code + vars exceed the 8 MiB firmware limit: code {0} ({1:N0} bytes) + vars {2} ({3:N0} bytes) = {4:N0} bytes; " +
+            "expected edk2-x86_64-code.fd paired with edk2-i386-vars.fd (4 MiB combined)") -f $CodePath, $codeSize, $varsPath, $varsSize, ($codeSize + $varsSize)
+        throw [System.InvalidOperationException]::new($detail)
+    }
+    return $varsPath
 }
 
 # --- launch ---------------------------------------------------------------
+
+if (-not $ParseOnly) {
 
 $varsTemplate = Find-CleanOvmfVars -CodePath $OvmfPath
 $varsPath = Join-Path $WorkDir 'OVMF_VARS.fd'
@@ -339,4 +391,6 @@ return [pscustomobject]@{
     ScreenshotDir = $shotDir
     ShotsTaken    = $shotsTaken
     ShotsExpected = $shotIndex
+}
+
 }
