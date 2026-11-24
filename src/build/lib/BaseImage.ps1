@@ -345,3 +345,96 @@ function Get-BaseWims {
         BootWim    = $boot
     }
 }
+
+function Get-BaseImageInventory {
+    <#
+    .SYNOPSIS
+        Hash the official install.wim's files that the reference PE contains.
+    .DESCRIPTION
+        The reference PE (22H2, 22621.1105 Enterprise) is a trimmed client
+        image. To find which of its files are Microsoft-original, which were
+        modified, and which were added, the local diff needs the official
+        SHA256 of exactly the files the reference contains. This function:
+          1. resolves the image index for the requested edition,
+          2. extracts the reference file list from that index (batched,
+             --nullglob: files the official image does not carry are skipped),
+          3. hashes each extracted file (SHA256) into a JSON inventory.
+        A reference path that does not extract is not in the official image
+        (added by the reference builder) and is recorded with InOfficial
+        $false. The install.wim itself is never uploaded: it is too large
+        for a Release asset, and the rebuild re-fetches it on the runner.
+        The inventory JSON is the fetch-only deliverable.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $InstallWim,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Edition,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ReferenceFileList,
+
+        [Parameter(Mandatory = $true)]
+        [string] $OutDir,
+
+        [string] $WimlibPath = 'wimlib-imagex'
+    )
+
+    Assert-PathExists -Path $InstallWim -Label 'install.wim'
+    Assert-PathExists -Path $ReferenceFileList -Label 'reference file list'
+
+    if (-not (Test-Path -LiteralPath $OutDir)) {
+        New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    }
+
+    $index = Get-WimImageIndexByEdition -WimPath $InstallWim -Edition $Edition -WimlibPath $WimlibPath
+    Write-Step ("official install.wim: edition '{0}' is image index {1}" -f $Edition, $index)
+
+    $patterns = Read-Whitelist -Path $ReferenceFileList
+    Write-SubStep ("reference file list: {0} paths" -f $patterns.Count)
+
+    $extractDir = Join-Path $OutDir 'official'
+    Export-WimFiles -WimPath $InstallWim -Index $index -Destination $extractDir -Patterns $patterns -WimlibPath $WimlibPath
+
+    # Hash every extracted file. Export-WimFiles preserves the archive's
+    # directory structure, so a pattern lands at <extractDir>\<pattern>.
+    # A reference path that did not extract is not in the official image.
+    $records = [System.Collections.Generic.List[object]]::new()
+    $missing = [System.Collections.Generic.List[string]]::new()
+    foreach ($pattern in $patterns) {
+        $extracted = Join-Path $extractDir $pattern
+        if (Test-Path -LiteralPath $extracted -PathType Leaf) {
+            $item = Get-Item -LiteralPath $extracted
+            $hash = (Get-FileHash -LiteralPath $extracted -Algorithm SHA256).Hash.ToLower()
+            $records.Add([pscustomobject]@{
+                Path = $pattern
+                Size = $item.Length
+                Sha256 = $hash
+                InOfficial = $true
+            })
+        } else {
+            $missing.Add($pattern)
+            $records.Add([pscustomobject]@{
+                Path = $pattern
+                Size = $null
+                Sha256 = $null
+                InOfficial = $false
+            })
+        }
+    }
+
+    $inventoryPath = Join-Path $OutDir ("base-inventory-{0}.json" -f ($Edition.ToLower()))
+    $records | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $inventoryPath -Encoding UTF8
+
+    Write-Step ("inventory: {0} of {1} reference files present in the official image; {2} added by the reference" -f ($records.Count - $missing.Count), $records.Count, $missing.Count)
+    return [pscustomobject]@{
+        InventoryPath = $inventoryPath
+        ImageIndex = $index
+        Total = $records.Count
+        Present = ($records.Count - $missing.Count)
+        Missing = $missing.Count
+        MissingPaths = $missing.ToArray()
+    }
+}

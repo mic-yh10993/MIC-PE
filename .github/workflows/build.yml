@@ -32,6 +32,14 @@ on:
         description: "原生登录实验：启用 -NativeLogonExperiment（提取登录文件、实验 startnet、不装 PECMD）"
         type: boolean
         default: false
+      fetch_only:
+        description: "只取官方底座镜像并生成文件清单，不构建 PE（22H2 参考重建的比对用）"
+        type: boolean
+        default: false
+      edition:
+        description: "UUP 版本（professional=专业版，enterprise=企业版；参考 PE 是企业版）"
+        type: string
+        default: "professional"
       verify:
         description: "验证档位：full=含 QEMU 运行时自验证；static=只做静态与结构；none=只出产物"
         type: choice
@@ -125,6 +133,8 @@ jobs:
           IN_CHROME: ${{ inputs.chrome }}
           IN_PROBE: ${{ inputs.probe }}
           IN_NATIVE_LOGON_EXPERIMENT: ${{ inputs.nativeLogonExperiment }}
+          IN_FETCH_ONLY: ${{ inputs.fetch_only }}
+          IN_EDITION: ${{ inputs.edition }}
         run: |
           $buildArgs = @{ Stage = $env:IN_STAGE }
           if ($env:IN_BUILD) { $buildArgs.Build = $env:IN_BUILD }
@@ -132,6 +142,8 @@ jobs:
           if ($env:IN_CHROME -eq 'true') { $buildArgs.Chrome = $true }
           if ($env:IN_PROBE -eq 'false') { $buildArgs.Probe = $false }
           if ($env:IN_NATIVE_LOGON_EXPERIMENT -eq 'true') { $buildArgs.NativeLogonExperiment = $true }
+          if ($env:IN_FETCH_ONLY -eq 'true') { $buildArgs.FetchOnly = $true }
+          if ($env:IN_EDITION) { $buildArgs.Edition = $env:IN_EDITION }
 
           ./src/build/Build-Micpe.ps1 @buildArgs
 
@@ -417,6 +429,49 @@ jobs:
           } else {
             & gh release create $tag $iso $wim $checksums --repo $env:GITHUB_REPOSITORY `
               --title "MICPE $stage $build ($date)" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag" }
+          Write-Host "released $tag"
+
+      - name: Upload base inventory to Release
+        # Fetch-only deliverable: the file inventory JSON (official SHA256
+        # of the reference PE's files). Runs only on a fetch-only dispatch
+        # that produced an inventory; the normal Release step above is
+        # gated on ISO_PATH and stays skipped. The install.wim itself is
+        # never uploaded: it is too large for a Release asset, and the
+        # rebuild re-fetches it on the runner.
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.fetch_only && env.INVENTORY_PATH != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MICPE_BUILD: ${{ inputs.build }}
+          MICPE_EDITION: ${{ inputs.edition }}
+          MICPE_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = $env:MICPE_BUILD
+          $edition = $env:MICPE_EDITION
+          $date = (Get-Date -Format 'yyyyMMdd')
+          $runNumber = $env:MICPE_RUN_NUMBER
+          $tag = "micpe-base-$build-$edition-$date-r$runNumber"
+          $inventory = $env:INVENTORY_PATH
+          if (-not (Test-Path -LiteralPath $inventory)) { throw "release upload: inventory not found at '$inventory'" }
+          $invBytes = (Get-Item -LiteralPath $inventory).Length
+          $invHash = (Get-FileHash -LiteralPath $inventory -Algorithm SHA256).Hash.ToLower()
+          $checksums = Join-Path $env:GITHUB_WORKSPACE 'inventory.sha256'
+          @("$invHash  $(Split-Path -Leaf $inventory)") | Set-Content -LiteralPath $checksums -Encoding ASCII
+          $notes = @"
+          MICPE base inventory $build ($edition), $date, run $runNumber.
+          Official install.wim file inventory (SHA256) for the reference PE's
+          file list. Inventory: $([math]::Round($invBytes / 1KB, 1)) KB, SHA256 $invHash.
+          The install.wim itself is not uploaded (too large for a Release asset).
+          "@
+          $existing = & gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release upload $tag $inventory $checksums --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            & gh release create $tag $inventory $checksums --repo $env:GITHUB_REPOSITORY `
+              --title "MICPE base inventory $build ($edition)" --notes $notes
           }
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag" }
           Write-Host "released $tag"

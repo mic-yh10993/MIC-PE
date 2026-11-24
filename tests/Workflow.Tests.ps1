@@ -333,8 +333,13 @@ Describe 'build.yml verify wiring' {
                     $node.Clauses.Count -gt 0 -and
                     $node.Clauses[0].Item1.Extent.Text -eq '$env:GITHUB_STEP_SUMMARY'
             }, $true)
-        @($summaryIf).Count | Should -Be 1
-        $summaryIf[0].Extent.Text | Should -Not -Match 'GITHUB_ENV'
+        # One summary block per mode: the normal ISO build and fetch-only.
+        # Neither may contain a GITHUB_ENV export: on a runner without
+        # GITHUB_STEP_SUMMARY the exports would silently never be written.
+        @($summaryIf).Count | Should -Be 2
+        foreach ($block in $summaryIf) {
+            $block.Extent.Text | Should -Not -Match 'GITHUB_ENV'
+        }
     }
 }
 

@@ -46,7 +46,22 @@ param(
     # Dedicated branch experiment: use the native Winlogon login path.
     [switch] $NativeLogonExperiment,
 
-    [string] $SourceIso
+    [string] $SourceIso,
+
+    # Fetch-only mode (22H2 reference-PE rebuild, 2026-11-24): resolve the
+    # UUP build, download the conversion package, produce install.wim +
+    # boot.wim, generate the file inventory of the requested edition, then
+    # stop. No stage patches, no ISO, no verify. The inventory JSON is the
+    # deliverable; the install.wim itself is never uploaded.
+    [switch] $FetchOnly,
+
+    # UUP edition for the download package. The reference PE is Enterprise;
+    # the normal build uses professional.
+    [string] $Edition = 'professional',
+
+    # Reference PE file list (one WIM-internal path per line). Defaults to
+    # the 22H2 22621.1105 Enterprise list shipped in src/build/data.
+    [string] $ReferenceFileList
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,7 +138,7 @@ function Invoke-BaseStep {
     $uup = Get-UupBuild -Build $Build -Arch 'amd64' -Channel 'stable'
 
     Write-Step 'downloading UUP conversion package'
-    $packageDir = New-UupDownloadPackage -Uuid $uup.Uuid -OutDir $baseDir -Lang 'zh-cn' -Edition 'professional'
+    $packageDir = New-UupDownloadPackage -Uuid $uup.Uuid -OutDir $baseDir -Lang 'zh-cn' -Edition $Edition
 
     $iniPath = Join-Path $packageDir 'ConvertConfig.ini'
     # SkipApps MUST stay 0: the UWP apps we copy into the PE (Photos,
@@ -662,6 +677,47 @@ function Invoke-IsoStep {
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
+
+if ($FetchOnly) {
+    # Fetch-only: run the base step (resolve UUP build, download the
+    # conversion package, produce install.wim + boot.wim), then generate
+    # the file inventory of the requested edition and stop. No stage
+    # patches, no ISO, no verify.
+    Invoke-BaseStep
+
+    $refList = if ($ReferenceFileList) { $ReferenceFileList } else {
+        Join-Path $PSScriptRoot 'data\ref-22621.1105-enterprise-files.txt'
+    }
+    $inventoryDir = Join-Path $paths.Out 'inventory'
+    $inventory = Get-BaseImageInventory -InstallWim (Join-Path $paths.Base 'install.wim') -Edition $Edition -ReferenceFileList $refList -OutDir $inventoryDir
+
+    Write-Step 'done (fetch-only)'
+    Write-SubStep ("inventory: {0}" -f $inventory.InventoryPath)
+    Write-SubStep ("present: {0} of {1}; added by reference: {2}" -f $inventory.Present, $inventory.Total, $inventory.Missing)
+
+    if ($env:GITHUB_STEP_SUMMARY) {
+        @(
+            "## MICPE fetch-only $Build ($Edition)"
+            ''
+            '| Item | Value |'
+            '| --- | --- |'
+            "| Build | ``$Build`` |"
+            "| Edition | ``$Edition`` |"
+            "| Image index | ``$($inventory.ImageIndex)`` |"
+            "| Reference files | ``$($inventory.Total)`` |"
+            "| Present in official image | ``$($inventory.Present)`` |"
+            "| Added by reference | ``$($inventory.Missing)`` |"
+        ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+    }
+
+    # Export the inventory path for the workflow's upload step. ISO and
+    # boot.wim paths are deliberately NOT exported: the upload steps are
+    # gated on them, and a fetch-only run must not trigger them.
+    if ($env:GITHUB_ENV) {
+        "INVENTORY_PATH=$($inventory.InventoryPath)" | Add-Content -LiteralPath $env:GITHUB_ENV
+    }
+    return
+}
 
 $result = $null
 foreach ($step in $steps) {

@@ -199,6 +199,59 @@ function Get-WimBootIndex {
     return [int]$match.Groups[1].Value
 }
 
+function Get-WimImageIndexByEdition {
+    <#
+    .SYNOPSIS
+        Find the image index of a WIM whose Edition ID matches.
+    .DESCRIPTION
+        `wimlib-imagex info` prints one block per image, each starting with
+        "Index:" and carrying an "Edition ID:" line. This finds the index
+        whose edition matches (case-insensitive). If the WIM holds a single
+        image, that index is returned regardless of the edition label:
+        a single-edition UUP install.wim is that edition even when the
+        label differs from the requested name.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $WimPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Edition,
+
+        [string] $WimlibPath = 'wimlib-imagex'
+    )
+
+    Assert-PathExists -Path $WimPath -Label 'WIM'
+
+    # $LASTEXITCODE is only set by native commands; the Pester fake is a
+    # script, so it never sets the caller's value (see Get-WimBootIndex).
+    $LASTEXITCODE = 0
+    $info = & $WimlibPath info $WimPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            "wimlib-imagex info failed with exit code $LASTEXITCODE for $WimPath")
+    }
+    $text = ($info -join "`n")
+
+    $blocks = [regex]::Matches($text, 'Index:\s*(\d+)[\s\S]*?Edition ID:\s*([^\r\n]*)')
+    $single = $null
+    $found = @()
+    foreach ($m in $blocks) {
+        $idx = [int]$m.Groups[1].Value
+        $ed = $m.Groups[2].Value.Trim()
+        if ($null -eq $single) { $single = $idx }
+        $found += $ed
+        if ($ed -eq $Edition) { return $idx }
+    }
+    if ($blocks.Count -eq 1 -and $null -ne $single) {
+        Write-Warn "install.wim has a single image (index $single); using it for edition '$Edition'"
+        return $single
+    }
+    throw [System.InvalidOperationException]::new(
+        ("install.wim has no image with Edition ID '{0}' (found: {1})" -f $Edition, ($found -join ', ')))
+}
+
 function Set-WimBootIndex {
     [CmdletBinding()]
     param(
