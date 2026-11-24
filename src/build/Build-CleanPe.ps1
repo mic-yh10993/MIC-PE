@@ -285,6 +285,14 @@ function Invoke-CleanExtractStep {
     }
     Export-WimFiles -WimPath $InstallWim -Index $index -Destination $paths.Staging -Patterns $patterns -WimlibPath $WimlibPath
 
+    # The extracted tree carries the install.wim's read-only attributes;
+    # the shell and registry steps write into it (StartAllBack.xml, the
+    # hives, unattend.xml), so make it writable now. Run 45359151127
+    # failed here: Copy-Item into the extracted icsxml directory was
+    # denied while the script-created MICPE directory took the same
+    # copy fine.
+    Clear-StagingReadOnly -Path $paths.Staging
+
     # Critical files: without these the image cannot boot, log on, or show
     # a shell. (winload.exe is the boot loader, explorer.exe the shell,
     # the config hives carry the registry the next step patches.)

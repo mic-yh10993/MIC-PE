@@ -201,6 +201,59 @@ Describe 'Get-WimImageIndexByEdition' {
     }
 }
 
+Describe 'Clear-StagingReadOnly' {
+    BeforeAll {
+        $script:fakeAttrib = Join-Path $PSScriptRoot 'Fake-Attrib.ps1'
+    }
+
+    It 'invokes attrib with -R, the staging path, /S and /D, and leaves the tree writable' {
+        # run 45359151127: the shell step's StartAllBack.xml copy into
+        # the WIM-extracted icsxml directory was denied (the directory
+        # carries the install.wim's read-only attribute), while the copy
+        # into the script-created MICPE directory succeeded.
+        $dir = Join-Path $script:TempRoot "micpe-ro-$(Get-Random)"
+        $sub = New-Item -ItemType Directory -Path (Join-Path $dir 'icsxml') -Force
+        $file = Join-Path $sub 'cmnicfg.xml'
+        Set-Content -LiteralPath $file -Value 'x'
+        # Mark the directory and the file read-only, as wimlib extraction
+        # leaves them (DOS attributes restored from the install.wim).
+        $subItem = Get-Item -LiteralPath $sub -Force
+        $subItem.Attributes = $subItem.Attributes -bor [IO.FileAttributes]::ReadOnly
+        $fileItem = Get-Item -LiteralPath $file -Force
+        $fileItem.Attributes = $fileItem.Attributes -bor [IO.FileAttributes]::ReadOnly
+        ((Get-Item -LiteralPath $sub -Force).Attributes -band [IO.FileAttributes]::ReadOnly) | Should -Not -Be 0
+        $log = Join-Path $script:TempRoot "micpe-attrib-$(Get-Random).log"
+        $env:MICPE_FAKE_ATTRIB_LOG = $log
+        try {
+            Clear-StagingReadOnly -Path $dir -AttribPath $script:fakeAttrib
+            $logged = Get-Content -LiteralPath $log
+            $logged[0] | Should -Be '-R'
+            $logged[1] | Should -Be $dir
+            $logged[2] | Should -Be '/S'
+            $logged[3] | Should -Be '/D'
+            # The tree is writable again (the fake stands in for attrib).
+            ((Get-Item -LiteralPath $sub -Force).Attributes -band [IO.FileAttributes]::ReadOnly) | Should -Be 0
+            ((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReadOnly) | Should -Be 0
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_ATTRIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws when the staging path does not exist' {
+        { Clear-StagingReadOnly -Path (Join-Path $script:TempRoot 'micpe-absent-staging') -AttribPath $script:fakeAttrib } | Should -Throw '*staging tree*'
+    }
+
+    # No test for the non-zero exit-code path: $LASTEXITCODE is not set
+    # inside a function on Linux pwsh (verified: a native command exiting
+    # 1 leaves $LASTEXITCODE 0 in a function, 1 at the top level), so a
+    # failing attrib cannot be simulated here. The check follows the
+    # codebase pattern (Export-WimFiles, Get-WimBootIndex) and works on
+    # the Windows CI runner, where the build actually runs.
+}
+
 Describe 'Invoke-IsoStep boot image' {
     BeforeAll {
         $script:buildScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/Build-Micpe.ps1') -Raw

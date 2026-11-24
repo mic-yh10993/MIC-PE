@@ -65,6 +65,19 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $script:CleanScriptText | Should -Match 'Read-Whitelist'
     }
 
+    It 'clears the read-only attributes the WIM extraction leaves, before any step writes into the tree' {
+        # run 45359151127: the shell step's StartAllBack.xml copy into the
+        # WIM-extracted icsxml directory was denied (the directory carries
+        # the install.wim's read-only attribute), while the copy into the
+        # script-created MICPE directory succeeded. The extract step must
+        # make the staging tree writable right after extraction, or the
+        # shell and registry steps hit the same wall.
+        $script:CleanScriptText | Should -Match 'Clear-StagingReadOnly'
+        $extractPos = $script:CleanScriptText.IndexOf('Export-WimFiles')
+        $clearPos = $script:CleanScriptText.IndexOf('Clear-StagingReadOnly')
+        $clearPos | Should -BeGreaterThan $extractPos
+    }
+
     It 'asserts the critical staged files (boot loader, shell, hives)' {
         foreach ($critical in 'winload\.exe', 'explorer\.exe', 'config\\SYSTEM', 'config\\SOFTWARE', 'config\\DEFAULT', 'config\\SAM', 'config\\SECURITY') {
             $script:CleanScriptText | Should -Match $critical

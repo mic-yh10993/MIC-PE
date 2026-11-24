@@ -169,6 +169,46 @@ function Export-WimFiles {
     }
 }
 
+function Clear-StagingReadOnly {
+    <#
+    .SYNOPSIS
+        Clear the read-only attribute on a WIM-extracted staging tree.
+    .DESCRIPTION
+        wimlib-imagex extract restores the DOS attributes stored in the
+        install.wim, and Windows system directories in the image carry
+        the read-only attribute. A later step that writes into such a
+        tree then fails with "Access to the path ... is denied": run
+        45359151127 died on the shell step's StartAllBack.xml copy into
+        the extracted icsxml directory, while the copy into the
+        script-created MICPE directory succeeded. The registry step
+        would hit the same wall (reg load/import and the SAM edit write
+        the extracted hives in place, and unattend.xml lands in the
+        extracted System32), so the attribute is cleared for the whole
+        tree right after extraction, not just the one directory. The
+        same attrib -R /S /D pattern is used by Grant-FolderWriteAccess
+        (UwpChain.ps1), which documents that a leftover read-only
+        attribute "fails the copy in the same way".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [string] $AttribPath = 'attrib.exe'
+    )
+
+    Assert-PathExists -Path $Path -Label 'staging tree'
+    Write-SubStep "clearing read-only attributes on $Path"
+
+    # $LASTEXITCODE is only set by native commands; the Pester fake is a
+    # script, so it never sets the caller's value. Initialise it so the
+    # check below also works in a fresh session (a real attrib overwrites
+    # it with its own exit code).
+    $LASTEXITCODE = 0
+    & $AttribPath -R $Path /S /D 2>&1 | Out-Null
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "attrib -R failed with exit code $LASTEXITCODE for $Path"
+}
+
 function Get-WimBootIndex {
     [CmdletBinding()]
     param(
