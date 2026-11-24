@@ -19,8 +19,8 @@
                   official install.wim (Enterprise index) into a staging
                   tree (--nullglob: a listed file the official image does
                   not carry is skipped, not fatal).
-      3. shell    download shell.zip (StartAllBack + Start11, user-supplied,
-                  Release asset shell-20261124, SHA256-pinned) and lay it
+      3. shell    read shell.zip (StartAllBack + Start11, user-supplied,
+                  in-repo src/build/data/shell.zip, SHA256-pinned) and lay it
                   out under Windows\System32\MICPE\ (StartAllBack and
                   Start11 in their own subfolders; Start11\Links\ -- the
                   pinned-item shortcuts -- is left out), plus the
@@ -52,7 +52,7 @@
         media\           the ISO tree that oscdimg will package
         staging\         the clean PE file tree (captured into boot.wim)
         out\             MICPE-clean.iso + captured boot.wim
-        logs\            step logs, shell.zip download
+        logs\            step logs
 #>
 
 [CmdletBinding()]
@@ -76,18 +76,12 @@ param(
     # Defaults to the placeholder clean list; replaced after the 15:15 diff.
     [string] $FileList,
 
-    # shell.zip Release asset (StartAllBack + Start11, user-supplied).
-    [string] $ShellReleaseTag = 'shell-20261124',
-
-    # Pinned SHA256 of shell.zip (Release asset shell.zip.sha256).
+    # Pinned SHA256 of shell.zip (in-repo src/build/data/shell.zip).
     [string] $ShellSha256 = '8f94801470e20b94129d0b7e294d1c6b413b060dcf6b70f8e9409cee3a94b0bd',
 
-    # Override the shell.zip download URL (default: the Release asset URL
-    # for $ShellReleaseTag). A file:// URL or a plain local path is also
-    # accepted through -ShellZipPath.
-    [string] $ShellReleaseUrl,
-
-    # Local shell.zip to use instead of downloading (local runs / tests).
+    # shell.zip to use instead of the in-repo copy (local runs / tests).
+    # Default: src/build/data/shell.zip (the repo is private, so the file
+    # lives in git directly instead of a Release asset).
     [string] $ShellZipPath,
 
     # Directory holding the clean .reg patches (default src/build/reg).
@@ -312,27 +306,14 @@ function Invoke-CleanExtractStep {
 }
 
 function Get-CleanShellZip {
-    # Resolve shell.zip: a local path (-ShellZipPath) wins; otherwise
-    # download the Release asset for $ShellReleaseTag and verify its
-    # pinned SHA256. The repo is private, so a download needs a token:
-    # GH_TOKEN (the workflow sets it from secrets.GITHUB_TOKEN) is sent
-    # as a Bearer header when present.
-    $zipPath = Join-Path $paths.Logs 'shell.zip'
-
-    if ($ShellZipPath) {
-        Assert-PathExists -Path $ShellZipPath -Label 'shell.zip (local)'
-        $zipPath = $ShellZipPath
+    # Resolve shell.zip: the in-repo copy (src/build/data/shell.zip) is
+    # the default -- the repo is private, so the file lives in git
+    # directly instead of a Release asset. -ShellZipPath overrides it
+    # (local runs / tests). The pinned SHA256 is always verified.
+    $zipPath = if ($ShellZipPath) { $ShellZipPath } else {
+        Join-Path $repoRoot 'src/build/data/shell.zip'
     }
-    else {
-        $url = if ($ShellReleaseUrl) { $ShellReleaseUrl } else {
-            "https://github.com/mic-yh10993/MIC-PE/releases/download/$ShellReleaseTag/shell.zip"
-        }
-        Write-Step "downloading shell.zip ($ShellReleaseTag)"
-        $headers = @{}
-        if ($env:GH_TOKEN) { $headers['Authorization'] = "Bearer $($env:GH_TOKEN)" }
-        Invoke-WebRequest -Uri $url -OutFile $zipPath -Headers $headers -TimeoutSec 300
-        Assert-PathExists -Path $zipPath -Label 'shell.zip (downloaded)'
-    }
+    Assert-PathExists -Path $zipPath -Label 'shell.zip (in-repo)'
 
     $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
     Assert-True -Condition ($actual -eq $ShellSha256.ToLower()) -Message (
@@ -584,7 +565,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
         "| Build | ``$Build`` |"
         "| Edition | ``$Edition`` |"
         "| File list | ``$fileListPath`` (placeholder until the 15:15 diff) |"
-        "| Shell | ``$ShellReleaseTag`` (SHA256-pinned) |"
+        "| Shell | ``src/build/data/shell.zip`` (SHA256-pinned) |"
         "| boot.wim | $(Format-ByteSize -Bytes $result.WimBytes) |"
         "| ISO | $(Format-ByteSize -Bytes $result.IsoBytes) |"
         "| SHA256 | ``$((Get-FileHash -LiteralPath $result.IsoPath -Algorithm SHA256).Hash)`` |"

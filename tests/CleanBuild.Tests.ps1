@@ -16,10 +16,19 @@ Describe 'Build-CleanPe.ps1 parameters' {
         $script:CleanScriptText | Should -Match '\[string\] \$Edition = ''enterprise'''
     }
 
-    It 'takes the file list, shell release tag and pinned shell SHA256 as parameters' {
+    It 'takes the file list, in-repo shell.zip and pinned shell SHA256 as parameters' {
         $script:CleanScriptText | Should -Match '\[string\] \$FileList'
-        $script:CleanScriptText | Should -Match "ShellReleaseTag = 'shell-20261124'"
+        $script:CleanScriptText | Should -Match 'src/build/data/shell\.zip'
         $script:CleanScriptText | Should -Match '8f94801470e20b94129d0b7e294d1c6b413b060dcf6b70f8e9409cee3a94b0bd'
+        # No Release download: the repo is private, shell.zip lives in git.
+        $script:CleanScriptText | Should -Not -Match 'ShellReleaseTag'
+        $script:CleanScriptText | Should -Not -Match 'releases/download'
+    }
+
+    It 'ships shell.zip in-repo with the pinned SHA256' {
+        $zip = Join-Path $script:DataDir 'shell.zip'
+        Test-Path -LiteralPath $zip | Should -Be $true
+        (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash | Should -Be '8F94801470E20B94129D0B7E294D1C6B413B060DCF6B70F8E9409CEE3A94B0BD'
     }
 
     It 'warns that the file list is a placeholder until the 15:15 diff lands' {
