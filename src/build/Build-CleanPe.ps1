@@ -38,14 +38,14 @@
                   MICPE-clean.iso with oscdimg. Sizes are reported as
                   measured; the 3 GB boot.wim cap still applies.
 
-    FILE LIST IS A PLACEHOLDER until the 15:15 official-vs-reference diff
-    lands: src/build/data/clean-22621.1105-enterprise-files.txt is the
-    reference file list minus the deleted third-party apps (Tencent,
-    360Chrome, Thunder, Office2010, PhotoshopCS3, 7-Zip, PENetwork,
-    StartAllBack/Start11 program folders, and the third-party Start menu
-    / desktop shortcuts). The 15:15 diff replaces it with the verified
-    list (official-original vs modified vs reference-added, per file).
-    Do NOT dispatch a clean build on the placeholder list as final.
+    FILE LIST IS FINAL (user decision 2026-11-24 15:00: no hash diff):
+    src/build/data/clean-22621.1105-enterprise-files.txt is the reference
+    file list minus the deleted third-party apps (Tencent, 360Chrome,
+    Thunder, Office2010, PhotoshopCS3, 7-Zip, PENetwork, StartAllBack/
+    Start11 program folders, and the third-party Start menu / desktop
+    shortcuts). The official install.wim is the source of truth: the
+    extract step copies only the listed paths out of it and skips any
+    listed path the official image does not carry.
 
     Layout under -Workspace:
         base\            install.wim, boot.wim extracted from the source ISO
@@ -73,7 +73,8 @@ param(
 
     # File list: one WIM-internal path per line (leading backslash optional,
     # '#' / ';' comment lines and blanks are skipped by Read-Whitelist).
-    # Defaults to the placeholder clean list; replaced after the 15:15 diff.
+    # Final list (user decision 2026-11-24 15:00: no hash diff against the
+    # reference; the official install.wim is the source of truth).
     [string] $FileList,
 
     # Pinned SHA256 of shell.zip (in-repo src/build/data/shell.zip).
@@ -96,7 +97,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libDir = Join-Path $PSScriptRoot 'lib'
 
-foreach ($lib in 'Common', 'Disk', 'Wim', 'Registry', 'AdminAccount', 'BaseImage', 'Iso') {
+foreach ($lib in 'Common', 'Payload', 'Disk', 'Wim', 'Registry', 'AdminAccount', 'BaseImage', 'Iso') {
     . (Join-Path $libDir "$lib.ps1")
 }
 
@@ -133,8 +134,7 @@ $regDirPath = if ($RegDir) { $RegDir } else { Join-Path $PSScriptRoot 'reg' }
 
 Write-Step "MICPE clean rebuild $Build ($Edition)"
 Write-SubStep ("workspace: {0}" -f $paths.Root)
-Write-SubStep ("file list: {0}" -f $fileListPath)
-Write-Warn 'file list is a PLACEHOLDER until the 15:15 official-vs-reference diff lands (see the list header)'
+Write-SubStep ("file list: {0} (final, no hash diff; official image is the source of truth)" -f $fileListPath)
 
 # ---------------------------------------------------------------------------
 # Steps
@@ -383,6 +383,71 @@ function Invoke-CleanShellStep {
         'Start11\Links survived the shell step; the pinned-item shortcuts must not ship')
 }
 
+function Get-CleanAppDirs {
+    # Discover the app directories under app/ that take part in the clean
+    # build. A directory is an app when it carries install.bat (the CI
+    # integration script) AND at least one .reg file at its top level (the
+    # registry that app needs). No software name is hardcoded here: the
+    # build scans the directories, so a new app joins by adding a folder
+    # with install.bat + .reg and registering its archive in Payload.ps1.
+    # Excluded by construction:
+    #   _template  -- name starts with '_'; a template, not an app.
+    #   payload    -- no install.bat (expanded by Expand-Payload instead).
+    #   start11 / startallback -- laid out by the shell step (shell.zip),
+    #     not the app step; their .reg files (if any) live in a reg/
+    #     subdirectory, not at the top level.
+    $appRoot = Join-Path $repoRoot 'app'
+    if (-not (Test-Path -LiteralPath $appRoot)) { return @() }
+    $dirs = Get-ChildItem -LiteralPath $appRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike '_*' } |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'install.bat') } |
+        Where-Object { @(Get-ChildItem -LiteralPath $_.FullName -Filter '*.reg' -File -ErrorAction SilentlyContinue).Count -gt 0 } |
+        Sort-Object Name
+    return @($dirs | ForEach-Object { $_.FullName })
+}
+
+function Invoke-CleanAppStep {
+    # For every discovered app directory, in name order: join its split
+    # volumes (Payload.ps1: byte-exact join + SHA256 of the JOINED archive),
+    # run its install.bat against the staging tree, and collect its .reg
+    # files for the registry step. The .reg files are NOT imported here:
+    # the registry step mounts the staging hives once and imports the
+    # clean patches and the app patches together. Returns the collected
+    # .reg paths and the installed app names.
+    $appDirs = Get-CleanAppDirs
+    if ($appDirs.Count -eq 0) {
+        Write-SubStep 'no app directories discovered under app/'
+        return [pscustomobject]@{ RegFiles = @(); Names = @() }
+    }
+
+    $appStaging = Join-Path $paths.Logs 'apps'
+    if (-not (Test-Path -LiteralPath $appStaging)) {
+        New-Item -ItemType Directory -Path $appStaging -Force | Out-Null
+    }
+
+    $appRegFiles = [System.Collections.Generic.List[string]]::new()
+    $appNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($appDir in $appDirs) {
+        $name = Split-Path -Leaf $appDir
+        Write-Step "installing app: $name"
+        # Join + verify the archive. Throws when the package is not
+        # registered in Payload.ps1 -- register it there first (archive
+        # name, volumes, joined SHA256); a silent skip would ship an
+        # image missing the app.
+        $archive = Get-AppPackageArchive -Name $name -RepoRoot $repoRoot -StagingDir $appStaging
+        # Run the component install.bat against the staging tree
+        # (vendor layout: Office -> Program Files\Office2016, Chrome ->
+        # Program Files\Google\Chrome\Application; never MICPE).
+        Invoke-ComponentInstall -Component $name -MountDir $paths.Staging -RepoRoot $repoRoot -AssetPath $archive
+        # Collect this app's .reg files (top level, sorted by name).
+        $regs = @(Get-ChildItem -LiteralPath $appDir -Filter '*.reg' -File | Sort-Object Name | ForEach-Object { $_.FullName })
+        foreach ($reg in $regs) { $appRegFiles.Add($reg) }
+        $appNames.Add($name)
+        Write-SubStep ("app {0}: installed, {1} .reg file(s) collected" -f $name, $regs.Count)
+    }
+    return [pscustomobject]@{ RegFiles = @($appRegFiles.ToArray()); Names = @($appNames.ToArray()) }
+}
+
 function Invoke-CleanRegistryStep {
     # Mount the staging hives and import the clean .reg patches at CI
     # build time (user decision 2026-11-17 23:43: never inside the PE),
@@ -390,14 +455,26 @@ function Invoke-CleanRegistryStep {
     # Invoke-RegistryScript mounts from $MountDir\Windows\System32\config,
     # which is exactly the staging layout, so it works on a plain
     # directory tree -- no DISM mount is needed for this step.
+    [CmdletBinding()]
+    param(
+        # .reg files collected from the discovered app directories
+        # (Invoke-CleanAppStep). Imported together with the clean patches
+        # in one mount session, after them.
+        [string[]] $AppRegFiles = @()
+    )
+
     $regFiles = @('10-clean-boot.reg', '20-clean-start11.reg', '30-clean-author.reg', '40-clean-startallback.reg') |
         ForEach-Object { Join-Path $regDirPath $_ }
     foreach ($regFile in $regFiles) {
         Assert-PathExists -Path $regFile -Label "registry patch $(Split-Path -Leaf $regFile)"
     }
+    $allRegFiles = @($regFiles) + @($AppRegFiles)
+    foreach ($regFile in $allRegFiles) {
+        Assert-PathExists -Path $regFile -Label "registry patch $(Split-Path -Leaf $regFile)"
+    }
 
     Write-Step 'importing the clean registry patches into the staging hives'
-    Invoke-RegistryScript -MountDir $paths.Staging -RegFiles $regFiles
+    Invoke-RegistryScript -MountDir $paths.Staging -RegFiles $allRegFiles
 
     Write-Step 'enabling built-in Administrator in the staging SAM'
     $samPath = Join-Path $paths.Staging 'Windows\System32\config\SAM'
@@ -424,6 +501,13 @@ function Assert-CleanRegistry {
     # the provider holds an open handle and a later reg unload fails).
     # Run 55 lesson: an import that exits 0 can still have missed, so the
     # read-back happens here, at the registry step, not three steps later.
+    [CmdletBinding()]
+    param(
+        # App names installed by Invoke-CleanAppStep. Only the apps that
+        # were actually installed are read back here.
+        [string[]] $AppNames = @()
+    )
+
     $configDir = Join-Path $paths.Staging 'Windows\System32\config'
     $loaded = [System.Collections.Generic.List[string]]::new()
     try {
@@ -463,6 +547,34 @@ function Assert-CleanRegistry {
         $start8 = Get-RegistryKeyValues -KeyName 'PE-DEF' -SubKey 'Software\Stardock\Start8\Start8.ini\Start8'
         Assert-True -Condition ($null -ne $start8) -Message 'read-back: PE-DEF Start11 Start8.ini\Start8 is missing'
         Assert-True -Condition ($start8['Image'] -match 'MICPE\\Start11\\StartButtons\\default\.png') -Message "read-back: Start11 Image is '$($start8['Image'])', expected the MICPE path"
+
+        # App registry (only the apps Invoke-CleanAppStep installed): the
+        # App Paths entry proves the app .reg landed; the file-association
+        # entry proves the ProgID wiring landed.
+        foreach ($appName in $AppNames) {
+            if ($appName -eq 'chrome') {
+                $chromePaths = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows\CurrentVersion\App Paths\chrome.exe'
+                Assert-True -Condition ($null -ne $chromePaths) -Message 'read-back: PE-SOFT App Paths\chrome.exe is missing'
+                Assert-True -Condition ($chromePaths['(Default)'] -eq 'X:\Program Files\Google\Chrome\Application\chrome.exe') -Message "read-back: chrome.exe App Paths is '$($chromePaths['(Default)'])', expected the Chrome Application path"
+                $chromeHtml = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\ChromeHTML'
+                Assert-True -Condition ($null -ne $chromeHtml) -Message 'read-back: PE-SOFT Classes\ChromeHTML is missing'
+                Assert-True -Condition ($chromeHtml['(Default)'] -eq 'Chrome HTML Document') -Message "read-back: ChromeHTML is '$($chromeHtml['(Default)'])', expected 'Chrome HTML Document'"
+                $htmlAssoc = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\.html'
+                Assert-True -Condition ($null -ne $htmlAssoc) -Message 'read-back: PE-SOFT Classes\.html is missing'
+                Assert-True -Condition ($htmlAssoc['(Default)'] -eq 'ChromeHTML') -Message "read-back: .html is '$($htmlAssoc['(Default)'])', expected ChromeHTML"
+            }
+            elseif ($appName -eq 'office') {
+                $wordPaths = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows\CurrentVersion\App Paths\WINWORD.EXE'
+                Assert-True -Condition ($null -ne $wordPaths) -Message 'read-back: PE-SOFT App Paths\WINWORD.EXE is missing'
+                Assert-True -Condition ($wordPaths['(Default)'] -eq 'X:\Program Files\Office2016\Office16\WINWORD.EXE') -Message "read-back: WINWORD.EXE App Paths is '$($wordPaths['(Default)'])', expected the Office2016 path"
+                $docxAssoc = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\.docx'
+                Assert-True -Condition ($null -ne $docxAssoc) -Message 'read-back: PE-SOFT Classes\.docx is missing'
+                Assert-True -Condition ($docxAssoc['(Default)'] -eq 'Word.Document.12') -Message "read-back: .docx is '$($docxAssoc['(Default)'])', expected Word.Document.12"
+            }
+            else {
+                Write-Warn "read-back: no registry assertions defined for app '$appName'; its .reg import was verified by reg.exe exit code only"
+            }
+        }
 
         Write-SubStep 'registry read-back: boot chain, author, StartAllBack loader, Start11 image all landed'
     }
@@ -547,8 +659,9 @@ $base = Invoke-CleanBaseStep
 $extract = Invoke-CleanExtractStep -InstallWim $base.InstallWim
 Write-SubStep ("staged {0} file-list paths from install.wim index {1}" -f $extract.FileCount, $extract.ImageIndex)
 Invoke-CleanShellStep
-Invoke-CleanRegistryStep
-Assert-CleanRegistry
+$apps = Invoke-CleanAppStep
+Invoke-CleanRegistryStep -AppRegFiles $apps.RegFiles
+Assert-CleanRegistry -AppNames $apps.Names
 $capturedBootWim = Invoke-CleanCaptureStep
 $result = Invoke-CleanIsoStep -BootWim $capturedBootWim
 
@@ -564,7 +677,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
         '| --- | --- |'
         "| Build | ``$Build`` |"
         "| Edition | ``$Edition`` |"
-        "| File list | ``$fileListPath`` (placeholder until the 15:15 diff) |"
+        "| File list | ``$fileListPath`` (final, no hash diff) |"
         "| Shell | ``src/build/data/shell.zip`` (SHA256-pinned) |"
         "| boot.wim | $(Format-ByteSize -Bytes $result.WimBytes) |"
         "| ISO | $(Format-ByteSize -Bytes $result.IsoBytes) |"

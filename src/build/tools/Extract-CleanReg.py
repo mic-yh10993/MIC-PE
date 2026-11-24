@@ -303,11 +303,21 @@ def main():
             "RegisteredOrganization=Ramos's motto; both are replaced here.",
             "RegisteredOrganization is deleted (\"name\"=-) because the",
             "official image has no such branding to restore.",
+            "OEMInformation\\Manufacturer is the second SYSTEM-RAMOS mark",
+            "in the SOFTWARE hive (a full-hive scan found exactly two);",
+            "it shows in System Properties as the OEM brand, so it is set",
+            "to the same SYSTEM-Intel-MIC. OEMInformation\\SupportURL is",
+            "Ramos's personal Bilibili link and is deleted (a clean",
+            "rebuild has no OEM support URL).",
         ],
         [
             (r"HKEY_LOCAL_MACHINE\PE-SOFT\Microsoft\Windows NT\CurrentVersion", [
                 '"RegisteredOwner"="SYSTEM-Intel-MIC"',
                 '"RegisteredOrganization"=-',
+            ]),
+            (r"HKEY_LOCAL_MACHINE\PE-SOFT\Microsoft\Windows\CurrentVersion\OEMInformation", [
+                '"Manufacturer"="SYSTEM-Intel-MIC"',
+                '"SupportURL"=-',
             ]),
         ],
     )

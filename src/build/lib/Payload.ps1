@@ -336,9 +336,13 @@ function Get-ComponentInstallBatPath {
         [string] $RepoRoot
     )
 
-    if ($Component -notin 'chrome', 'office') {
+    # Any package registered in the AppPackageDir table works here, not
+    # just chrome/office: a new app joins by adding its directory under
+    # app/ and registering it in the tables above, and the clean build's
+    # directory discovery picks it up without a hardcoded list.
+    if (-not $script:AppPackageDir.ContainsKey($Component)) {
         throw [System.InvalidOperationException]::new(
-            "unknown component: $Component (expected chrome|office)")
+            "unknown component: $Component (expected one of $($script:AppPackageDir.Keys -join ', '))")
     }
 
     return (Join-Path $RepoRoot "app/$Component/install.bat")
@@ -362,9 +366,11 @@ function Invoke-ComponentInstall {
         [scriptblock] $Runner = $null
     )
 
-    if ($Component -notin 'chrome', 'office') {
+    # Any package registered in the AppPackageDir table works here, not
+    # just chrome/office (see Get-ComponentInstallBatPath).
+    if (-not $script:AppPackageDir.ContainsKey($Component)) {
         throw [System.InvalidOperationException]::new(
-            "unknown component: $Component (expected chrome|office)")
+            "unknown component: $Component (expected one of $($script:AppPackageDir.Keys -join ', '))")
     }
     Assert-PathExists -Path $AssetPath -Label "$Component asset"
     Assert-PathExists -Path $MountDir -Label 'boot.wim mount'

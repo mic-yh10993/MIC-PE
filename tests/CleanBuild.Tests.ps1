@@ -31,9 +31,11 @@ Describe 'Build-CleanPe.ps1 parameters' {
         (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash | Should -Be '8F94801470E20B94129D0B7E294D1C6B413B060DCF6B70F8E9409CEE3A94B0BD'
     }
 
-    It 'warns that the file list is a placeholder until the 15:15 diff lands' {
-        $script:CleanScriptText | Should -Match 'PLACEHOLDER'
-        $script:CleanScriptText | Should -Match '15:15'
+    It 'treats the file list as final (no placeholder, no 15:15 diff)' {
+        $script:CleanScriptText | Should -Not -Match 'PLACEHOLDER'
+        $script:CleanScriptText | Should -Not -Match '15:15'
+        $script:CleanScriptText | Should -Match 'no hash diff'
+        $script:CleanScriptText | Should -Match 'source of truth'
     }
 
     It 'pins the same aria2 hash as Build-Micpe.ps1 and BaseImage.ps1' {
@@ -172,10 +174,16 @@ Describe 'clean .reg patches' {
         $text | Should -Not -Match 'Start8\.ini\\GroupContents'
     }
 
-    It '30-clean-author.reg brands the image SYSTEM-Intel-MIC and drops the Ramos motto' {
+    It '30-clean-author.reg brands the image SYSTEM-Intel-MIC (incl. OEMInformation) and drops the Ramos motto' {
         $text = $script:RegTexts['30-clean-author.reg']
         $text | Should -Match '"RegisteredOwner"="SYSTEM-Intel-MIC"'
         $text | Should -Match '"RegisteredOrganization"=-'
+        # OEMInformation is the second SYSTEM-RAMOS mark in SOFTWARE
+        # (full-hive scan found exactly two); same author brand, shown
+        # in System Properties. The personal support URL goes with it.
+        $text | Should -Match 'CurrentVersion\\OEMInformation'
+        $text | Should -Match '"Manufacturer"="SYSTEM-Intel-MIC"'
+        $text | Should -Match '"SupportURL"=-'
         # The header comment names the reference value it replaces; the
         # registry VALUES themselves must not carry the Ramos branding.
         $valueLines = ($text -split "`r`n|`n") | Where-Object { $_ -and -not $_.TrimStart().StartsWith(';') }
@@ -196,18 +204,20 @@ Describe 'clean .reg patches' {
 }
 
 Describe 'clean data files' {
-    It 'the placeholder file list exists, is the reference list minus the deleted apps, and says so' {
+    It 'the final file list exists, is the reference list minus the deleted apps, and says so' {
         $list = Join-Path $script:DataDir 'clean-22621.1105-enterprise-files.txt'
         Test-Path -LiteralPath $list | Should -Be $true
         $patterns = Read-Whitelist -Path $list
-        $patterns.Count | Should -Be 9580
+        $patterns.Count | Should -Be 9405
         $patterns | Should -Not -Contain 'Program Files (x86)\Tencent\QQ\Bin\QQ.exe'
         foreach ($excluded in 'Program Files (x86)\Tencent\', 'Program Files (x86)\360Chrome\', 'Program Files (x86)\Thunder\', 'Program Files\Office2010\', 'Program Files\PhotoshopCS3\', 'Program Files\7-Zip\', 'Program Files\PENetwork\', 'Program Files\StartAllBack\', 'Program Files (x86)\Stardock\') {
             @($patterns | Where-Object { $_.StartsWith($excluded, [System.StringComparison]::OrdinalIgnoreCase) }).Count | Should -Be 0 -Because "$excluded must be excluded"
         }
         $header = (Get-Content -LiteralPath $list -TotalCount 12) -join "`n"
-        $header | Should -Match 'PLACEHOLDER'
-        $header | Should -Match '15:15'
+        $header | Should -Match 'No hash diff'
+        $header | Should -Match 'source of truth'
+        $header | Should -Not -Match 'PLACEHOLDER'
+        $header | Should -Not -Match '15:15'
     }
 
     It 'the rewritten StartAllBack.xml points at MICPE, not Program Files' {
@@ -223,6 +233,146 @@ Describe 'clean data files' {
         $xml | Should -Match '<EnableNetwork>false</EnableNetwork>'
         $xml | Should -Match '<EnableFirewall>false</EnableFirewall>'
         $xml | Should -Match 'pass="windowsPE"'
+    }
+}
+
+Describe 'clean app auto-discovery' {
+    BeforeAll {
+        $script:AppRoot = Join-Path $script:RepoRoot 'app'
+        $script:AppRegTexts = @{}
+        foreach ($pair in @(
+                @{ App = 'office'; File = 'office.reg' },
+                @{ App = 'chrome'; File = 'chrome.reg' }
+            )) {
+            $path = Join-Path (Join-Path $script:AppRoot $pair.App) $pair.File
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            # UTF-16LE BOM
+            $bytes[0] | Should -Be 0xFF
+            $bytes[1] | Should -Be 0xFE
+            $script:AppRegTexts["$($pair.App)/$($pair.File)"] =
+                [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+        }
+    }
+
+    It 'dot-sources Payload.ps1 (join + verify + install.bat reuse)' {
+        $script:CleanScriptText | Should -Match "'Payload'"
+    }
+
+    It 'discovers app directories instead of hardcoding software names' {
+        $script:CleanScriptText | Should -Match 'Get-CleanAppDirs'
+        $script:CleanScriptText | Should -Match 'Invoke-CleanAppStep'
+        # The discovery scans app/ for install.bat + top-level .reg and
+        # skips '_' directories; no literal office/chrome list.
+        $script:CleanScriptText | Should -Match "install\.bat"
+        $script:CleanScriptText | Should -Match "'\*\.reg'"
+        $script:CleanScriptText | Should -Match "-notlike '_\*'"
+        $script:CleanScriptText | Should -Not -Match "@\('office',\s*'chrome'\)"
+        $script:CleanScriptText | Should -Not -Match "@\('chrome',\s*'office'\)"
+    }
+
+    It 'runs the app step between shell and registry, and imports app .reg with the clean patches' {
+        $script:CleanScriptText | Should -Match 'Invoke-CleanAppStep'
+        $script:CleanScriptText | Should -Match 'Invoke-CleanRegistryStep -AppRegFiles'
+        $script:CleanScriptText | Should -Match 'Assert-CleanRegistry -AppNames'
+        # Dispatch order: shell, then app, then registry.
+        $shellAt = $script:CleanScriptText.IndexOf('Invoke-CleanShellStep')
+        $appAt = $script:CleanScriptText.IndexOf('$apps = Invoke-CleanAppStep')
+        $regAt = $script:CleanScriptText.IndexOf('Invoke-CleanRegistryStep -AppRegFiles')
+        $shellAt | Should -BeGreaterThan 0
+        $appAt | Should -BeGreaterThan $shellAt
+        $regAt | Should -BeGreaterThan $appAt
+        # The app step reuses the payload join + verify + install.bat.
+        $script:CleanScriptText | Should -Match 'Get-AppPackageArchive'
+        $script:CleanScriptText | Should -Match 'Invoke-ComponentInstall'
+    }
+
+    It 'discovers office and chrome (and only them) from the app/ tree' {
+        # Mirror the script's discovery filter against the real tree:
+        # install.bat + at least one top-level .reg, name not starting
+        # with '_'. _template has no .reg, payload has no install.bat,
+        # start11/startallback are shell-step apps (no top-level .reg).
+        $found = @(Get-ChildItem -LiteralPath $script:AppRoot -Directory |
+            Where-Object { $_.Name -notlike '_*' } |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'install.bat') } |
+            Where-Object { @(Get-ChildItem -LiteralPath $_.FullName -Filter '*.reg' -File).Count -gt 0 } |
+            Sort-Object Name | ForEach-Object { $_.Name })
+        $found | Should -Be @('chrome', 'office')
+    }
+
+    It 'both app .reg files exist and start with the registry editor header' {
+        foreach ($key in $script:AppRegTexts.Keys) {
+            $script:AppRegTexts[$key] | Should -Match '^Windows Registry Editor Version 5\.00'
+        }
+    }
+
+    It 'both app .reg files address only the mounted SOFTWARE hive (PE-SOFT)' {
+        foreach ($key in $script:AppRegTexts.Keys) {
+            $text = $script:AppRegTexts[$key]
+            # Section headers end with ]\r\n, so $ does not anchor after ];
+            # match the bracketed path without a trailing anchor.
+            $sections = @([regex]::Matches($text, '(?m)^\[([^\]]+)\]') | ForEach-Object { $_.Groups[1].Value })
+            $sections.Count | Should -BeGreaterThan 0
+            foreach ($section in $sections) {
+                $section | Should -Match '^HKEY_LOCAL_MACHINE\\PE-SOFT\\'
+            }
+        }
+    }
+
+    It 'office.reg carries App Paths, the six file associations and InstallRoot' {
+        $text = $script:AppRegTexts['office/office.reg']
+        foreach ($exe in 'WINWORD\.EXE', 'EXCEL\.EXE', 'POWERPNT\.EXE') {
+            $text | Should -Match "App Paths\\$exe"
+        }
+        # Values carry doubled backslashes in .reg syntax, so the regex
+        # needs \\\\ to match them.
+        $text | Should -Match 'Office2016\\\\Office16\\\\WINWORD\.EXE'
+        foreach ($ext in '\.doc\]', '\.docx\]', '\.xls\]', '\.xlsx\]', '\.ppt\]', '\.pptx\]') {
+            $text | Should -Match "Classes\\$ext"
+        }
+        $text | Should -Match 'Word\.Document\.12'
+        $text | Should -Match 'Excel\.Sheet\.12'
+        $text | Should -Match 'PowerPoint\.Show\.12'
+        $text | Should -Match 'Microsoft\\Office\\16\.0\\Common\\InstallRoot'
+        # The header comment names what was excluded (Ramos / Office 2010);
+        # the registry VALUES themselves must not carry it.
+        $valueText = (($text -split "`r`n|`n") | Where-Object { $_ -and -not $_.TrimStart().StartsWith(';') }) -join "`n"
+        $valueText | Should -Not -Match 'Office14'
+        $valueText | Should -Not -Match 'Office2010'
+        $valueText | Should -Not -Match 'RAMOS'
+    }
+
+    It 'chrome.reg carries App Paths, ChromeHTML, protocols and StartMenuInternet' {
+        $text = $script:AppRegTexts['chrome/chrome.reg']
+        $text | Should -Match 'App Paths\\chrome\.exe'
+        # Values carry doubled backslashes in .reg syntax.
+        $text | Should -Match 'Google\\\\Chrome\\\\Application\\\\chrome\.exe'
+        $text | Should -Match 'Classes\\ChromeHTML'
+        foreach ($ext in '\.html\]', '\.htm\]') {
+            $text | Should -Match "Classes\\$ext"
+        }
+        $text | Should -Match 'Classes\\http\\shell\\open\\command'
+        $text | Should -Match 'Classes\\https\\shell\\open\\command'
+        $text | Should -Match 'Clients\\StartMenuInternet\\Google Chrome'
+        $text | Should -Match 'RegisteredApplications'
+        $text | Should -Match '"Google Chrome"="Software\\\\Clients\\\\StartMenuInternet\\\\Google Chrome\\\\Capabilities"'
+        # The header comment names what was excluded (Ramos / 360Chrome);
+        # the registry VALUES themselves must not carry it.
+        $valueText = (($text -split "`r`n|`n") | Where-Object { $_ -and -not $_.TrimStart().StartsWith(';') }) -join "`n"
+        $valueText | Should -Not -Match '360Chrome'
+        $valueText | Should -Not -Match 'RAMOS'
+    }
+
+    It 'both app .reg files parse through the repo registry parser' {
+        . "$PSScriptRoot/../src/build/lib/Common.ps1"
+        . "$PSScriptRoot/../src/build/lib/Registry.ps1"
+        foreach ($pair in @(
+                @{ App = 'office'; File = 'office.reg' },
+                @{ App = 'chrome'; File = 'chrome.reg' }
+            )) {
+            $path = Join-Path (Join-Path $script:AppRoot $pair.App) $pair.File
+            $entries = Get-RegFileDeclaredEntries -RegFile $path
+            $entries.Count | Should -BeGreaterThan 0
+        }
     }
 }
 
