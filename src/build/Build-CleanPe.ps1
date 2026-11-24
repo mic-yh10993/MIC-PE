@@ -523,11 +523,23 @@ function Invoke-CleanRegistryStep {
     $samPath = Join-Path $paths.Staging 'Windows\System32\config\SAM'
     $admin = Set-OfflineAdminState -SamPath $samPath
     if (-not $admin.Found) {
-        # The official install.wim SAM carries the Administrator record,
-        # so an empty hive here means the extract lost it -- fail loudly
-        # instead of shipping an image nobody can log into.
-        throw [System.InvalidOperationException]::new(
-            'the staging SAM has no Administrator record; the file-list extract lost it')
+        # MEASURED (2026-11-24, run 45390017855): the official install.wim
+        # SAM is an EMPTY hive by design -- 8,192 bytes, valid regf, no
+        # subkeys, no Administrator record. Verified against the exact UUP
+        # source (professional_zh-cn.esd, image 3 "Windows 11 专业版",
+        # SHA1-verified): its \Windows\System32\config\SAM is the same
+        # 8 KB empty hive, and the sibling hives show the same pattern
+        # (SOFTWARE 66 MB and SYSTEM 8.9 MB populated, SECURITY/BBI 8 KB
+        # minimal). The extraction is faithful (wimlib extract of the
+        # reference PE SAM is byte-identical), and no build step touches
+        # SAM between extraction and here, so an empty hive is expected,
+        # not a lost extract. The SAM service creates the built-in accounts
+        # (including Administrator RID 500) when it starts -- the reference
+        # PE proves it: it boots to LogonUI with a working Administrator
+        # even though the image it was built from had an empty SAM, and
+        # 10-clean-boot.reg already lifts the blank-password restriction.
+        # Skip the offline enable and let the boot-time SAM service do it.
+        Write-Warn 'staging SAM is an empty hive (no Administrator record): expected for an install.wim source; the SAM service creates the built-in accounts at boot, so the offline enable step is skipped'
     }
 
     # The reference's unattend.xml (windowsPE pass only: ComputerName

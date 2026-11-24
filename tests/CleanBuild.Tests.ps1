@@ -124,6 +124,18 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $script:CleanScriptText | Should -Match 'Assert-CleanRegistry'
     }
 
+    It 'does not fail the build on an empty staging SAM (install.wim ships one by design)' {
+        # Run 45390017855: the official install.wim SAM is an EMPTY hive
+        # (8 KB, no subkeys, no Administrator record) -- verified against
+        # the exact UUP source (professional_zh-cn.esd image 3). The SAM
+        # service creates the built-in accounts at boot, so the offline
+        # enable step is skipped, not fatal.
+        $script:CleanScriptText | Should -Match 'Set-OfflineAdminState'
+        $script:CleanScriptText | Should -Not -Match 'the file-list extract lost it'
+        $script:CleanScriptText | Should -Match 'empty hive'
+        $script:CleanScriptText | Should -Match 'SAM service creates the built-in accounts at boot'
+    }
+
     It 'captures the staging tree into a fresh boot.wim and packages a boot.wim-only ISO' {
         $script:CleanScriptText | Should -Match 'New-WimCapture'
         $script:CleanScriptText | Should -Match 'Set-WimBootIndex'
