@@ -417,7 +417,7 @@ function Invoke-CleanShellStep {
             'Windows\System32\MICPE\StartAllBack\StartAllBackCfg.exe',
             'Windows\System32\MICPE\Start11\Start11.exe',
             'Windows\System32\MICPE\Start11\Start11Config.exe',
-            'Windows\System32\MICPE\Start11\Start11_64.dll',
+            'Windows\System32\MICPE\Start11\Start11_64.exe',
             'Windows\System32\icsxml\StartAllBack.xml'
         )) {
         Assert-PathExists -Path (Join-Path $paths.Staging $required) -Label "staged $required"
