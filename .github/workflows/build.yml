@@ -520,18 +520,17 @@ jobs:
           if ($releaseExtras.Count -gt 0) {
             $notes += "`nQEMU screenshots from the clean verify run are attached to this release."
           }
-          $releaseFiles = @($iso, $wim, $checksums) + $releaseExtras
-          $existing = & gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            # Re-run of the same workflow run: upload into the existing
-            # release instead of failing on the duplicate tag.
-            & gh release upload $tag @releaseFiles --repo $env:GITHUB_REPOSITORY --clobber
-          } else {
-            & gh release create $tag @releaseFiles --repo $env:GITHUB_REPOSITORY `
-              --title "MICPE $stage $build ($date)" --notes $notes
-          }
-          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag" }
-          Write-Host "released $tag"
+          # The upload itself lives in Publish-CleanRelease.ps1: core files
+          # (ISO, boot.wim, checksums) go up with the release creation and
+          # a failure there still fails the step; extras (PNGs, logs) are
+          # uploaded one by one and a single bad file only warns. Run
+          # 45448778057 lost the whole release because one combined upload
+          # failed on micpe-qemu.log (HTTP 400 Bad Content-Length — the
+          # QEMU -D log was empty and GitHub rejects empty release assets);
+          # empty files are skipped with a warning before anything uploads.
+          . ./src/ci/Publish-CleanRelease.ps1
+          Publish-CleanRelease -Tag $tag -CoreFiles @($iso, $wim, $checksums) -ExtraFiles $releaseExtras `
+              -Title "MICPE $stage $build ($date)" -Notes $notes
 
       - name: Upload base inventory to Release
         # Fetch-only deliverable: the file inventory JSON (official SHA256

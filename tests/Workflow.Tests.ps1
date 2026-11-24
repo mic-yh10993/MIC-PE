@@ -260,8 +260,12 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'Upload finished build to Release'
         $script:buildYml | Should -Match "github\.event_name == 'workflow_dispatch'"
         $script:buildYml | Should -Match '\$tag = "micpe-'
-        $script:buildYml | Should -Match 'gh release create'
-        $script:buildYml | Should -Match 'gh release upload'
+        $script:buildYml | Should -Match 'gh release create' -Because 'the base inventory step still uploads inline'
+        $script:buildYml | Should -Match 'gh release upload' -Because 'the base inventory step still uploads inline'
+        # The finished-build gh calls live in Publish-CleanRelease.ps1
+        # (run 45448778057: the upload was extracted so core and extra
+        # files can be split); build.yml only wires the call.
+        $script:buildYml | Should -Match 'Publish-CleanRelease'
         $script:buildYml | Should -Match 'checksums\.sha256'
         $script:buildYml | Should -Match 'install\.wim is NOT included'
     }
@@ -277,7 +281,11 @@ Describe 'build.yml verify wiring' {
         $script:buildYml | Should -Match 'Export-CleanScreenshots'
         $script:buildYml | Should -Match 'screenshots-png'
         $script:buildYml | Should -Match 'release extras'
-        $script:buildYml | Should -Match '@releaseFiles'
+        # The combined @releaseFiles upload died in run 45448778057 (one
+        # empty log failed the whole release); extras now ride
+        # Publish-CleanRelease -ExtraFiles, one by one.
+        $script:buildYml | Should -Match 'Publish-CleanRelease'
+        $script:buildYml | Should -Match '-ExtraFiles'
         $script:buildYml | Should -Match 'Screenshots go to the Release for this run'
     }
 
