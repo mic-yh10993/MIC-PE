@@ -4,6 +4,10 @@
 #
 # Env:
 #   MICPE_FAKE_WIMLIB_LOG            append one argument per line when set.
+#   MICPE_FAKE_WIMLIB_INFO           LF-separated wimlib `info` output to
+#                                    print instead of the stock header (lets
+#                                    a test feed a realistic header, e.g.
+#                                    Boot Index 0 plus image blocks).
 #   MICPE_FAKE_WIMLIB_FLATTEN_ALWAYS=1
 #                                    ignore --preserve-dir-structure and
 #                                    always flatten (simulates a broken
@@ -22,6 +26,11 @@ if ($env:MICPE_FAKE_WIMLIB_LOG) {
 # assertion (the log above records it).
 if ($args -contains 'info') {
     if ($args -contains '--boot') {
+        $LASTEXITCODE = 0
+        return
+    }
+    if ($env:MICPE_FAKE_WIMLIB_INFO) {
+        ($env:MICPE_FAKE_WIMLIB_INFO -split "`n") | Write-Output
         $LASTEXITCODE = 0
         return
     }

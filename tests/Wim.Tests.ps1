@@ -140,6 +140,67 @@ Describe 'Get-WimBootIndex / Set-WimBootIndex' {
     }
 }
 
+Describe 'Get-WimImageIndexByEdition' {
+    BeforeAll {
+        # Realistic wimlib-imagex info output for a freshly generated UUP
+        # install.wim: the header carries "Boot Index: 0" (no boot image
+        # assigned yet) and the image blocks follow. The old regex matched
+        # the "Index:" inside "Boot Index:" and returned 0, which wimlib
+        # rejects (error 18, indexes start at 1); run 45349073419 died
+        # on exactly that (241 batches, 0/12021 files).
+        $script:singleProInfo = @(
+            'WIM Information:',
+            'Image Count:    1',
+            'Boot Index:     0',
+            '',
+            'Available Images:',
+            'Index:                  1',
+            'Name:                   Windows 11 Pro',
+            'Description:            Windows 11 Pro',
+            'Edition ID:             Professional'
+        ) -join "`n"
+        $script:twoImageInfo = @(
+            'WIM Information:',
+            'Image Count:    2',
+            'Boot Index:     0',
+            '',
+            'Available Images:',
+            'Index:                  1',
+            'Name:                   Windows 11 Pro',
+            'Edition ID:             Professional',
+            '',
+            'Index:                  2',
+            'Name:                   Windows 11 Home',
+            'Edition ID:             Core'
+        ) -join "`n"
+    }
+
+    It 'does not mistake Boot Index 0 for image index 0 (single image)' {
+        $wim = Join-Path $script:TempRoot "micpe-idx-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        $env:MICPE_FAKE_WIMLIB_INFO = $script:singleProInfo
+        try {
+            Get-WimImageIndexByEdition -WimPath $wim -Edition 'Professional' -WimlibPath $script:fakeWimlib | Should -Be 1
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_WIMLIB_INFO -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'finds the right index by edition when two images share Boot Index 0' {
+        $wim = Join-Path $script:TempRoot "micpe-idx2-$(Get-Random).wim"
+        Set-Content -LiteralPath $wim -Value 'x'
+        $env:MICPE_FAKE_WIMLIB_INFO = $script:twoImageInfo
+        try {
+            Get-WimImageIndexByEdition -WimPath $wim -Edition 'Professional' -WimlibPath $script:fakeWimlib | Should -Be 1
+            Get-WimImageIndexByEdition -WimPath $wim -Edition 'Core' -WimlibPath $script:fakeWimlib | Should -Be 2
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_WIMLIB_INFO -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'Invoke-IsoStep boot image' {
     BeforeAll {
         $script:buildScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/Build-Micpe.ps1') -Raw

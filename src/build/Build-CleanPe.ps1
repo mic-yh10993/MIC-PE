@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     MIC-PE clean rebuild orchestrator (Windows 11 22H2, build 22621.1105
-    Enterprise, rebuilt from the official image against the Ramos reference PE).
+    Professional, rebuilt from the official image against the Ramos reference PE).
 
 .DESCRIPTION
     The clean rebuild does NOT patch the UUP boot.wim the way the m* stages
@@ -16,7 +16,7 @@
                   text, so the base step is NOT refactored out of that
                   file; this script carries its own copy).
       2. extract  copy ONLY the files in the supplied file list out of the
-                  official install.wim (Enterprise index) into a staging
+                  official install.wim (Professional index) into a staging
                   tree (--nullglob: a listed file the official image does
                   not carry is skipped, not fatal).
       3. shell    read shell.zip (StartAllBack + Start11, user-supplied,
@@ -60,8 +60,10 @@ param(
     # UUP build to resolve. The reference PE is 22621.1105.
     [string] $Build = '22621.1105',
 
-    # UUP edition for the download package. The reference PE is Enterprise.
-    [string] $Edition = 'enterprise',
+    # UUP edition for the download package. The reference PE is Enterprise,
+    # but UUP dump does not offer zh-cn Enterprise (user decision
+    # 2026-11-24: rebuild from Professional, same build 22621.1105).
+    [string] $Edition = 'professional',
 
     [string] $Workspace,
 
@@ -262,7 +264,7 @@ function Invoke-CleanBaseStep {
 
 function Invoke-CleanExtractStep {
     # Copy ONLY the files in the file list out of the official install.wim
-    # (Enterprise index) into the staging tree. --nullglob skips a listed
+    # (Professional index) into the staging tree. --nullglob skips a listed
     # file the official image does not carry; the critical files below are
     # asserted explicitly so a silent skip of something essential fails
     # the build here instead of at first boot.

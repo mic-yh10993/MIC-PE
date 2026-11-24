@@ -234,7 +234,11 @@ function Get-WimImageIndexByEdition {
     }
     $text = ($info -join "`n")
 
-    $blocks = [regex]::Matches($text, 'Index:\s*(\d+)[\s\S]*?Edition ID:\s*([^\r\n]*)')
+    # (?m)^ anchors "Index:" to a line start: the WIM header carries a
+    # "Boot Index:" line (0 on a freshly generated install.wim), and the
+    # unanchored pattern matched that substring, returning index 0 --
+    # which wimlib rejects (error 18, indexes start at 1).
+    $blocks = [regex]::Matches($text, '(?m)^Index:\s*(\d+)[\s\S]*?Edition ID:\s*([^\r\n]*)')
     $single = $null
     $found = @()
     foreach ($m in $blocks) {

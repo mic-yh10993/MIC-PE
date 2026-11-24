@@ -147,7 +147,7 @@ jobs:
             # not apply. Build-CleanPe.ps1 exports ISO_PATH / BOOT_WIM_PATH
             # the same way, so the upload and Release steps below work
             # unchanged.
-            ./src/build/Build-CleanPe.ps1 -Build '22621.1105' -Edition 'enterprise'
+            ./src/build/Build-CleanPe.ps1 -Build '22621.1105' -Edition 'professional'
           }
           else {
             $buildArgs = @{ Stage = $env:IN_STAGE }

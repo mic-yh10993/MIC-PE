@@ -11,9 +11,9 @@ BeforeAll {
 }
 
 Describe 'Build-CleanPe.ps1 parameters' {
-    It 'defaults to the 22621.1105 Enterprise reference build' {
+    It 'defaults to the 22621.1105 Professional rebuild (reference PE is Enterprise)' {
         $script:CleanScriptText | Should -Match '\[string\] \$Build = ''22621\.1105'''
-        $script:CleanScriptText | Should -Match '\[string\] \$Edition = ''enterprise'''
+        $script:CleanScriptText | Should -Match '\[string\] \$Edition = ''professional'''
     }
 
     It 'takes the file list, in-repo shell.zip and pinned shell SHA256 as parameters' {
@@ -389,7 +389,7 @@ Describe 'build.yml clean wiring' {
 
     It 'runs Build-CleanPe.ps1 for clean builds and Build-Micpe.ps1 otherwise' {
         $script:Workflow | Should -Match 'IN_CLEAN:'
-        $script:Workflow | Should -Match "Build-CleanPe\.ps1 -Build '22621\.1105' -Edition 'enterprise'"
+        $script:Workflow | Should -Match "Build-CleanPe\.ps1 -Build '22621\.1105' -Edition 'professional'"
         $script:Workflow | Should -Match 'Build-Micpe\.ps1 @buildArgs'
     }
 
