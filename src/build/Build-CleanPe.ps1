@@ -620,6 +620,19 @@ function Assert-CleanRegistry {
         Assert-ReadBack -Condition ($null -ne $exfat) -Message 'read-back: PE-SYS\ControlSet001\Services\exfat is missing'
         Assert-ReadBack -Condition ($exfat['Start'] -eq '0x0') -Message "read-back: exfat Start is '$($exfat['Start'])', expected 0x0"
 
+        # Missing boot drivers (round 11 root cause): the official
+        # install.wim SYSTEM hive lists 9 Start=0 drivers whose .sys files
+        # are not in the captured boot.wim; the Ramos reference PE has none
+        # of these 9 services at all. Two are ErrorControl=3 (critical):
+        # iorate and rdyboost. WdBoot is the Early-Launch (ELAM) driver.
+        # Disable all 9 so winload never tries to load a boot driver that
+        # is not in the image.
+        foreach ($name in @('WdBoot', 'WdFilter', 'MsSecFlt', 'SgrmAgent', 'IntelPMT', 'intelpep', 'cnghwassist', 'iorate', 'rdyboost')) {
+            $svc = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey "ControlSet001\Services\$name"
+            Assert-ReadBack -Condition ($null -ne $svc) -Message "read-back: PE-SYS\ControlSet001\Services\$name is missing"
+            Assert-ReadBack -Condition ($svc['Start'] -eq '0x4') -Message "read-back: $name Start is '$($svc['Start'])', expected 0x4"
+        }
+
         $winlogon = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon'
         Assert-ReadBack -Condition ($null -ne $winlogon) -Message 'read-back: PE-SOFT Winlogon is missing'
         Assert-ReadBack -Condition ($winlogon['Shell'] -eq 'explorer.exe') -Message "read-back: Winlogon Shell is '$($winlogon['Shell'])', expected explorer.exe"

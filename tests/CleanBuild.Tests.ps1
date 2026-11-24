@@ -165,6 +165,21 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $readBack | Should -Match "exfat\['Start'\] -eq '0x0'"
     }
 
+    It 'reads back the 9 missing boot drivers as disabled (Start=4, round 11)' {
+        # Round 11 still died in winload on cdrom.sys 0xc0000428 even
+        # with cdrom/exfat at Start=0. The r85 boot.wim SYSTEM hive
+        # lists 9 Start=0 drivers whose .sys files are not in the
+        # image (WdBoot, WdFilter, MsSecFlt, SgrmAgent, IntelPMT,
+        # intelpep, cnghwassist, iorate, rdyboost); the Ramos reference
+        # PE has none of these services. The read-back must verify all
+        # 9 are disabled (Start=4) after the registry import.
+        $readBack = ($script:CleanScriptText -split 'function Assert-CleanRegistry')[1] -split 'function Invoke-CleanCaptureStep' | Select-Object -First 1
+        foreach ($name in 'WdBoot', 'WdFilter', 'MsSecFlt', 'SgrmAgent', 'IntelPMT', 'intelpep', 'cnghwassist', 'iorate', 'rdyboost') {
+            $readBack | Should -Match ([regex]::Escape($name))
+        }
+        $readBack | Should -Match "\['Start'\] -eq '0x4'"
+    }
+
     It 'captures the staging tree into a fresh boot.wim and packages a boot.wim-only ISO' {
         $script:CleanScriptText | Should -Match 'New-WimCapture'
         $script:CleanScriptText | Should -Match 'Set-WimBootIndex'
@@ -272,6 +287,28 @@ Describe 'clean .reg patches' {
         $valueLines = ($text -split "`r`n|`n") | Where-Object { $_ -and -not $_.TrimStart().StartsWith(';') }
         ($valueLines -join "`n") | Should -Not -Match 'CatRoot'
         ($valueLines -join "`n") | Should -Not -Match '\.cat'
+    }
+
+    It '10-clean-boot.reg disables the 9 boot drivers whose files are missing (round 11)' {
+        # Round 11 still died in winload on cdrom.sys 0xc0000428 with
+        # cdrom/exfat already at Start=0. The r85 boot.wim SYSTEM hive
+        # lists 9 Start=0 drivers whose .sys files are not in the
+        # image at all (verified against the captured boot.wim file
+        # list); the Ramos reference PE has none of these 9 services.
+        # Two are ErrorControl=3 (critical): iorate and rdyboost.
+        # WdBoot is the Early-Launch (ELAM) driver; its file and the
+        # ELAMBKUP backup dir are both missing. All 9 must be disabled
+        # (Start=4) so winload never tries to load a boot driver that
+        # is not in the image. WindowsTrustedRTProxy is deliberately
+        # NOT disabled: the reference PE also lists it at Start=0 with
+        # its file missing, and it boots -- winload tolerates it.
+        $text = $script:RegTexts['10-clean-boot.reg']
+        foreach ($name in 'WdBoot', 'WdFilter', 'MsSecFlt', 'SgrmAgent', 'IntelPMT', 'intelpep', 'cnghwassist', 'iorate', 'rdyboost') {
+            $text | Should -Match "PE-SYS\\ControlSet001\\Services\\$name"
+            $section = ($text -split "ControlSet001\\Services\\$name")[1]
+            $section | Should -Match '"Start"=dword:00000004'
+        }
+        $text | Should -Not -Match 'ControlSet001\\Services\\WindowsTrustedRTProxy'
     }
 
     It '20-clean-start11.reg carries Start11 settings but no pinned-item groups' {
