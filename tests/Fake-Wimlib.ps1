@@ -30,6 +30,25 @@ if ($args -contains 'info') {
     return
 }
 
+# `capture <source> <dest> [name] ...`: the clean rebuild captures a
+# staging tree into a fresh boot.wim. The fake cannot build a real WIM,
+# but it creates the dest file so the caller's Assert-PathExists passes
+# and the argument log records the capture flags (--boot, --compress,
+# --check, image name) for the test to assert on.
+if ($args -contains 'capture') {
+    $captureIdx = [Array]::IndexOf($args, 'capture')
+    $dest = $args[$captureIdx + 2]
+    if ($dest) {
+        $parent = Split-Path -Parent $dest
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        Set-Content -LiteralPath $dest -Value 'FAKE-WIM' -NoNewline
+    }
+    $LASTEXITCODE = 0
+    return
+}
+
 $destArg = @($args | Where-Object { $_ -like '--dest-dir=*' }) | Select-Object -First 1
 $hasHive = $args -contains 'Windows/System32/config/SOFTWARE'
 if ($destArg -and $hasHive) {

@@ -1,0 +1,33 @@
+<?xml version="1.0" ?>
+<applications xmlns="http://schemas.microsoft.com/windows/cpltasks/v1" 
+              xmlns:sh="http://schemas.microsoft.com/windows/tasks/v1">
+
+<application id="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706F}">
+
+<sh:task id="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706A}">
+	<sh:name>更改主题</sh:name>
+	<sh:keywords>个性化;更改主题;任务栏样式;资源管理器设置;自定义“开始屏幕“;</sh:keywords>	
+	<sh:command>%SystemRoot%\System32\MICPE\StartAllBack\StartAllBackCfg.exe</sh:command>
+</sh:task>
+<sh:task id="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706B}">
+	<sh:name>任务栏样式</sh:name>
+	<sh:keywords>个性化;更改主题;任务栏样式;资源管理器设置;自定义“开始屏幕“;</sh:keywords>
+	<sh:command>%SystemRoot%\System32\MICPE\StartAllBack\StartAllBackCfg.exe /taskbar</sh:command>
+</sh:task>
+<sh:task id="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706C}">
+	<sh:name>资源管理器设置</sh:name>
+	<sh:keywords>个性化;更改主题;任务栏样式;资源管理器设置;自定义“开始屏幕“;</sh:keywords>
+	<sh:command>%SystemRoot%\System32\MICPE\StartAllBack\StartAllBackCfg.exe /explorer</sh:command>
+</sh:task>
+<sh:task id="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706D}">
+	<sh:name>自定义“开始屏幕“</sh:name>
+	<sh:keywords>个性化;更改主题;任务栏样式;资源管理器设置;自定义“开始屏幕“;</sh:keywords>	
+	<sh:command>%SystemRoot%\System32\MICPE\Start11\Start11Config.exe</sh:command>
+</sh:task>
+<category id="1">
+	<sh:task idref="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706A}"/>
+                <sh:task idref="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706B}"/>
+                <sh:task idref="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706C}"/>
+	<sh:task idref="{FCEA18FF-BC55-4E63-94D7-1B2EFBFE706D}"/>
+</category>
+</application>

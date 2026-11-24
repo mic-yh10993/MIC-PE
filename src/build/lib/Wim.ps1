@@ -276,6 +276,54 @@ function Set-WimBootIndex {
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "wimlib-imagex info --boot failed with exit code $LASTEXITCODE for $WimPath"
 }
 
+function New-WimCapture {
+    <#
+    .SYNOPSIS
+        Capture a directory tree into a new bootable WIM (clean rebuild).
+    .DESCRIPTION
+        The clean rebuild assembles its PE as a plain directory tree
+        (files extracted from the official install.wim plus the shell
+        packages), then captures that tree into a fresh boot.wim. wimlib
+        captures with LZX compression and an integrity table; --boot marks
+        the new image as the boot image so winload starts it directly.
+        The caller still calls Set-WimBootIndex -Index 1 afterwards: the
+        capture creates a single-image WIM, and the boot-index field is
+        re-asserted before packaging (same belt-and-braces as the m*
+        iso step).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $SourceDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WimPath,
+
+        [string] $Name = 'MICPE',
+
+        [string] $WimlibPath = 'wimlib-imagex'
+    )
+
+    Assert-PathExists -Path $SourceDir -Label 'capture source directory'
+
+    $parent = Split-Path -Parent $WimPath
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $WimPath) {
+        Remove-Item -LiteralPath $WimPath -Force
+    }
+
+    Write-Step "capturing $SourceDir -> $WimPath"
+    # $LASTEXITCODE is only set by native commands; the Pester fake is a
+    # script, so it never sets the caller's value (see Get-WimBootIndex).
+    $LASTEXITCODE = 0
+    & $WimlibPath capture $SourceDir $WimPath $Name --compress=LZX --boot --check | Out-Host
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "wimlib-imagex capture failed with exit code $LASTEXITCODE for $SourceDir"
+    Assert-PathExists -Path $WimPath -Label 'captured boot.wim'
+    return $WimPath
+}
+
 function Copy-SignedHostToolsToSystem32 {
     <#
     .SYNOPSIS

@@ -36,6 +36,10 @@ on:
         description: "只取官方底座镜像并生成文件清单，不构建 PE（22H2 参考重建的比对用）"
         type: boolean
         default: false
+      clean:
+        description: "纯净版重建：从官方 install.wim 只复制清单文件 + shell.zip，重建 boot.wim（22H2 参考 PE 路线，见 src/build/Build-CleanPe.ps1）"
+        type: boolean
+        default: false
       edition:
         description: "UUP 版本（professional=专业版，enterprise=企业版；参考 PE 是企业版）"
         type: string
@@ -134,21 +138,32 @@ jobs:
           IN_PROBE: ${{ inputs.probe }}
           IN_NATIVE_LOGON_EXPERIMENT: ${{ inputs.nativeLogonExperiment }}
           IN_FETCH_ONLY: ${{ inputs.fetch_only }}
+          IN_CLEAN: ${{ inputs.clean }}
           IN_EDITION: ${{ inputs.edition }}
         run: |
-          $buildArgs = @{ Stage = $env:IN_STAGE }
-          if ($env:IN_BUILD) { $buildArgs.Build = $env:IN_BUILD }
-          if ($env:IN_OFFICE -eq 'true') { $buildArgs.Office = $true }
-          if ($env:IN_CHROME -eq 'true') { $buildArgs.Chrome = $true }
-          if ($env:IN_PROBE -eq 'false') { $buildArgs.Probe = $false }
-          if ($env:IN_NATIVE_LOGON_EXPERIMENT -eq 'true') { $buildArgs.NativeLogonExperiment = $true }
-          if ($env:IN_FETCH_ONLY -eq 'true') { $buildArgs.FetchOnly = $true }
-          if ($env:IN_EDITION) { $buildArgs.Edition = $env:IN_EDITION }
+          if ($env:IN_CLEAN -eq 'true') {
+            # Clean rebuild (22H2 reference PE): fixed build + edition,
+            # the stage / office / chrome / probe / fetch-only inputs do
+            # not apply. Build-CleanPe.ps1 exports ISO_PATH / BOOT_WIM_PATH
+            # the same way, so the upload and Release steps below work
+            # unchanged.
+            ./src/build/Build-CleanPe.ps1 -Build '22621.1105' -Edition 'enterprise'
+          }
+          else {
+            $buildArgs = @{ Stage = $env:IN_STAGE }
+            if ($env:IN_BUILD) { $buildArgs.Build = $env:IN_BUILD }
+            if ($env:IN_OFFICE -eq 'true') { $buildArgs.Office = $true }
+            if ($env:IN_CHROME -eq 'true') { $buildArgs.Chrome = $true }
+            if ($env:IN_PROBE -eq 'false') { $buildArgs.Probe = $false }
+            if ($env:IN_NATIVE_LOGON_EXPERIMENT -eq 'true') { $buildArgs.NativeLogonExperiment = $true }
+            if ($env:IN_FETCH_ONLY -eq 'true') { $buildArgs.FetchOnly = $true }
+            if ($env:IN_EDITION) { $buildArgs.Edition = $env:IN_EDITION }
 
-          ./src/build/Build-Micpe.ps1 @buildArgs
+            ./src/build/Build-Micpe.ps1 @buildArgs
+          }
 
       - name: Install QEMU
-        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
+        if: inputs.verify == 'full' && (inputs.clean == true || (inputs.probe != false && inputs.nativeLogonExperiment != true))
         shell: pwsh
         run: |
           if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
@@ -160,7 +175,7 @@ jobs:
           "QEMU_PATH=$qemu" | Add-Content -LiteralPath $env:GITHUB_ENV
 
       - name: Ensure OVMF firmware
-        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
+        if: inputs.verify == 'full' && (inputs.clean == true || (inputs.probe != false && inputs.nativeLogonExperiment != true))
         shell: pwsh
         run: |
           # QEMU ships its UEFI firmware next to the emulator (OVMF_CODE.fd
@@ -258,7 +273,7 @@ jobs:
           Write-Host "data disks: $disks"
 
       - name: Verify in QEMU
-        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
+        if: inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true && inputs.clean != true
         shell: pwsh
         env:
           IN_STAGE: ${{ inputs.stage || 'all' }}
@@ -309,6 +324,48 @@ jobs:
           }
           ./src/ci/Test-Stage.ps1 @verifyArgs
 
+      # A clean rebuild has no probe.cmd, so the probe-based verifier above
+      # cannot run against it. The clean verifier boots the ISO, logs in as
+      # Administrator (blank password) with an Enter keypress at LogonUI,
+      # opens the Start menu with the Windows key, and captures a screenshot
+      # at each step. Screenshots are evidence for a human to review
+      # (Explorer up, taskbar rendered, desktop icons, LogonUI login,
+      # StartAllBack/Start11 in effect); the step passes when the
+      # screenshots were captured, not on any guest-side assertion.
+      - name: Verify clean build in QEMU
+        if: inputs.verify == 'full' && inputs.clean == true
+        shell: pwsh
+        env:
+          IN_ISO: ${{ env.ISO_PATH }}
+          IN_OVMF: ${{ env.OVMF_PATH }}
+        run: |
+          $iso = if ($env:IN_ISO) { $env:IN_ISO } elseif ($env:ISO_PATH) { $env:ISO_PATH } else { '' }
+          if (-not $iso) {
+            throw 'Verify clean build in QEMU: no ISO path was passed (IN_ISO and ISO_PATH are both empty); the build step did not export ISO_PATH'
+          }
+          if (-not (Test-Path -LiteralPath $iso)) {
+            throw "Verify clean build in QEMU: ISO file not found at '$iso'"
+          }
+          $ovmf = if ($env:IN_OVMF) { $env:IN_OVMF } elseif ($env:OVMF_PATH) { $env:OVMF_PATH } else { '' }
+          if (-not $ovmf) {
+            throw 'Verify clean build in QEMU: no OVMF path was passed (IN_OVMF and OVMF_PATH are both empty); the Ensure OVMF firmware step did not export OVMF_PATH'
+          }
+          if (-not (Test-Path -LiteralPath $ovmf)) {
+            throw "Verify clean build in QEMU: OVMF firmware file not found at '$ovmf'"
+          }
+          $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
+          $result = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir "$env:GITHUB_WORKSPACE\verify-clean-out"
+          Write-Host ("clean QEMU verify: {0} of {1} screenshots in {2}" -f $result.ShotsTaken, $result.ShotsExpected, $result.ScreenshotDir)
+          if ($env:GITHUB_STEP_SUMMARY) {
+            @(
+              '## MICPE clean rebuild — QEMU screenshots'
+              ''
+              'Screenshots are in the `micpe-clean-verify` artifact (shot-01..03 boot -> LogonUI, shot-04..05 desktop after login, shot-06 Start menu, shot-07 desktop). Review them for: Explorer up, taskbar rendered, desktop icons, LogonUI login, StartAllBack/Start11 in effect.'
+              ''
+              "| Shots captured | ``$($result.ShotsTaken) of $($result.ShotsExpected)`` |"
+            ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+
       # A native-logon image never writes the classic micpe-probe.txt (its
       # startnet hands off to Winlogon instead of running probe.cmd), so the
       # QEMU probe chain above is skipped and static verification runs in
@@ -345,7 +402,7 @@ jobs:
           compression-level: 0
 
       - name: Upload verify artifacts
-        if: always() && inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true
+        if: always() && inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true && inputs.clean != true
         uses: actions/upload-artifact@v4
         with:
           name: micpe-verify-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
@@ -380,6 +437,19 @@ jobs:
           if-no-files-found: warn
           compression-level: 0
 
+      - name: Upload clean verify screenshots
+        if: always() && inputs.verify == 'full' && inputs.clean == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: micpe-clean-verify-${{ inputs.build || 'tag' }}
+          path: |
+            verify-clean-out/screenshots/*.ppm
+            verify-clean-out/micpe-serial.log
+            verify-clean-out/micpe-qemu.log
+          retention-days: 30
+          if-no-files-found: warn
+          compression-level: 0
+
       - name: Upload finished build to Release
         # Long-term rule (user decision 2026-11-17 14:16): every finished
         # build uploads itself as a Release. Tag scheme:
@@ -395,11 +465,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MICPE_STAGE: ${{ inputs.stage }}
           MICPE_BUILD: ${{ inputs.build }}
+          MICPE_CLEAN: ${{ inputs.clean }}
           MICPE_RUN_NUMBER: ${{ github.run_number }}
         run: |
           $ErrorActionPreference = 'Stop'
           $stage = $env:MICPE_STAGE
           $build = $env:MICPE_BUILD
+          if ($env:MICPE_CLEAN -eq 'true') { $stage = 'clean'; $build = '22621.1105' }
           $date = (Get-Date -Format 'yyyyMMdd')
           $runNumber = $env:MICPE_RUN_NUMBER
           $tag = "micpe-$stage-$build-$date-r$runNumber"
