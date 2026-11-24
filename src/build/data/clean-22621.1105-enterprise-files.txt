@@ -1,134 +1,14 @@
-# PLACEHOLDER -- file list pending the 15:15 official-vs-reference diff.
-# Source: reference PE file list (12,021 files) minus deleted third-party
-# apps (Tencent, 360Chrome, Thunder, Office2010, PhotoshopCS3, 7-Zip,
-# PENetwork) and minus StartAllBack/Start11 original locations (they come
-# from shell.zip into Windows\System32\MICPE, not from install.wim).
+# MICPE clean rebuild (22621.1105): file list for extraction from the official
+# install.wim. Source: reference PE file list (12,021 files) minus deleted
+# third-party apps (Tencent, 360Chrome, Thunder, Office2010, PhotoshopCS3,
+# 7-Zip, PENetwork) and minus StartAllBack/Start11 original locations (they
+# come from shell.zip into Windows\System32\MICPE, not from install.wim).
 # Also minus 18 Start Menu / Public Desktop shortcuts for the deleted apps.
-# After the 15:15 diff, this file MUST be replaced by the diff-derived list
-# (official files only; Ramos-added files dropped unless explicitly kept).
+# No hash diff against the reference is needed: the official install.wim is
+# the source of truth. Build-CleanPe.ps1 extracts each path from the
+# official image and skips paths the official image does not have (those
+# are third-party or Ramos-added files, not Microsoft files).
 # Lines starting with # are skipped by Read-Whitelist.
-\Program Files (x86)\Common Files\Adobe\Adobe Anchor Service\AMT\AUMProduct.cer
-\Program Files (x86)\Common Files\Adobe\Adobe Anchor Service\AMT\component.xml
-\Program Files (x86)\Common Files\Adobe\Adobe Anchor Service\FNP_Act_Installer.dll
-\Program Files (x86)\Common Files\Adobe\Adobe Anchor Service\adobelm_service_installer.dll
-\Program Files (x86)\Common Files\Adobe\Adobe PCD\cache\cache.db
-\Program Files (x86)\Common Files\Adobe\Adobe PCD\pcd.db
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\3.0.0.patches
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\3.1.0\VersionCue.dll
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\3.1.0\VersionCueSDK.dll
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\3.1.0\VersionCueUI.dll
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\3.1.0\dictionaries\win\versioncueui_en_us.zstrings
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\3.1.0\dictionaries\win\versioncueui_es_es.zstrings
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\3.1.0\dictionaries\win\versioncueui_zh_cn.zstrings
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\AMT\AUMProduct.cer
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\AMT\component.xml
-\Program Files (x86)\Common Files\Adobe\Adobe Version Cue CS3\Client\build.txt
-\Program Files (x86)\Common Files\Adobe\Camera Raw 4\AMT\AUMProduct.cer
-\Program Files (x86)\Common Files\Adobe\Camera Raw 4\AMT\component.xml
-\Program Files (x86)\Common Files\Adobe\Color\ACE1Cache.lst
-\Program Files (x86)\Common Files\Adobe\Color\AMT\component_euextra.xml
-\Program Files (x86)\Common Files\Adobe\Color\AMT\component_jarec.xml
-\Program Files (x86)\Common Files\Adobe\Color\AMT\component_photoshop.xml
-\Program Files (x86)\Common Files\Adobe\Color\Profiles\Photoshop4DefaultCMYK.icc
-\Program Files (x86)\Common Files\Adobe\Color\Profiles\Photoshop5DefaultCMYK.icc
-\Program Files (x86)\Common Files\Adobe\Color\Profiles\Recommended\ProPhoto.icm
-\Program Files (x86)\Common Files\Adobe\Color\Settings\ExtraSettings\Europe General Purpose.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\ExtraSettings\Europe Prepress.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\ExtraSettings\Europe Web Internet.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\Photoshop 5 Default Spaces.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\Recommended\Japan General Purpose.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\Recommended\Japan Magazine.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\Recommended\Japan Newspaper.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\Recommended\Japan Prepress.csf
-\Program Files (x86)\Common Files\Adobe\Color\Settings\Recommended\Japan Web Internet.csf
-\Program Files (x86)\Common Files\Adobe\Scripting Dictionaries CS3\photoshop\omv.xml
-\Program Files (x86)\Common Files\Adobe\Shell\psicon.dll
-\Program Files (x86)\Common Files\Adobe\Startup Scripts CS3\Adobe Photoshop\photoshop-10.jsx
-\Program Files (x86)\Common Files\Adobe\Startup Scripts CS3\Adobe Photoshop\photoshop-10\photoshop-10_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\Startup Scripts CS3\Adobe Photoshop\photoshop-10\photoshop-10_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\TypeSpt\AdobeFnt07.lst
-\Program Files (x86)\Common Files\Adobe\TypeSupport\AMT\AUMProduct.cer
-\Program Files (x86)\Common Files\Adobe\TypeSupport\AMT\component.xml
-\Program Files (x86)\Common Files\Adobe\TypeSupport\FntNames.db
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\ICU\ctl_gb18030.cnv
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\ICU\icudt26l.dat
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\HKSCS.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\JISX0208.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\JISX0213.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\Japanese83pv.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\readme.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\stdenc.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\symbol.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Adobe\zdingbat.txt
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1250.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1251.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1252.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1253.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1254.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1255.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1256.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1257.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP1258.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP874.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP932.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP936.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP949.TXT
-\Program Files (x86)\Common Files\Adobe\TypeSupport\Unicode\Mappings\Win\CP950.TXT
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\AMT\AUMProduct.cer
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\AMT\application.xml
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Common\IPTC_Contact.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Common\IPTC_Content.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Common\IPTC_Image.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Common\IPTC_Status.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Common\IPTC_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Common\IPTC_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Camera1.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Camera1_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Camera1_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Camera2.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Camera2_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Camera2_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Categories.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Categories_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\Categories_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\DICOMInfo.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\DICOMInfo_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\DICOMInfo_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\History.txt
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\History_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\History_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_ar_AE.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_bg_BG.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_cs_CZ.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_da_DK.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_de_DE.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_el_GR.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_es_ES.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_et_EE.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_fi_FI.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_fr_FR.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_he_IL.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_hr_HR.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_hu_HU.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_it_IT.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_ja_JP.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_ko_KR.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_lt_LT.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_lv_LV.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_nl_NL.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_no_NO.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_pl_PL.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_pt_BR.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_ro_RO.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_ru_RU.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_sk_SK.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_sl_SI.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_sv_SE.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_tr_TR.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_uk_UA.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_zh_CN.dat
-\Program Files (x86)\Common Files\Adobe\XMP\Custom File Info Panels\1.0\Photoshop\dictionaries\FileInfo_zh_TW.dat
-\Program Files (x86)\Common Files\Adobe\caps\caps.db
 \Program Files (x86)\Common Files\Microsoft Shared\EQUATION\2052\EEINTL.DLL
 \Program Files (x86)\Common Files\Microsoft Shared\EQUATION\EEINTL.DLL
 \Program Files (x86)\Common Files\Microsoft Shared\EQUATION\EQNEDT32.CNT
@@ -138,50 +18,6 @@
 \Program Files (x86)\Common Files\Microsoft Shared\EQUATION\eqnedt32.exe.manifest
 \Program Files (x86)\Common Files\Microsoft Shared\Filters\odffilt.dll
 \Program Files (x86)\Common Files\Microsoft Shared\MSClientDataMgr\MSCDM.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\ACEINTL.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\ACEODBCI.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\ACERECR.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\ACEWSTR.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\ALRTINTL.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\MSOINTL.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\MSSOAPR3.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\OARPMANR.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\2052\xlsrvintl.dll
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACECORE.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEDAO.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEERR.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEES.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEEXCH.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEEXCL.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEODBC.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEODDBS.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEODEXL.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEODTXT.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEOLEDB.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACER3X.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACERCLR.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEREP.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACETXT.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEWDAT.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEWSS.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\ACEXBE.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\Cultures\OFFICE.ODF
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\EXPSRV.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\EXP_PDF.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\EXP_XPS.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\MSO.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\MSORES.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\MSOXEV.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\MSPTLS.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\MSSOAP30.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\RICHED20.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\USP10.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\VBAJET32.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\WISC30.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OFFICE14\msoshext.dll
-\Program Files (x86)\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPC.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPCEXT.DLL
-\Program Files (x86)\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPREARM.EXE
 \Program Files (x86)\Common Files\Microsoft Shared\Portal\2052\PortalConnect.dll
 \Program Files (x86)\Common Files\Microsoft Shared\Portal\PortalConnectCore.dll
 \Program Files (x86)\Common Files\Microsoft Shared\VBA\VBA6\VBE6EXT.OLB
@@ -319,13 +155,6 @@
 \Program Files (x86)\Microsoft\Edge\Application\msedge_proxy.exe
 \Program Files (x86)\Microsoft\Edge\Application\pwahelper.exe
 \Program Files (x86)\desktop.ini
-\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPC.DLL
-\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPCEXT.DLL
-\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPOBJS.DLL
-\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPSVC.EXE
-\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPWMI.DLL
-\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPPWMI.MOF
-\Program Files\Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\osppobjs-spp-plugin-manifest-signed.xrm-ms
 \Program Files\Common Files\Microsoft Shared\ink\InkObj.dll
 \Program Files\Common Files\Microsoft Shared\ink\TabTip.exe
 \Program Files\Common Files\Microsoft Shared\ink\TipRes.dll
@@ -441,8 +270,6 @@
 \Program Files\Windows Photo Viewer\zh-CN\PhotoViewer.dll.mui
 \Program Files\desktop.ini
 \ProgramData\Microsoft\Network\Connections\pbk\rasphone.pbk
-\ProgramData\Microsoft\OfficeSoftwareProtectionPlatform\Cache\cache.dat
-\ProgramData\Microsoft\OfficeSoftwareProtectionPlatform\tokens.dat
 \ProgramData\Microsoft\User Account Pictures\User.bmp
 \ProgramData\Microsoft\User Account Pictures\User.png
 \ProgramData\Microsoft\Windows\Start Menu\Programs\Administrative Tools\DirectX 诊断工具.lnk
