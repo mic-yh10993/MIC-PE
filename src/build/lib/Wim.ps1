@@ -184,10 +184,25 @@ function Clear-StagingReadOnly {
         would hit the same wall (reg load/import and the SAM edit write
         the extracted hives in place, and unattend.xml lands in the
         extracted System32), so the attribute is cleared for the whole
-        tree right after extraction, not just the one directory. The
-        same attrib -R /S /D pattern is used by Grant-FolderWriteAccess
-        (UwpChain.ps1), which documents that a leftover read-only
-        attribute "fails the copy in the same way".
+        tree right after extraction, not just the one directory.
+
+        The wildcard form matters: Microsoft's attrib docs say /S
+        applies to "matching files", and the documented recursive
+        spelling is `attrib -r b:\public\*.* /s`. A bare directory
+        path with /S only matches the directory itself, so the previous
+        spelling (`attrib -R <path> /S /D`) cleared the staging root
+        but left the subdirectories read-only -- run 45368774235 ran
+        it without error and the icsxml copy was still denied ~1.5s
+        later. So this clears the root itself first, then everything
+        under it with the wildcard form.
+
+        Note the read-only attribute alone cannot be the whole story:
+        a directory's read-only flag does not block creating files
+        inside it, and the destination file here does not exist yet
+        (it was never extracted -- the official image has no
+        StartAllBack.xml). The likely real blocker is the ACL (see
+        Grant-StagingWriteAccess); the attrib clearing stays as
+        belt-and-braces.
     #>
     [CmdletBinding()]
     param(
@@ -205,8 +220,124 @@ function Clear-StagingReadOnly {
     # check below also works in a fresh session (a real attrib overwrites
     # it with its own exit code).
     $LASTEXITCODE = 0
-    & $AttribPath -R $Path /S /D 2>&1 | Out-Null
+    & $AttribPath -R $Path /D 2>&1 | Out-Null
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "attrib -R failed with exit code $LASTEXITCODE for $Path"
+    $LASTEXITCODE = 0
+    & $AttribPath -R "$Path\*.*" /S /D 2>&1 | Out-Null
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "attrib -R failed with exit code $LASTEXITCODE for $Path\*.*"
+}
+
+function Grant-StagingWriteAccess {
+    <#
+    .SYNOPSIS
+        Make sure the build account can write into a WIM-extracted path.
+    .DESCRIPTION
+        Folders and files arrive from the install.wim with an ACL that
+        grants only TrustedInstaller, and a later write into such a
+        path then fails with "Access to the path ... is denied" even
+        after the read-only attribute is cleared: run 45368774235 ran
+        Clear-StagingReadOnly without error and the shell step's
+        StartAllBack.xml copy into the extracted icsxml directory was
+        still denied ~1.5s later. A directory's read-only flag does
+        not block creating files inside it, and the destination file
+        does not exist yet, so the blocker is the ACL, not the
+        attribute. This is the same failure Grant-FolderWriteAccess
+        (UwpChain.ps1) handles for the UWP chain's AppRepository:
+        take ownership for Administrators, then grant Administrators
+        full control. takeown / icacls are used rather than a .NET
+        FileSecurity object: changing the owner needs
+        SeTakeOwnershipPrivilege, which the elevated build token
+        already holds and the cmd tools enable by themselves. The ACE
+        goes to BUILTIN\Administrators, never to "Everyone".
+
+        Takes ownership of the path itself (takeown is not recursive
+        here, matching Grant-FolderWriteAccess), then grants
+        Administrators full control -- recursive for a directory
+        (icacls /T does not follow junctions), on the file itself for
+        a file. A missing path is a no-op, like Grant-FolderWriteAccess.
+        Failures are not thrown: the diagnostic step
+        (Show-StagingWriteState) reports whether the grant took, and
+        the copy that follows is the real test.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [string] $TakeownPath = 'takeown.exe',
+
+        [string] $IcaclsPath = 'icacls.exe',
+
+        [string] $AttribPath = 'attrib.exe'
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+
+    $isFile = -not (Test-Path -LiteralPath $Path -PathType Container)
+    Write-SubStep "granting write access on $Path"
+    $null = & $TakeownPath /F $Path /A 2>&1
+    if ($isFile) {
+        $null = & $IcaclsPath $Path /Grant '*S-1-5-32-544:F' /C 2>&1
+        $null = & $AttribPath -R $Path 2>&1
+    }
+    else {
+        $null = & $IcaclsPath $Path /Grant '*S-1-5-32-544:(OI)(CI)F' /T /C 2>&1
+        $null = & $AttribPath -R "$Path\*.*" /S /D 2>&1
+    }
+}
+
+function Show-StagingWriteState {
+    <#
+    .SYNOPSIS
+        Print the attrib and icacls state of a path to the log.
+    .DESCRIPTION
+        Diagnostic: shows whether a path is writable before a step
+        writes into it. Prints the attrib flags of the path (and, with
+        -ShowContents, of the files directly inside it), the icacls
+        ACL, and a write probe (create + delete a temp file). Used to
+        tell a read-only-attribute blocker apart from an ACL/ownership
+        blocker when a write into a WIM-extracted tree is denied: run
+        45368774235 ran the attrib fix without error and the icsxml
+        copy was still denied, so the log must show the real state
+        instead of assuming the fix worked. The probe file is deleted
+        immediately and never reaches the captured image. A missing
+        path is reported, not an error.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [string] $Label = $Path,
+
+        [switch] $ShowContents,
+
+        [string] $AttribPath = 'attrib.exe',
+
+        [string] $IcaclsPath = 'icacls.exe'
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-SubStep "write state of $Label ($Path): path does not exist"
+        return
+    }
+    Write-SubStep "write state of $Label ($Path)"
+    Write-Host "--- attrib $Path ---"
+    & $AttribPath $Path 2>&1 | Out-Host
+    if ($ShowContents) {
+        & $AttribPath "$Path\*.*" 2>&1 | Out-Host
+    }
+    Write-Host "--- icacls $Path ---"
+    & $IcaclsPath $Path 2>&1 | Out-Host
+    $probe = Join-Path $Path 'micpe-write-probe.tmp'
+    try {
+        [System.IO.File]::WriteAllText($probe, 'probe')
+        try { Remove-Item -LiteralPath $probe -Force -ErrorAction Stop } catch { }
+        Write-Host '--- write probe: OK (created and deleted micpe-write-probe.tmp) ---'
+    }
+    catch {
+        Write-Host "--- write probe: DENIED ($($_.Exception.Message)) ---"
+    }
 }
 
 function Get-WimBootIndex {

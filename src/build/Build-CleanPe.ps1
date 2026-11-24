@@ -285,6 +285,12 @@ function Invoke-CleanExtractStep {
     }
     Export-WimFiles -WimPath $InstallWim -Index $index -Destination $paths.Staging -Patterns $patterns -WimlibPath $WimlibPath
 
+    # Raw state, before any fix: what the install.wim actually left
+    # behind (attributes + ACL). Run 45368774235 ran the attrib fix
+    # without error and the icsxml copy was still denied, so the log
+    # must show the real state instead of assuming the fix worked.
+    Show-StagingWriteState -Path $paths.Staging -Label 'staging tree (raw, after extract)'
+
     # The extracted tree carries the install.wim's read-only attributes;
     # the shell and registry steps write into it (StartAllBack.xml, the
     # hives, unattend.xml), so make it writable now. Run 45359151127
@@ -292,6 +298,29 @@ function Invoke-CleanExtractStep {
     # denied while the script-created MICPE directory took the same
     # copy fine.
     Clear-StagingReadOnly -Path $paths.Staging
+
+    # The attribute is not the whole story (run 45368774235): a
+    # directory's read-only flag does not block creating files inside
+    # it, and the destination file does not exist yet, so the blocker
+    # is the ACL -- folders arrive from the install.wim owned by
+    # TrustedInstaller. Grant write access to every place the build
+    # writes into: the icsxml directory (StartAllBack.xml), the
+    # config directory and the hive files themselves (reg load/import
+    # and the SAM edit write them in place), and System32 itself
+    # (unattend.xml lands there). Same takeown + icacls pattern as
+    # Grant-FolderWriteAccess (UwpChain.ps1).
+    foreach ($writeTarget in @(
+            'Windows\System32\icsxml',
+            'Windows\System32\config',
+            'Windows\System32\config\SYSTEM',
+            'Windows\System32\config\SOFTWARE',
+            'Windows\System32\config\DEFAULT',
+            'Windows\System32\config\SAM',
+            'Windows\System32\config\SECURITY',
+            'Windows\System32'
+        )) {
+        Grant-StagingWriteAccess -Path (Join-Path $paths.Staging $writeTarget)
+    }
 
     # Critical files: without these the image cannot boot, log on, or show
     # a shell. (winload.exe is the boot loader, explorer.exe the shell,
@@ -375,6 +404,10 @@ function Invoke-CleanShellStep {
     if (-not (Test-Path -LiteralPath $icsxmlDir)) {
         New-Item -ItemType Directory -Path $icsxmlDir -Force | Out-Null
     }
+    # State right before the copy that run 45368774235 denied: attrib +
+    # icacls + a write probe, so the next run's log shows whether the
+    # grant above actually took, instead of assuming it did.
+    Show-StagingWriteState -Path $icsxmlDir -Label 'icsxml (before StartAllBack.xml copy)' -ShowContents
     Copy-Item -LiteralPath (Join-Path $repoRoot 'src\build\data\StartAllBack.xml') `
         -Destination (Join-Path $icsxmlDir 'StartAllBack.xml') -Force
 

@@ -78,6 +78,29 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $clearPos | Should -BeGreaterThan $extractPos
     }
 
+    It 'prints the raw write state after extraction, grants write access, and diagnoses before the icsxml copy' {
+        # run 45368774235: the attrib fix ran without error and the
+        # icsxml copy was still denied -- a directory's read-only flag
+        # does not block creating files inside it, so the blocker is
+        # the ACL (TrustedInstaller ownership). The pipeline must (a)
+        # print the raw state right after extraction, (b) grant write
+        # access to every place the build writes into, and (c) print
+        # the icsxml state right before the copy that was denied, so
+        # the next run's log shows whether the grant actually took
+        # instead of assuming it did.
+        $script:CleanScriptText | Should -Match 'Show-StagingWriteState'
+        $script:CleanScriptText | Should -Match 'Grant-StagingWriteAccess'
+        $extractPos = $script:CleanScriptText.IndexOf('Export-WimFiles')
+        $rawStatePos = $script:CleanScriptText.IndexOf("Show-StagingWriteState -Path `$paths.Staging")
+        $rawStatePos | Should -BeGreaterThan $extractPos
+        $grantPos = $script:CleanScriptText.IndexOf('Grant-StagingWriteAccess')
+        $grantPos | Should -BeGreaterThan $extractPos
+        $copyPos = $script:CleanScriptText.IndexOf("Copy-Item -LiteralPath (Join-Path `$repoRoot 'src\build\data\StartAllBack.xml')")
+        $diagPos = $script:CleanScriptText.IndexOf("Show-StagingWriteState -Path `$icsxmlDir")
+        $diagPos | Should -BeGreaterThan 0
+        $diagPos | Should -BeLessThan $copyPos
+    }
+
     It 'asserts the critical staged files (boot loader, shell, hives)' {
         foreach ($critical in 'winload\.exe', 'explorer\.exe', 'config\\SYSTEM', 'config\\SOFTWARE', 'config\\DEFAULT', 'config\\SAM', 'config\\SECURITY') {
             $script:CleanScriptText | Should -Match $critical

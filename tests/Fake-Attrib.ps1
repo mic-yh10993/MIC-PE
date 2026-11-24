@@ -10,15 +10,24 @@ if ($env:MICPE_FAKE_ATTRIB_LOG) {
     ($args -join "`n") | Add-Content -LiteralPath $env:MICPE_FAKE_ATTRIB_LOG
 }
 
-# Simulate `attrib -R <path> /S /D`: clear ReadOnly on the target and
-# everything under it, so the test can assert the tree is writable after
-# Clear-StagingReadOnly runs. Args are: -R <path> /S /D.
-$target = $args[1]
-if ($target -and (Test-Path -LiteralPath $target)) {
-    $item = Get-Item -LiteralPath $target -Force
-    $item.Attributes = $item.Attributes -band -bnot [IO.FileAttributes]::ReadOnly
-    Get-ChildItem -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        $_.Attributes = $_.Attributes -band -bnot [IO.FileAttributes]::ReadOnly
+# Simulate `attrib -R`: clear ReadOnly on the target and everything
+# under it, so the test can assert the tree is writable after
+# Clear-StagingReadOnly runs. Args are: -R <path> /D, or
+# -R <path>\*.* /S /D (wildcard form). Strip a trailing \*.* to find
+# the real directory. A bare `attrib <path>` call (diagnostic, no
+# flags, as Show-StagingWriteState makes) only logs its arguments
+# and touches nothing.
+if ($args.Count -ge 2 -and $args[0] -eq '-R') {
+    $target = $args[1]
+    if ($target -and $target.EndsWith('\*.*')) {
+        $target = $target.Substring(0, $target.Length - 4)
+    }
+    if ($target -and (Test-Path -LiteralPath $target)) {
+        $item = Get-Item -LiteralPath $target -Force
+        $item.Attributes = $item.Attributes -band -bnot [IO.FileAttributes]::ReadOnly
+        Get-ChildItem -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            $_.Attributes = $_.Attributes -band -bnot [IO.FileAttributes]::ReadOnly
+        }
     }
 }
 

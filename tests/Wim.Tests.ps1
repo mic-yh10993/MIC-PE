@@ -206,11 +206,17 @@ Describe 'Clear-StagingReadOnly' {
         $script:fakeAttrib = Join-Path $PSScriptRoot 'Fake-Attrib.ps1'
     }
 
-    It 'invokes attrib with -R, the staging path, /S and /D, and leaves the tree writable' {
+    It 'invokes attrib twice (root, then wildcard recursive) and leaves the tree writable' {
         # run 45359151127: the shell step's StartAllBack.xml copy into
         # the WIM-extracted icsxml directory was denied (the directory
         # carries the install.wim's read-only attribute), while the copy
         # into the script-created MICPE directory succeeded.
+        # run 45368774235: the bare-path spelling (`attrib -R <path>
+        # /S /D`) ran without error but the copy was still denied --
+        # /S only applies to "matching files", and the documented
+        # recursive spelling is the wildcard form
+        # (`attrib -r b:\public\*.* /s`), so the root is cleared first
+        # and then everything under it with the wildcard.
         $dir = Join-Path $script:TempRoot "micpe-ro-$(Get-Random)"
         $sub = New-Item -ItemType Directory -Path (Join-Path $dir 'icsxml') -Force
         $file = Join-Path $sub 'cmnicfg.xml'
@@ -227,10 +233,15 @@ Describe 'Clear-StagingReadOnly' {
         try {
             Clear-StagingReadOnly -Path $dir -AttribPath $script:fakeAttrib
             $logged = Get-Content -LiteralPath $log
+            # Call 1: clear the root directory itself.
             $logged[0] | Should -Be '-R'
             $logged[1] | Should -Be $dir
-            $logged[2] | Should -Be '/S'
-            $logged[3] | Should -Be '/D'
+            $logged[2] | Should -Be '/D'
+            # Call 2: clear everything under it, wildcard recursive.
+            $logged[3] | Should -Be '-R'
+            $logged[4] | Should -Be "$dir\*.*"
+            $logged[5] | Should -Be '/S'
+            $logged[6] | Should -Be '/D'
             # The tree is writable again (the fake stands in for attrib).
             ((Get-Item -LiteralPath $sub -Force).Attributes -band [IO.FileAttributes]::ReadOnly) | Should -Be 0
             ((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReadOnly) | Should -Be 0
@@ -252,6 +263,167 @@ Describe 'Clear-StagingReadOnly' {
     # failing attrib cannot be simulated here. The check follows the
     # codebase pattern (Export-WimFiles, Get-WimBootIndex) and works on
     # the Windows CI runner, where the build actually runs.
+}
+
+Describe 'Grant-StagingWriteAccess' {
+    BeforeAll {
+        $script:fakeTakeown = Join-Path $PSScriptRoot 'Fake-Takeown.ps1'
+        $script:fakeIcacls = Join-Path $PSScriptRoot 'Fake-Icacls.ps1'
+        $script:fakeAttrib = Join-Path $PSScriptRoot 'Fake-Attrib.ps1'
+    }
+
+    It 'takes ownership and grants Administrators full control on a directory' {
+        # run 45368774235: Clear-StagingReadOnly ran without error and
+        # the icsxml copy was still denied -- a directory's read-only
+        # flag does not block creating files inside it, so the blocker
+        # is the ACL (TrustedInstaller ownership). Same takeown +
+        # icacls pattern as Grant-FolderWriteAccess (UwpChain.ps1).
+        $dir = Join-Path $script:TempRoot "micpe-grant-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $takeownLog = Join-Path $script:TempRoot "micpe-takeown-$(Get-Random).log"
+        $icaclsLog = Join-Path $script:TempRoot "micpe-icacls-$(Get-Random).log"
+        $attribLog = Join-Path $script:TempRoot "micpe-attrib-$(Get-Random).log"
+        $env:MICPE_FAKE_TAKEOWN_LOG = $takeownLog
+        $env:MICPE_FAKE_ICACLS_LOG = $icaclsLog
+        $env:MICPE_FAKE_ATTRIB_LOG = $attribLog
+        try {
+            Grant-StagingWriteAccess -Path $dir -TakeownPath $script:fakeTakeown -IcaclsPath $script:fakeIcacls -AttribPath $script:fakeAttrib
+            $takeown = @(Get-Content -LiteralPath $takeownLog)
+            $takeown[0] | Should -Be '/F'
+            $takeown[1] | Should -Be $dir
+            $takeown[2] | Should -Be '/A'
+            $icacls = @(Get-Content -LiteralPath $icaclsLog)
+            $icacls[0] | Should -Be $dir
+            $icacls[1] | Should -Be '/Grant'
+            $icacls[2] | Should -Be '*S-1-5-32-544:(OI)(CI)F'
+            $icacls[3] | Should -Be '/T'
+            $icacls[4] | Should -Be '/C'
+            $attrib = @(Get-Content -LiteralPath $attribLog)
+            $attrib[0] | Should -Be '-R'
+            $attrib[1] | Should -Be "$dir\*.*"
+            $attrib[2] | Should -Be '/S'
+            $attrib[3] | Should -Be '/D'
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_TAKEOWN_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ICACLS_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ATTRIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $takeownLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $icaclsLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $attribLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'grants on the file itself (no recursion) for a file' {
+        $dir = Join-Path $script:TempRoot "micpe-grant-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $file = Join-Path $dir 'SYSTEM'
+        Set-Content -LiteralPath $file -Value 'x'
+        $takeownLog = Join-Path $script:TempRoot "micpe-takeown-$(Get-Random).log"
+        $icaclsLog = Join-Path $script:TempRoot "micpe-icacls-$(Get-Random).log"
+        $attribLog = Join-Path $script:TempRoot "micpe-attrib-$(Get-Random).log"
+        $env:MICPE_FAKE_TAKEOWN_LOG = $takeownLog
+        $env:MICPE_FAKE_ICACLS_LOG = $icaclsLog
+        $env:MICPE_FAKE_ATTRIB_LOG = $attribLog
+        try {
+            Grant-StagingWriteAccess -Path $file -TakeownPath $script:fakeTakeown -IcaclsPath $script:fakeIcacls -AttribPath $script:fakeAttrib
+            $takeown = @(Get-Content -LiteralPath $takeownLog)
+            $takeown[0] | Should -Be '/F'
+            $takeown[1] | Should -Be $file
+            $takeown[2] | Should -Be '/A'
+            $icacls = @(Get-Content -LiteralPath $icaclsLog)
+            $icacls[0] | Should -Be $file
+            $icacls[1] | Should -Be '/Grant'
+            $icacls[2] | Should -Be '*S-1-5-32-544:F'
+            $icacls[3] | Should -Be '/C'
+            $attrib = @(Get-Content -LiteralPath $attribLog)
+            $attrib[0] | Should -Be '-R'
+            $attrib[1] | Should -Be $file
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_TAKEOWN_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ICACLS_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ATTRIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $takeownLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $icaclsLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $attribLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'is a no-op when the path does not exist' {
+        { Grant-StagingWriteAccess -Path (Join-Path $script:TempRoot 'micpe-absent-grant') -TakeownPath $script:fakeTakeown -IcaclsPath $script:fakeIcacls -AttribPath $script:fakeAttrib } | Should -Not -Throw
+    }
+}
+
+Describe 'Show-StagingWriteState' {
+    BeforeAll {
+        $script:fakeAttrib = Join-Path $PSScriptRoot 'Fake-Attrib.ps1'
+        $script:fakeIcacls = Join-Path $PSScriptRoot 'Fake-Icacls.ps1'
+    }
+
+    It 'invokes attrib and icacls on the path and leaves no probe file behind' {
+        # run 45368774235: the diagnostic that must run before the
+        # icsxml copy -- attrib + icacls state plus a write probe, so
+        # the log shows whether the grant actually took.
+        $dir = Join-Path $script:TempRoot "micpe-state-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $attribLog = Join-Path $script:TempRoot "micpe-attrib-$(Get-Random).log"
+        $icaclsLog = Join-Path $script:TempRoot "micpe-icacls-$(Get-Random).log"
+        $env:MICPE_FAKE_ATTRIB_LOG = $attribLog
+        $env:MICPE_FAKE_ICACLS_LOG = $icaclsLog
+        try {
+            Show-StagingWriteState -Path $dir -Label 'test' -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls
+            $attrib = @(Get-Content -LiteralPath $attribLog)
+            $attrib[0] | Should -Be $dir
+            $icacls = @(Get-Content -LiteralPath $icaclsLog)
+            $icacls[0] | Should -Be $dir
+            # The write probe is deleted immediately, never left behind.
+            (Test-Path -LiteralPath (Join-Path $dir 'micpe-write-probe.tmp')) | Should -Be $false
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_ATTRIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ICACLS_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $attribLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $icaclsLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'lists the directory contents with -ShowContents' {
+        $dir = Join-Path $script:TempRoot "micpe-state-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir 'a.xml') -Value 'x'
+        $attribLog = Join-Path $script:TempRoot "micpe-attrib-$(Get-Random).log"
+        $icaclsLog = Join-Path $script:TempRoot "micpe-icacls-$(Get-Random).log"
+        $env:MICPE_FAKE_ATTRIB_LOG = $attribLog
+        $env:MICPE_FAKE_ICACLS_LOG = $icaclsLog
+        try {
+            Show-StagingWriteState -Path $dir -Label 'test' -ShowContents -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls
+            $attrib = @(Get-Content -LiteralPath $attribLog)
+            # Call 1: the directory itself. Call 2: its contents (wildcard).
+            $attrib[0] | Should -Be $dir
+            $attrib[1] | Should -Be "$dir\*.*"
+        }
+        finally {
+            Remove-Item Env:MICPE_FAKE_ATTRIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ICACLS_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $attribLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $icaclsLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'reports a missing path instead of throwing' {
+        { Show-StagingWriteState -Path (Join-Path $script:TempRoot 'micpe-absent-state') -Label 'test' -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls } | Should -Not -Throw
+    }
+
+    # No test for the DENIED write probe: on Linux the tests run as
+    # root, which bypasses directory permissions, so a read-only
+    # directory still accepts the probe file. The probe logic is a
+    # try/catch around a single WriteAllText call; the OK path above
+    # covers the create + delete flow.
 }
 
 Describe 'Invoke-IsoStep boot image' {
