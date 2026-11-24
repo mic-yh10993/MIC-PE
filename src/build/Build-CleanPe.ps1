@@ -593,7 +593,7 @@ function Assert-CleanRegistry {
 
         $loader = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Classes\CLSID\{117E3954-5034-453A-A18B-7B79493646E6}\InprocServer32'
         Assert-True -Condition ($null -ne $loader) -Message 'read-back: StartAllBack loader CLSID is missing'
-        Assert-True -Condition ($loader['(Default)'] -match 'MICPE\\StartAllBackLoaderX64\.dll') -Message "read-back: loader CLSID points at '$($loader['(Default)'])', expected the MICPE path"
+        Assert-True -Condition ($loader['(Default)'] -match 'MICPE\\StartAllBack\\StartAllBackLoaderX64\.dll') -Message "read-back: loader CLSID points at '$($loader['(Default)'])', expected the MICPE path"
 
         $startIsBack = Get-RegistryKeyValues -KeyName 'PE-DEF' -SubKey 'Software\StartIsBack'
         Assert-True -Condition ($null -ne $startIsBack) -Message 'read-back: PE-DEF Software\StartIsBack is missing'
