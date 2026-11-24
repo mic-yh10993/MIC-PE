@@ -155,6 +155,16 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $script:CleanScriptText | Should -Match 'Assert-True -Condition \(\$bootIndex -eq 1\)'
     }
 
+    It 'reads back cdrom and exfat Start=0 after the registry import (round 10)' {
+        # The read-back section must verify the boot-driver fix landed:
+        # cdrom and exfat at Start=0 (BOOT_START) like the reference PE.
+        $readBack = ($script:CleanScriptText -split 'function Assert-CleanRegistry')[1] -split 'function Invoke-CleanCaptureStep' | Select-Object -First 1
+        $readBack | Should -Match "ControlSet001\\Services\\cdrom"
+        $readBack | Should -Match "cdrom\['Start'\] -eq '0x0'"
+        $readBack | Should -Match "ControlSet001\\Services\\exfat"
+        $readBack | Should -Match "exfat\['Start'\] -eq '0x0'"
+    }
+
     It 'captures the staging tree into a fresh boot.wim and packages a boot.wim-only ISO' {
         $script:CleanScriptText | Should -Match 'New-WimCapture'
         $script:CleanScriptText | Should -Match 'Set-WimBootIndex'
@@ -231,6 +241,37 @@ Describe 'clean .reg patches' {
         $text | Should -Match '"Shell"="explorer\.exe"'
         $text | Should -Match '"AutoRestartShell"=dword:00000001'
         $text | Should -Match '"SystemRoot"="X:\\\\Windows"'
+    }
+
+    It '10-clean-boot.reg sets cdrom and exfat to boot-start (Start=0, round 10)' {
+        # Round 10 died in winload on cdrom.sys 0xc0000428. The full
+        # service Start comparison (r84 SYSTEM hive vs the Ramos
+        # reference PE) shows exactly two kernel boot-driver
+        # differences: cdrom (r84 Start=1, reference Start=0) and exfat
+        # (r84 Start=3, reference Start=0). Align both with the
+        # reference so winload loads them as boot drivers.
+        $text = $script:RegTexts['10-clean-boot.reg']
+        $text | Should -Match 'PE-SYS\\ControlSet001\\Services\\cdrom'
+        $text | Should -Match 'PE-SYS\\ControlSet001\\Services\\exfat'
+        # Both keys carry Start=0; assert the value sits under each key.
+        $cdrom = ($text -split 'ControlSet001\\Services\\cdrom')[1]
+        $cdrom | Should -Match '"Start"=dword:00000000'
+        $exfat = ($text -split 'ControlSet001\\Services\\exfat')[1]
+        $exfat | Should -Match '"Start"=dword:00000000'
+    }
+
+    It '10-clean-boot.reg does not add .cat files (round 10: the .cat theory is disproven)' {
+        # cdrom.sys and every boot driver it depends on carry embedded
+        # signatures, and no .cat in the reference PE contains their
+        # hashes -- so a missing .cat cannot be the 0xc0000428 cause.
+        # Guard against "fixing" it by padding the whitelist with .cat
+        # files; the fix is the boot-driver Start values above. Only
+        # non-comment lines count: the header comment explains why no
+        # .cat is added, so it mentions the word.
+        $text = $script:RegTexts['10-clean-boot.reg']
+        $valueLines = ($text -split "`r`n|`n") | Where-Object { $_ -and -not $_.TrimStart().StartsWith(';') }
+        ($valueLines -join "`n") | Should -Not -Match 'CatRoot'
+        ($valueLines -join "`n") | Should -Not -Match '\.cat'
     }
 
     It '20-clean-start11.reg carries Start11 settings but no pinned-item groups' {

@@ -383,8 +383,16 @@ jobs:
           & wimlib-imagex info $env:BOOT_WIM_PATH | Out-Host
           if ($LASTEXITCODE -ne 0) { throw 'wimlib-imagex info failed' }
 
+      # Artifact uploads are a backup channel only: the Release (next step)
+      # already carries the ISO, boot.wim and screenshots. Rounds 7-10 all
+      # failed the run on "Artifact storage quota has been hit" even though
+      # the account's artifact usage is 0 (GitHub's quota counter is stale
+      # and only recalculates every 6-12 h), so a quota failure must not
+      # mark the run failed. continue-on-error keeps the backup channel
+      # (it self-heals when the counter recovers) without failing the run.
       - name: Upload ISO
         if: always() && env.ISO_PATH != ''
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: micpe-iso-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
@@ -394,6 +402,7 @@ jobs:
 
       - name: Upload boot.wim
         if: always() && env.BOOT_WIM_PATH != ''
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: micpe-bootwim-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
@@ -403,6 +412,7 @@ jobs:
 
       - name: Upload verify artifacts
         if: always() && inputs.verify == 'full' && inputs.probe != false && inputs.nativeLogonExperiment != true && inputs.clean != true
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: micpe-verify-${{ inputs.stage || 'release' }}-${{ inputs.build || 'tag' }}
@@ -439,6 +449,7 @@ jobs:
 
       - name: Upload clean verify screenshots
         if: always() && inputs.verify == 'full' && inputs.clean == true
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: micpe-clean-verify-${{ inputs.build || 'tag' }}

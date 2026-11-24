@@ -177,6 +177,109 @@ function Save-CleanScreenshot {
     }
 }
 
+function Test-CleanScreenshot {
+    <#
+    .SYNOPSIS
+        Classify a QEMU screenshot (PPM) by its dominant screen content.
+
+    .DESCRIPTION
+        Round 10 lesson: the verifier counted screenshots (7 of 7 captured)
+        and passed, while the guest had died on the Windows Recovery screen
+        (cdrom.sys 0xc0000428) -- the boot shots were TianoCore black and
+        the desktop shots were all Recovery blue. Counting shots is not a
+        pass/fail signal; the screen content is.
+
+        Pure PowerShell / .NET (no OCR, no PIL, no ImageMagick): the
+        Windows CI runner has none of those guaranteed, and the PNG
+        encoder already proved this approach works there. Reads the PPM
+        raster, samples a grid of pixels, and classifies:
+
+          Recovery  >= 50% of sampled pixels are Windows Recovery/BSOD
+                    blue: bright blue, B >= 100, B > R + 40, G > R + 20.
+                    The round-10 Recovery screen is (32,103,178) and
+                    fills 99% of the frame; a BSOD (0,120,215) matches
+                    the same rule. A dark LogonUI background does not:
+                    its blue is dark (B < 100) and desaturated.
+          Boot      >= 80% of sampled pixels are near-black (all channels
+                    < 16): the TianoCore firmware screen. Round-10 shot-01
+                    is 98% black.
+          Other     anything else (LogonUI, desktop, Start menu).
+
+        Returns a [pscustomobject] with Classification, BlueFraction,
+        BlackFraction, Sampled and Path. Throws on an unreadable or
+        malformed PPM; the caller treats that as unknown, not a failure.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $len = $bytes.Length
+
+    # Parse the P6 header tokens (magic, width, height, maxval), tolerating
+    # '#' comments. After the maxval token there is exactly one whitespace
+    # byte, then the raster begins.
+    $pos = 0
+    $tokens = [System.Collections.Generic.List[string]]::new()
+    while ($tokens.Count -lt 4 -and $pos -lt $len) {
+        while ($pos -lt $len -and ($bytes[$pos] -eq 32 -or $bytes[$pos] -eq 9 -or $bytes[$pos] -eq 10 -or $bytes[$pos] -eq 13)) { $pos++ }
+        if ($pos -ge $len) { break }
+        if ($bytes[$pos] -eq 35) {
+            while ($pos -lt $len -and $bytes[$pos] -ne 10) { $pos++ }
+            continue
+        }
+        $start = $pos
+        while ($pos -lt $len -and $bytes[$pos] -ne 32 -and $bytes[$pos] -ne 9 -and $bytes[$pos] -ne 10 -and $bytes[$pos] -ne 13 -and $bytes[$pos] -ne 35) { $pos++ }
+        $tokens.Add([System.Text.Encoding]::ASCII.GetString($bytes, $start, $pos - $start))
+    }
+    if ($tokens.Count -ne 4 -or $tokens[0] -ne 'P6') {
+        throw "not a P6 PPM file: '$Path'"
+    }
+    $width = [int]$tokens[1]
+    $height = [int]$tokens[2]
+    $maxval = [int]$tokens[3]
+    if ($width -le 0 -or $height -le 0 -or $maxval -ne 255) {
+        throw "unsupported PPM header in '$Path' ($width x $height, maxval $maxval)"
+    }
+    if ($pos -lt $len -and ($bytes[$pos] -eq 32 -or $bytes[$pos] -eq 9 -or $bytes[$pos] -eq 10 -or $bytes[$pos] -eq 13)) { $pos++ }
+    $rasterStart = $pos
+    if (($len - $rasterStart) -lt ($width * $height * 3)) {
+        throw "truncated PPM raster in '$Path' (expected $($width * $height * 3) bytes, found $($len - $rasterStart))"
+    }
+
+    $stepX = [Math]::Max(1, [int]($width / 40))
+    $stepY = [Math]::Max(1, [int]($height / 40))
+    $sampled = 0
+    $blue = 0
+    $black = 0
+    for ($y = 0; $y -lt $height; $y += $stepY) {
+        for ($x = 0; $x -lt $width; $x += $stepX) {
+            $off = $rasterStart + ($y * $width + $x) * 3
+            $r = $bytes[$off]
+            $g = $bytes[$off + 1]
+            $b = $bytes[$off + 2]
+            $sampled++
+            if ($b -ge 100 -and $b -gt ($r + 40) -and $g -gt ($r + 20)) { $blue++ }
+            if ($r -lt 16 -and $g -lt 16 -and $b -lt 16) { $black++ }
+        }
+    }
+    $blueFraction = if ($sampled -gt 0) { $blue / $sampled } else { 0 }
+    $blackFraction = if ($sampled -gt 0) { $black / $sampled } else { 0 }
+    $classification = 'Other'
+    if ($blueFraction -ge 0.5) { $classification = 'Recovery' }
+    elseif ($blackFraction -ge 0.8) { $classification = 'Boot' }
+
+    return [pscustomobject]@{
+        Path          = $Path
+        Classification = $classification
+        BlueFraction  = $blueFraction
+        BlackFraction = $blackFraction
+        Sampled       = $sampled
+    }
+}
+
 function Send-CleanKey {
     [CmdletBinding()]
     param(
@@ -371,6 +474,38 @@ try {
     Get-ChildItem -LiteralPath $shotDir -File -Filter 'shot-*.ppm' |
         Sort-Object Name |
         ForEach-Object { Write-Host ("  shot: {0} ({1:N0} bytes)" -f $_.Name, $_.Length) }
+
+    # Screen-content gate (round 10 lesson): counting screenshots is not
+    # a pass/fail signal -- round 10 captured 7 of 7 while the guest had
+    # died on the Windows Recovery screen. Classify each shot by its
+    # dominant content; a Recovery screen anywhere in the run means the
+    # system never booted, so the step fails and says so instead of
+    # pressing Enter / Win into a dead guest and calling it a pass.
+    $classifications = @()
+    Get-ChildItem -LiteralPath $shotDir -File -Filter 'shot-*.ppm' |
+        Sort-Object Name |
+        ForEach-Object {
+            try {
+                $c = Test-CleanScreenshot -Path $_.FullName
+                $classifications += $c
+                Write-Host ("  shot content: {0}: {1} (blue {2:P0}, black {3:P0}, {4} sampled)" -f $_.Name, $c.Classification, $c.BlueFraction, $c.BlackFraction, $c.Sampled)
+            }
+            catch {
+                Write-Host ("!!! could not classify {0}: {1} (treated as unknown, not a failure)" -f $_.Name, $_.Exception.Message)
+            }
+        }
+    $recoveryShots = @($classifications | Where-Object { $_.Classification -eq 'Recovery' })
+    if ($recoveryShots.Count -gt 0) {
+        $names = ($recoveryShots | ForEach-Object { Split-Path -Leaf $_.Path }) -join ', '
+        throw ("QEMU screen check failed: {0} show(s) the Windows Recovery screen (boot failure, e.g. 0xc0000428) -- the system never reached LogonUI/desktop: {1}" -f $recoveryShots.Count, $names)
+    }
+    if ($classifications.Count -gt 0 -and @($classifications | Where-Object { $_.Classification -ne 'Boot' }).Count -eq 0) {
+        throw 'QEMU screen check failed: every screenshot is a black screen (boot stalled at firmware / no display output); the system never reached LogonUI'
+    }
+    $logonShot = @($classifications | Where-Object { (Split-Path -Leaf $_.Path) -eq 'shot-03.ppm' })
+    if ($logonShot.Count -gt 0 -and $logonShot[0].Classification -eq 'Boot') {
+        Write-Host '!!! shot-03 is still a black screen at LogonUI time (slow boot?); the later shots decide'
+    }
 }
 finally {
     try {

@@ -755,3 +755,139 @@ Describe 'Invoke-QemuVerify sc start second-marker wait (run 54)' {
         $script:qemuVerify | Should -Match 'Test-ProbeWaitDone -ShareContent \$probe -LocalContent \$probeLocal -ProbeDoneAt \$probeDoneAt'
     }
 }
+
+Describe 'Test-CleanScreenshot' {
+    BeforeAll {
+        # Same -ParseOnly dot-source pattern as Find-CleanOvmfVars: the
+        # verifier launches QEMU on load, so hand it real temp files for
+        # the mandatory paths (Assert-PathExists runs even under -ParseOnly).
+        $script:shotDir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-shots-$(Get-Random)"
+        $script:shotShare = Join-Path $script:shotDir 'share'
+        New-Item -ItemType Directory -Path $script:shotShare -Force | Out-Null
+        $script:shotIso = Join-Path $script:shotDir 'test.iso'
+        New-Item -ItemType File -Path $script:shotIso -Force | Out-Null
+        $script:shotWork = Join-Path $script:shotDir 'work'
+        New-Item -ItemType Directory -Path $script:shotWork -Force | Out-Null
+        $script:shotCode = Join-Path $script:shotShare 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:shotCode, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:shotIso -OvmfPath $script:shotCode -WorkDir $script:shotWork
+        $script:fixtures = Join-Path $PSScriptRoot 'fixtures'
+
+        # Helper lives in BeforeAll: Pester runs Describe blocks in their
+        # own scope, so a function defined in the Describe body is not
+        # visible inside It.
+        function New-SolidPpm {
+            param([int] $Width, [int] $Height, [byte] $R, [byte] $G, [byte] $B)
+            $header = [System.Text.Encoding]::ASCII.GetBytes("P6`n$Width $Height`n255`n")
+            $raster = [byte[]]::new($Width * $Height * 3)
+            for ($i = 0; $i -lt $raster.Length; $i += 3) {
+                $raster[$i] = $R; $raster[$i + 1] = $G; $raster[$i + 2] = $B
+            }
+            $ppm = [byte[]]::new($header.Length + $raster.Length)
+            [System.Buffer]::BlockCopy($header, 0, $ppm, 0, $header.Length)
+            [System.Buffer]::BlockCopy($raster, 0, $ppm, $header.Length, $raster.Length)
+            return $ppm
+        }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:shotDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'classifies the real round-10 shot-01 (TianoCore boot screen) as Boot' {
+        # Fixture is a 64x40 crop of the real r84 shot-01.png, taken from
+        # the top-left corner: pure black, the TianoCore screen. Round 10
+        # shot-01..03 were all this screen (the system never got past the
+        # firmware boot screen before dying on Recovery).
+        $ppm = Join-Path $script:fixtures 'r84-shot-01-boot.ppm'
+        $c = Test-CleanScreenshot -Path $ppm
+        $c.Classification | Should -Be 'Boot'
+        $c.BlackFraction | Should -BeGreaterThan 0.9
+        $c.BlueFraction | Should -Be 0
+    }
+
+    It 'classifies the real round-10 shot-04 (Windows Recovery screen) as Recovery' {
+        # Fixture is a 64x40 crop of the real r84 shot-04.png, taken from
+        # the top-left corner: pure Windows Recovery blue (32,103,178).
+        # Round 10 shot-04..07 were all this screen (cdrom.sys 0xc0000428);
+        # the old count-only gate passed 7 of 7 on exactly this input.
+        $ppm = Join-Path $script:fixtures 'r84-shot-04-recovery.ppm'
+        $c = Test-CleanScreenshot -Path $ppm
+        $c.Classification | Should -Be 'Recovery'
+        $c.BlueFraction | Should -BeGreaterThan 0.9
+        $c.BlackFraction | Should -Be 0
+    }
+
+    It 'classifies a varied desktop-like frame as Other, not Recovery' {
+        $ppm = Join-Path $script:fixtures 'synthetic-desktop.ppm'
+        $c = Test-CleanScreenshot -Path $ppm
+        $c.Classification | Should -Be 'Other'
+    }
+
+    It 'classifies a solid BSOD blue (0,120,215) frame as Recovery' {
+        # The classic bugcheck blue must trip the same rule as the
+        # Recovery blue: a blue screen anywhere in the run fails the gate.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-shots-bsod-$(Get-Random)"
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $ppm = Join-Path $dir 'bsod.ppm'
+            [System.IO.File]::WriteAllBytes($ppm, (New-SolidPpm -Width 64 -Height 40 -R 0 -G 120 -B 215))
+            $c = Test-CleanScreenshot -Path $ppm
+            $c.Classification | Should -Be 'Recovery'
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'does not mistake a dark LogonUI-like background for Recovery' {
+        # LogonUI sits on a dark blue gradient (roughly (30,40,80)): blue
+        # is present but dark and desaturated, so it must not trip the
+        # bright-blue Recovery rule, or every healthy boot would fail.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-shots-logon-$(Get-Random)"
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $ppm = Join-Path $dir 'logon.ppm'
+            [System.IO.File]::WriteAllBytes($ppm, (New-SolidPpm -Width 64 -Height 40 -R 30 -G 40 -B 80))
+            $c = Test-CleanScreenshot -Path $ppm
+            $c.Classification | Should -Be 'Other'
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws on a non-PPM file instead of silently classifying it' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-shots-bad-$(Get-Random)"
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $ppm = Join-Path $dir 'bad.ppm'
+            [System.IO.File]::WriteAllText($ppm, 'this is not a PPM file')
+            { Test-CleanScreenshot -Path $ppm } | Should -Throw '*not a P6 PPM*'
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws on a truncated PPM raster instead of reading past the buffer' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-shots-trunc-$(Get-Random)"
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $ppm = Join-Path $dir 'trunc.ppm'
+            $header = [System.Text.Encoding]::ASCII.GetBytes("P6`n64 40`n255`n")
+            [System.IO.File]::WriteAllBytes($ppm, $header)
+            { Test-CleanScreenshot -Path $ppm } | Should -Throw '*truncated PPM*'
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'the verifier fails the run when any screenshot is a Recovery screen' {
+        $script:cleanVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\\src\\ci\\Invoke-CleanQemuVerify.ps1') -Raw
+        $script:cleanVerify | Should -Match 'Test-CleanScreenshot -Path'
+        $script:cleanVerify | Should -Match "QEMU screen check failed.*Recovery screen"
+        $script:cleanVerify | Should -Match 'every screenshot is a black screen'
+    }
+}

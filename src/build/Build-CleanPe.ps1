@@ -609,6 +609,17 @@ function Assert-CleanRegistry {
         Assert-ReadBack -Condition ($setup['CmdLine'] -eq 'LogonUI') -Message "read-back: CmdLine is '$($setup['CmdLine'])', expected LogonUI"
         Assert-ReadBack -Condition ($setup['SystemSetupInProgress'] -eq '0x0') -Message "read-back: SystemSetupInProgress is '$($setup['SystemSetupInProgress'])', expected 0x0"
 
+        # Boot-start drivers (round 10 root cause): cdrom and exfat must be
+        # Start=0 like the Ramos reference PE; the official install.wim
+        # ships cdrom at Start=1 and exfat at Start=3, and round 10 died
+        # in winload on cdrom.sys 0xc0000428.
+        $cdrom = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey 'ControlSet001\Services\cdrom'
+        Assert-ReadBack -Condition ($null -ne $cdrom) -Message 'read-back: PE-SYS\ControlSet001\Services\cdrom is missing'
+        Assert-ReadBack -Condition ($cdrom['Start'] -eq '0x0') -Message "read-back: cdrom Start is '$($cdrom['Start'])', expected 0x0"
+        $exfat = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey 'ControlSet001\Services\exfat'
+        Assert-ReadBack -Condition ($null -ne $exfat) -Message 'read-back: PE-SYS\ControlSet001\Services\exfat is missing'
+        Assert-ReadBack -Condition ($exfat['Start'] -eq '0x0') -Message "read-back: exfat Start is '$($exfat['Start'])', expected 0x0"
+
         $winlogon = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon'
         Assert-ReadBack -Condition ($null -ne $winlogon) -Message 'read-back: PE-SOFT Winlogon is missing'
         Assert-ReadBack -Condition ($winlogon['Shell'] -eq 'explorer.exe') -Message "read-back: Winlogon Shell is '$($winlogon['Shell'])', expected explorer.exe"

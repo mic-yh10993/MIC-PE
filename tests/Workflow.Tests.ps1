@@ -527,3 +527,36 @@ Describe 'M6 step wiring' {
         $script:buildScript | Should -Match 'Invoke-InstallerStep'
     }
 }
+
+Describe 'artifact uploads do not fail the run on a quota hit (round 10)' {
+    BeforeAll {
+        $script:buildYml = Get-Content -LiteralPath (Join-Path $repoRoot '.github/workflows/build.yml') -Raw
+    }
+
+    It 'marks every actions/upload-artifact step continue-on-error' {
+        # Rounds 7-10 all failed the run on "Artifact storage quota has
+        # been hit" even though the account's artifact usage is 0
+        # (GitHub's quota counter is stale and only recalculates every
+        # 6-12 h). The Release already carries the ISO, boot.wim and
+        # screenshots, so the artifact is a backup channel only: a quota
+        # failure must not mark the run failed, and the backup self-heals
+        # when the counter recovers.
+        $stepNames = @('Upload ISO', 'Upload boot.wim', 'Upload verify artifacts', 'Upload clean verify screenshots')
+        foreach ($name in $stepNames) {
+            $pattern = "(?s)- name: $([regex]::Escape($name))\n(?:.*?\n)*?.*?uses: actions/upload-artifact@v4"
+            $m = [regex]::Match($script:buildYml, $pattern)
+            $m.Success | Should -BeTrue -Because "step '$name' must exist"
+            $m.Value | Should -Match 'continue-on-error: true' -Because "step '$name' must not fail the run on a quota hit"
+        }
+    }
+
+    It 'does not silence the Release upload (the primary channel must still fail loudly)' {
+        # continue-on-error is only for the backup artifact channel. The
+        # Release upload is the durable record of the build; if it fails,
+        # the run must fail so the missing Release is noticed.
+        $pattern = "(?s)- name: Upload finished build to Release\n(?:.*?\n)*?.*?Publish-CleanRelease"
+        $m = [regex]::Match($script:buildYml, $pattern)
+        $m.Success | Should -BeTrue -Because 'the Release upload step must exist'
+        $m.Value | Should -Not -Match 'continue-on-error' -Because 'a failed Release upload must fail the run'
+    }
+}
