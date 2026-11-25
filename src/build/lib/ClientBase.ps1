@@ -292,6 +292,32 @@ function Resolve-CleanDriverImagePath {
     return (Join-Path $ImageRoot $rel)
 }
 
+function Get-CleanRegistryValue {
+    <#
+    .SYNOPSIS
+        Reads one registry value without tripping StrictMode.
+    .DESCRIPTION
+        Get-ItemProperty only exposes the values that exist as
+        properties on the returned object; under Set-StrictMode
+        -Version 2.0 (or Latest) reading a missing value as
+        $props.<Name> throws "The property '<Name>' cannot be found
+        on this object". The r91 SYSTEM hive has 43 service keys
+        with no Start value at all (.NET CLR Data, Winsock, ...),
+        and that exact throw killed the round 16 build in
+        Test-BootCriticalFiles before it checked a single driver.
+        Reading through PSObject.Properties returns $null for a
+        missing value instead of throwing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object] $Properties,
+        [Parameter(Mandatory)][string] $Name
+    )
+    $prop = $Properties.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $null }
+    return $prop.Value
+}
+
 function Test-CleanCriticalDriverFiles {
     <#
     .SYNOPSIS
@@ -422,12 +448,17 @@ function Test-BootCriticalFiles {
                 foreach ($child in (Get-ChildItem -LiteralPath $servicesKey)) {
                     $props = Get-ItemProperty -LiteralPath $child.PSPath -ErrorAction SilentlyContinue
                     if ($null -eq $props) { continue }
+                    # Round 17: read values through
+                    # Get-CleanRegistryValue, never $props.<Name> -- 43
+                    # of the 679 r91 service keys have no Start value
+                    # at all, and a direct read throws under StrictMode
+                    # 2.0/Latest (round 16 build died on exactly that).
                     $services += [pscustomobject]@{
                         Name         = $child.PSChildName
-                        Start        = $props.Start
-                        ErrorControl = $props.ErrorControl
-                        Type         = $props.Type
-                        ImagePath    = $props.ImagePath
+                        Start        = Get-CleanRegistryValue -Properties $props -Name 'Start'
+                        ErrorControl = Get-CleanRegistryValue -Properties $props -Name 'ErrorControl'
+                        Type         = Get-CleanRegistryValue -Properties $props -Name 'Type'
+                        ImagePath    = Get-CleanRegistryValue -Properties $props -Name 'ImagePath'
                     }
                 }
             }

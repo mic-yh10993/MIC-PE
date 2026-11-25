@@ -921,7 +921,7 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
             }, $true)
-        foreach ($name in @('Resolve-CleanDriverImagePath', 'Test-CleanCriticalDriverFiles', 'Test-BootCriticalFiles', 'Assert-BootCritical')) {
+        foreach ($name in @('Resolve-CleanDriverImagePath', 'Get-CleanRegistryValue', 'Test-CleanCriticalDriverFiles', 'Test-BootCriticalFiles', 'Assert-BootCritical')) {
             $fn = @($allFns | Where-Object { $_.Name -eq $name })
             $fn.Count | Should -Be 1
             . ([scriptblock]::Create($fn[0].Extent.Text))
@@ -1057,5 +1057,85 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         $isoStep = ($script:CleanScriptText -split 'function Invoke-CleanIsoStep')[1] -split '# Dispatch' | Select-Object -First 1
         $isoStep | Should -Match 'Set-CleanBcdKernelDebug'
         $isoStep.IndexOf('Set-CleanBcdKernelDebug') | Should -BeLessThan $isoStep.IndexOf('New-MicpeIso')
+    }
+
+    It 'Get-CleanRegistryValue returns $null for a missing value instead of throwing (round 17 guard fix)' {
+        # Round 16 build died in Test-BootCriticalFiles with "The
+        # property 'Start' cannot be found on this object": 43 of the
+        # 679 r91 service keys have no Start value, and a direct
+        # $props.Start read throws under StrictMode 2.0/Latest.
+        $props = [pscustomobject]@{ Type = 1; ErrorControl = 1 }
+        Get-CleanRegistryValue -Properties $props -Name 'Start' | Should -BeNullOrEmpty
+        Get-CleanRegistryValue -Properties $props -Name 'Type' | Should -Be 1
+        $propsWithStart = [pscustomobject]@{ Start = 0; Type = 2 }
+        Get-CleanRegistryValue -Properties $propsWithStart -Name 'Start' | Should -Be 0
+    }
+
+    It 'a direct property read throws under StrictMode, pinning the round 16 crash mechanism (round 17 guard fix)' {
+        # Proves the mechanism, not just the helper: under StrictMode
+        # 2.0 the same read that killed the round 16 build throws the
+        # exact error from run 45616930244. Scoped to a child
+        # scriptblock so the StrictMode setting cannot leak into the
+        # rest of the test session.
+        $props = [pscustomobject]@{ Type = 1 }
+        $threw = $false
+        $errMsg = ''
+        try {
+            & { Set-StrictMode -Version 2.0; $props.Start } | Out-Null
+        }
+        catch {
+            $threw = $true
+            $errMsg = $_.Exception.Message
+        }
+        $threw | Should -Be $true
+        $errMsg | Should -Match "The property 'Start' cannot be found"
+    }
+
+    It 'Test-CleanCriticalDriverFiles skips a service with no Start and still flags a missing EC=3 driver (round 17 guard fix)' {
+        # Round 17: the r91 hive has 43 service keys with no Start
+        # value (perf counters, .NET providers, Winsock, ...). The
+        # guard must skip them, not crash -- and must still catch a
+        # real EC=3 hole like FileCrypt, or the guard is a no-op.
+        $root = Join-Path $script:TempRoot ("micpe-nostart-{0}" -f [guid]::NewGuid())
+        try {
+            $services = @(
+                [pscustomobject]@{ Name = '.NET CLR Data'; Start = $null; ErrorControl = $null; Type = $null; ImagePath = $null }
+                [pscustomobject]@{ Name = 'Winsock'; Start = $null; ErrorControl = $null; Type = $null; ImagePath = $null }
+                [pscustomobject]@{ Name = 'FileCrypt'; Start = 1; ErrorControl = 3; Type = 2; ImagePath = 'system32\drivers\filecrypt.sys' }
+            )
+            $r = Test-CleanCriticalDriverFiles -ImageRoot $root -Services $services
+            $r.CriticalMissing | Should -Be @('FileCrypt')
+            $r.NonCriticalMissing.Count | Should -Be 0
+        }
+        finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Test-BootCriticalFiles reads hive service values through Get-CleanRegistryValue (round 17 guard fix)' {
+        # The hive enumeration itself needs Windows (reg.exe load), so
+        # this is a wiring assertion: no direct $props.Start /
+        # $props.ErrorControl / $props.Type / $props.ImagePath reads
+        # may remain in the enumeration loop.
+        $libText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/ClientBase.ps1') -Raw
+        $libText | Should -Match 'function Get-CleanRegistryValue'
+        $enum = ($libText -split 'function Test-BootCriticalFiles')[1] -split 'function Assert-BootCritical' | Select-Object -First 1
+        $enum | Should -Match 'Get-CleanRegistryValue'
+        $enum | Should -Not -Match '\$props\.Start'
+        $enum | Should -Not -Match '\$props\.ErrorControl'
+        $enum | Should -Not -Match '\$props\.Type'
+        $enum | Should -Not -Match '\$props\.ImagePath'
+    }
+
+    It 'Assert-CleanRegistry prints every disabled-service and LowerFilters read-back value (round 17 evidence)' {
+        # Round 16's log had no line at all mentioning FileCrypt or
+        # LowerFilters, so the landing could not be confirmed.
+        # Assert-ReadBack is silent on success, so each read-back
+        # must print its actual value.
+        $registryFn = ($script:CleanScriptText -split 'function Assert-CleanRegistry')[1] -split 'function Invoke-CleanCaptureStep' | Select-Object -First 1
+        # Single quotes: $name must stay literal in the regex, not
+        # interpolate to the (empty) test-scope variable.
+        $registryFn | Should -Match 'read-back: \$name Start is'
+        $registryFn | Should -Match "read-back: Volume LowerFilters is"
     }
 }

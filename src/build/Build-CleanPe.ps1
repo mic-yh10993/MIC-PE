@@ -1077,6 +1077,10 @@ function Assert-CleanRegistry {
             $svc = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey "ControlSet001\Services\$name"
             Assert-ReadBack -Condition ($null -ne $svc) -Message "read-back: PE-SYS\ControlSet001\Services\$name is missing"
             Assert-ReadBack -Condition ($svc['Start'] -eq '0x4') -Message "read-back: $name Start is '$($svc['Start'])', expected 0x4"
+            # Round 17: print every item's actual value -- Assert-ReadBack
+            # is silent on success, so round 16's log had no line at all
+            # mentioning FileCrypt and the landing could not be confirmed.
+            Write-SubStep "read-back: $name Start is $($svc['Start'])"
         }
 
         # Round 16 cleanup: 7 more services with the same defect class as
@@ -1088,6 +1092,9 @@ function Assert-CleanRegistry {
             $svc = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey "ControlSet001\Services\$name"
             Assert-ReadBack -Condition ($null -ne $svc) -Message "read-back: PE-SYS\ControlSet001\Services\$name is missing"
             Assert-ReadBack -Condition ($svc['Start'] -eq '0x4') -Message "read-back: $name Start is '$($svc['Start'])', expected 0x4"
+            # Round 17: same per-item print as the disabled-driver list
+            # above -- a silent success leaves no evidence in the log.
+            Write-SubStep "read-back: $name Start is $($svc['Start'])"
         }
 
         # Round 16, second suspect: the Volume device class still listed
@@ -1102,6 +1109,9 @@ function Assert-CleanRegistry {
         Assert-ReadBack -Condition ($null -ne $volumeClass) -Message 'read-back: PE-SYS\ControlSet001\Control\Class\{71a27cdd-812a-11d0-bec7-08002be2092f} is missing'
         Assert-ReadBack -Condition ($volumeClass['LowerFilters'] -match 'fvevol') -Message "read-back: Volume LowerFilters is '$($volumeClass['LowerFilters'])', expected fvevol only"
         Assert-ReadBack -Condition ($volumeClass['LowerFilters'] -notmatch 'iorate' -and $volumeClass['LowerFilters'] -notmatch 'rdyboost') -Message "read-back: Volume LowerFilters still lists a disabled filter: '$($volumeClass['LowerFilters'])'"
+        # Round 17: print the actual value -- round 16's log had no
+        # LowerFilters line at all, so the trim could not be confirmed.
+        Write-SubStep "read-back: Volume LowerFilters is '$($volumeClass['LowerFilters'])'"
 
         $winlogon = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon'
         Assert-ReadBack -Condition ($null -ne $winlogon) -Message 'read-back: PE-SOFT Winlogon is missing'
