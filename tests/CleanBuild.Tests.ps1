@@ -275,12 +275,14 @@ Describe 'clean .reg patches' {
         $exfat | Should -Match '"Start"=dword:00000000'
     }
 
-    It '10-clean-boot.reg does not add .cat files (round 10: the .cat theory is disproven)' {
-        # cdrom.sys and every boot driver it depends on carry embedded
-        # signatures, and no .cat in the reference PE contains their
-        # hashes -- so a missing .cat cannot be the 0xc0000428 cause.
-        # Guard against "fixing" it by padding the whitelist with .cat
-        # files; the fix is the boot-driver Start values above. Only
+    It '10-clean-boot.reg does not add .cat files (round 13: the catalogs come from the build step, not the registry)' {
+        # Round 12 proved the .cat theory after all: cdrom.sys is the only
+        # boot driver with NO embedded signature, and its hash lives only
+        # in two 22621.900 .cat files. But the fix is NOT a registry patch:
+        # the catalogs are fetched from UUP dump and injected into the
+        # staging CatRoot by Invoke-CleanCatFixStep (round 13). Guard
+        # against "fixing" it by padding the .reg with .cat paths; the
+        # .reg only carries the boot-driver Start values above. Only
         # non-comment lines count: the header comment explains why no
         # .cat is added, so it mentions the word.
         $text = $script:RegTexts['10-clean-boot.reg']
@@ -558,5 +560,216 @@ Describe 'build.yml clean wiring' {
         $script:CleanVerify | Should -Match "-Key 'esc'"
         $script:CleanVerify | Should -Match 'screendump'
         $script:CleanVerify | Should -Match 'shot-'
+    }
+}
+
+Describe 'Invoke-CleanCatFixStep (round 13: the two 22621.900 .cat files for cdrom.sys)' {
+    BeforeAll {
+        $script:fake7z = Join-Path $PSScriptRoot 'Fake-7z.ps1'
+        $script:fakeWimlib = Join-Path $PSScriptRoot 'Fake-Wimlib.ps1'
+        $script:fixtures = Join-Path $PSScriptRoot 'fixtures'
+        . "$PSScriptRoot/../src/build/lib/BaseImage.ps1"
+        # Pull the catalog-fix functions out of Build-CleanPe.ps1 via the
+        # AST (the script cannot be dot-sourced: its dispatch section runs
+        # on load). Same pattern as the BCD experiment tests.
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:CleanScript, [ref] $tokens, [ref] $errors)
+        $errors.Count | Should -Be 0
+        $allFns = $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true)
+        foreach ($name in @('Find-ByteSequence', 'Test-CleanCatHasCdromHash', 'Assert-CleanCatFiles', 'Find-CleanCatLcuCab', 'Get-CleanCatFixFileList', 'Invoke-CleanCatFixStep', 'Assert-CleanCatFilesInBootWim')) {
+            $fn = @($allFns | Where-Object { $_.Name -eq $name })
+            $fn.Count | Should -Be 1
+            . ([scriptblock]::Create($fn[0].Extent.Text))
+        }
+        # Expected table built from the fixture catalogs (their own
+        # size/SHA256 -- the production pinned values are asserted
+        # statically below, the fixtures stand in for them functionally).
+        $script:fixtureCats = @(
+            'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat',
+            'Microsoft-Windows-Common-Drivers-merged-Package~31bf3856ad364e35~amd64~~10.0.22621.900.cat'
+        ) | ForEach-Object {
+            $f = Get-Item -LiteralPath (Join-Path $script:fixtures $_)
+            [pscustomobject]@{
+                Name   = $f.Name
+                Size   = $f.Length
+                Sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+            }
+        }
+        $script:aria2Text = Get-Content -LiteralPath (Join-Path $script:fixtures 'catfix-aria2.txt') -Raw
+    }
+
+    It 'pins the two 22621.900 catalog files (names, sizes, SHA256) in the step defaults' {
+        $script:CleanScriptText | Should -Match 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10\.0\.22621\.900\.cat'
+        $script:CleanScriptText | Should -Match 'Microsoft-Windows-Common-Drivers-merged-Package~31bf3856ad364e35~amd64~~10\.0\.22621\.900\.cat'
+        $script:CleanScriptText | Should -Match 'e09905c4319b6194def5c9b33f53688234ef1fd80cc5a568c486e8843143dd8d'
+        $script:CleanScriptText | Should -Match '0a614b442f4c3a85c3f5a4615f748c5b94b2f3f401802e46f7bb2101adc03f62'
+        $script:CleanScriptText | Should -Match '205062'
+        $script:CleanScriptText | Should -Match '137452'
+    }
+
+    It 'fetches from the official UUP dump 22621.900 build (KB5020044) via the file list, never from Ramos' {
+        $script:CleanScriptText | Should -Match "22621\.900"
+        $script:CleanScriptText | Should -Match 'KB5020044'
+        $script:CleanScriptText | Should -Match 'Get-UupBuild -Build'
+        $script:CleanScriptText | Should -Match 'https://uupdump\.net'
+        $script:CleanScriptText | Should -Match 'get\.php'
+        $script:CleanScriptText | Should -Match "autodl = '1'"
+        $script:CleanScriptText | Should -Match 'F750E6C3-38EE-11D1-85E5-00C04FC295EE'
+    }
+
+    It 'runs the catalog step after extract and before capture, and reads back after capture' {
+        $dispatch = ($script:CleanScriptText -split '# Dispatch')[1]
+        $dispatch.IndexOf('Invoke-CleanCatFixStep') | Should -BeGreaterThan $dispatch.IndexOf('Invoke-CleanExtractStep')
+        $dispatch.IndexOf('Invoke-CleanCatFixStep') | Should -BeLessThan $dispatch.IndexOf('Invoke-CleanCaptureStep')
+        $dispatch.IndexOf('Assert-CleanCatFilesInBootWim') | Should -BeGreaterThan $dispatch.IndexOf('Invoke-CleanCaptureStep')
+        $dispatch.IndexOf('Assert-CleanCatFilesInBootWim') | Should -BeLessThan $dispatch.IndexOf('Invoke-CleanIsoStep')
+    }
+
+    It 'Find-CleanCatLcuCab returns the KB5020044 cab from an aria2 file list' {
+        $lcu = Find-CleanCatLcuCab -FileListText $script:aria2Text -Kb 'KB5020044'
+        $lcu.FileName | Should -Be 'windows11.0-kb5020044-x64_0123456789abcdef.cab'
+        $lcu.Url | Should -Be 'https://download.windowsupdate.com/c/msdownload/update/software/defu/2022/11/windows11.0-kb5020044-x64_0123456789abcdef.cab'
+    }
+
+    It 'Find-CleanCatLcuCab throws when no KB5020044 cab is listed' {
+        $text = @'
+https://download.windowsupdate.com/x/windows11.0-kb5020061-x64_abcdef0123456789.cab
+  out=windows11.0-kb5020061-x64_abcdef0123456789.cab
+'@
+        { Find-CleanCatLcuCab -FileListText $text -Kb 'KB5020044' } | Should -Throw '*expected exactly one KB5020044*'
+    }
+
+    It 'Find-CleanCatLcuCab throws when two KB5020044 cabs are listed (never guess)' {
+        $text = @'
+https://download.windowsupdate.com/x/windows11.0-kb5020044-x64_aaaa.cab
+  out=windows11.0-kb5020044-x64_aaaa.cab
+https://download.windowsupdate.com/x/windows11.0-kb5020044-x64_bbbb.cab
+  out=windows11.0-kb5020044-x64_bbbb.cab
+'@
+        { Find-CleanCatLcuCab -FileListText $text -Kb 'KB5020044' } | Should -Throw '*expected exactly one KB5020044*'
+    }
+
+    It 'Test-CleanCatHasCdromHash finds the cdrom.sys hash in a fixture catalog and not in a plain file' {
+        $cat = Join-Path $script:fixtures 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat'
+        Test-CleanCatHasCdromHash -CatPath $cat | Should -BeTrue
+        $plain = Join-Path $script:fixtures 'catfix-aria2.txt'
+        Test-CleanCatHasCdromHash -CatPath $plain | Should -BeFalse
+    }
+
+    It 'Test-CleanCatHasCdromHash requires both hashes, not just the SHA1' {
+        $onlySha1 = Join-Path $script:TempRoot ("micpe-catfix-sha1only-{0}.cat" -f [guid]::NewGuid())
+        try {
+            [System.IO.File]::WriteAllBytes($onlySha1, [System.Convert]::FromHexString('8f19637e8381f4406a72e06276a609bde11ef4e5'))
+            Test-CleanCatHasCdromHash -CatPath $onlySha1 | Should -BeFalse
+        }
+        finally {
+            Remove-Item -LiteralPath $onlySha1 -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Assert-CleanCatFiles passes for the fixture catalogs' {
+        { Assert-CleanCatFiles -CatDir $script:fixtures -ExpectedCats $script:fixtureCats } | Should -Not -Throw
+    }
+
+    It 'Assert-CleanCatFiles throws when a catalog is missing or its hash is wrong' {
+        $oneOnly = Join-Path $script:TempRoot ("micpe-catfix-one-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $oneOnly -Force | Out-Null
+        try {
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat') -Destination $oneOnly -Force
+            { Assert-CleanCatFiles -CatDir $oneOnly -ExpectedCats $script:fixtureCats } | Should -Throw '*not found exactly once*'
+            $wrong = @($script:fixtureCats | ForEach-Object {
+                    [pscustomobject]@{ Name = $_.Name; Size = $_.Size; Sha256 = '0000000000000000000000000000000000000000000000000000000000000000' }
+                })
+            { Assert-CleanCatFiles -CatDir $script:fixtures -ExpectedCats $wrong } | Should -Throw '*SHA256 mismatch*'
+        }
+        finally {
+            Remove-Item -LiteralPath $oneOnly -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Invoke-CleanCatFixStep injects both catalogs into the staging CatRoot (fakes)' {
+        $staging = Join-Path $script:TempRoot ("micpe-catfix-staging-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-catfix-work-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $zipPath = Join-Path $work 'filelist.zip'
+        Compress-Archive -LiteralPath (Join-Path $script:fixtures 'catfix-aria2.txt') -DestinationPath $zipPath -Force
+        $cabPath = Join-Path $work 'windows11.0-kb5020044-x64_0123456789abcdef.cab'
+        Set-Content -LiteralPath $cabPath -Value 'FAKE-CAB' -NoNewline
+        try {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $script:fixtures
+            $result = Invoke-CleanCatFixStep -StagingDir $staging -WorkDir (Join-Path $work 'catfix') -FileListZipPath $zipPath -CabPath $cabPath -SevenZipPath $script:fake7z -ExpectedCats $script:fixtureCats
+            $result.Injected.Count | Should -Be 2
+            foreach ($cat in $script:fixtureCats) {
+                $staged = Join-Path $staging "Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\$($cat.Name)"
+                Test-Path -LiteralPath $staged | Should -BeTrue
+                (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash | Should -Be $cat.Sha256
+            }
+        }
+        finally {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $null
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Invoke-CleanCatFixStep throws loudly when 7z fails (must not silently proceed)' {
+        $staging = Join-Path $script:TempRoot ("micpe-catfix-fail-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-catfix-failwork-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $zipPath = Join-Path $work 'filelist.zip'
+        Compress-Archive -LiteralPath (Join-Path $script:fixtures 'catfix-aria2.txt') -DestinationPath $zipPath -Force
+        $cabPath = Join-Path $work 'windows11.0-kb5020044-x64_0123456789abcdef.cab'
+        Set-Content -LiteralPath $cabPath -Value 'FAKE-CAB' -NoNewline
+        try {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $script:fixtures
+            $env:MICPE_FAKE_7Z_FAIL = '1'
+            { Invoke-CleanCatFixStep -StagingDir $staging -WorkDir (Join-Path $work 'catfix') -FileListZipPath $zipPath -CabPath $cabPath -SevenZipPath $script:fake7z -ExpectedCats $script:fixtureCats } | Should -Throw '*7z failed*'
+        }
+        finally {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $null
+            $env:MICPE_FAKE_7Z_FAIL = $null
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Assert-CleanCatFilesInBootWim reads both catalogs back from boot.wim (fake wimlib)' {
+        $bootWim = Join-Path $script:TempRoot ("micpe-catfix-boot-{0}.wim" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $bootWim -Value 'FAKE-WIM' -NoNewline
+        $work = Join-Path $script:TempRoot ("micpe-catfix-rb-{0}" -f [guid]::NewGuid())
+        try {
+            $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR = $script:fixtures
+            { Assert-CleanCatFilesInBootWim -BootWim $bootWim -ExpectedCats $script:fixtureCats -WorkDir $work -WimlibPath $script:fakeWimlib } | Should -Not -Throw
+        }
+        finally {
+            $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR = $null
+            Remove-Item -LiteralPath $bootWim -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Assert-CleanCatFilesInBootWim throws when a catalog is missing from boot.wim' {
+        $bootWim = Join-Path $script:TempRoot ("micpe-catfix-boot2-{0}.wim" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $bootWim -Value 'FAKE-WIM' -NoNewline
+        $work = Join-Path $script:TempRoot ("micpe-catfix-rb2-{0}" -f [guid]::NewGuid())
+        $oneOnly = Join-Path $script:TempRoot ("micpe-catfix-one2-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $oneOnly -Force | Out-Null
+        try {
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat') -Destination $oneOnly -Force
+            $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR = $oneOnly
+            { Assert-CleanCatFilesInBootWim -BootWim $bootWim -ExpectedCats $script:fixtureCats -WorkDir $work -WimlibPath $script:fakeWimlib } | Should -Throw '*not found exactly once*'
+        }
+        finally {
+            $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR = $null
+            Remove-Item -LiteralPath $bootWim -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $oneOnly -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

@@ -1,0 +1,6 @@
+https://download.windowsupdate.com/c/msdownload/update/software/defu/2022/11/windows11.0-kb5020061-x64_abcdef0123456789.cab
+  out=windows11.0-kb5020061-x64_abcdef0123456789.cab
+  checksum=sha-256=0000000000000000000000000000000000000000000000000000000000000000
+https://download.windowsupdate.com/c/msdownload/update/software/defu/2022/11/windows11.0-kb5020044-x64_0123456789abcdef.cab
+  out=windows11.0-kb5020044-x64_0123456789abcdef.cab
+  checksum=sha-256=1111111111111111111111111111111111111111111111111111111111111111

@@ -19,6 +19,15 @@
                   official install.wim (Professional index) into a staging
                   tree (--nullglob: a listed file the official image does
                   not carry is skipped, not fatal).
+      2b. catfix  fetch the two 22621.900 catalog files cdrom.sys depends
+                  on from the official UUP dump 22621.900 build (KB5020044,
+                  user decision 2026-11-25 scheme 2) and inject them into
+                  the staging CatRoot; SHA256-verified, and each .cat must
+                  contain the cdrom.sys Authenticode hash. The RTM
+                  install.wim does not carry them (round 12 root cause),
+                  so the whitelist alone can never bring them in.
+                  Read back after capture: both files must be in boot.wim
+                  with matching SHA256, or the build fails here.
       3. shell    read shell.zip (StartAllBack + Start11, user-supplied,
                   in-repo src/build/data/shell.zip, SHA256-pinned) and lay it
                   out under Windows\System32\MICPE\ (StartAllBack and
@@ -342,6 +351,386 @@ function Invoke-CleanExtractStep {
         ImageIndex = $index
         FileCount  = $patterns.Count
     }
+}
+
+# ---------------------------------------------------------------------------
+# Catalog fix (round 13): the two 22621.900 .cat files cdrom.sys depends on
+# ---------------------------------------------------------------------------
+# Root cause (round 12, verified with objdump + Authenticode hashing):
+# cdrom.sys is the only boot-start driver with NO embedded signature (PE
+# data directory index 4, certificate table, is 0/0; the other 11 boot
+# files all carry ~9.5 KB). Winload verifies it through the system
+# catalogs, and its Authenticode hash lives only in these two 22621.900
+# catalog files. Both are in the 9,405-path whitelist, but the RTM
+# install.wim (22621.1, AddUpdates=0) does not carry them, so the extract
+# step silently skips them (--nullglob) and the captured boot.wim has no
+# catalog vouching for cdrom.sys -> winload reports 0xc0000428 ("the hash
+# for the image cannot be found in the system catalogs", [MS-ERREF]).
+#
+# Fix (user decision 2026-11-25 10:33, scheme 2): fetch the two files from
+# the official UUP dump 22621.900 build (KB5020044, uuid
+# 5d5ef944-1ba0-436b-b7d3-571d59a15cbb) and inject them into the staging
+# CatRoot. Ramos is comparison only, never a source (the user: many Ramos
+# files were tampered with). AddUpdates stays 0; the local machine cannot
+# fetch the files (the POST is blocked), so the fetch happens in CI, where
+# the base step already does the same get.php POST.
+
+function Find-ByteSequence {
+    # Raw byte search: returns $true when $Needle occurs in $Bytes. Used
+    # for the .cat check -- catalog files store the Authenticode hash as
+    # raw bytes, not text, so a string search would miss it.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]] $Bytes,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]] $Needle
+    )
+
+    if ($Needle.Count -eq 0) { return $true }
+    if ($Bytes.Count -lt $Needle.Count) { return $false }
+    $start = 0
+    while ($true) {
+        $pos = [System.Array]::IndexOf($Bytes, $Needle[0], $start)
+        if ($pos -lt 0 -or ($pos + $Needle.Count) -gt $Bytes.Count) { return $false }
+        $match = $true
+        for ($j = 1; $j -lt $Needle.Count; $j++) {
+            if ($Bytes[$pos + $j] -ne $Needle[$j]) { $match = $false; break }
+        }
+        if ($match) { return $true }
+        $start = $pos + 1
+    }
+}
+
+function Test-CleanCatHasCdromHash {
+    # True when the catalog file contains the cdrom.sys Authenticode hash
+    # (both SHA1 and SHA256, as raw bytes). The hashes are pinned: they
+    # belong to the RTM cdrom.sys the build always extracts (SHA256
+    # 3912fc71...), computed with the section-based Authenticode algorithm
+    # (see ~/workspace/micpe-catfix/authenticode_hash.py -- the naive
+    # "whole file minus CheckSum" hash is wrong).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CatPath,
+
+        [string] $Sha1 = '8f19637e8381f4406a72e06276a609bde11ef4e5',
+
+        [string] $Sha256 = '3ca40d030fd515fde7451e685dda10d5c52c20e7898c1b87ea3c86ce329b0d94'
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($CatPath)
+    $sha1Bytes = [System.Convert]::FromHexString($Sha1)
+    $sha256Bytes = [System.Convert]::FromHexString($Sha256)
+    return ((Find-ByteSequence -Bytes $bytes -Needle $sha1Bytes) -and
+        (Find-ByteSequence -Bytes $bytes -Needle $sha256Bytes))
+}
+
+function Assert-CleanCatFiles {
+    # Filesystem read-back for a directory of .cat files: each expected
+    # file must be present exactly once, with the pinned size and SHA256.
+    # Hard failure (not the relaxed registry read-back): if the catalogs
+    # are not in the image, the whole round is pointless and a 40-minute
+    # QEMU run must not be wasted on it.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CatDir,
+
+        [Parameter(Mandatory = $true)]
+        [object[]] $ExpectedCats
+    )
+
+    foreach ($cat in $ExpectedCats) {
+        $found = @(Get-ChildItem -LiteralPath $CatDir -Filter $cat.Name -Recurse -File -ErrorAction SilentlyContinue)
+        Assert-True -Condition ($found.Count -eq 1) -Message (
+            "catalog read-back: $($cat.Name) not found exactly once under $CatDir (found $($found.Count))")
+        $actualSize = (Get-Item -LiteralPath $found[0].FullName).Length
+        Assert-True -Condition ($actualSize -eq $cat.Size) -Message (
+            "catalog read-back: $($cat.Name) size is $actualSize, expected $($cat.Size)")
+        $actualHash = (Get-FileHash -LiteralPath $found[0].FullName -Algorithm SHA256).Hash.ToLower()
+        Assert-True -Condition ($actualHash -eq $cat.Sha256.ToLower()) -Message (
+            "catalog read-back: $($cat.Name) SHA256 mismatch: expected $($cat.Sha256), got $actualHash")
+    }
+}
+
+function Find-CleanCatLcuCab {
+    # Parse a UUP dump file list (aria2 input format: a URL line followed
+    # by indented `out=<filename>` lines, or bare URLs) and return the
+    # single KB cumulative-update .cab. Exactly one must match: the list
+    # is per build + edition + language, so a second KB5020044 cab would
+    # mean the list is not what was asked for -- fail loudly instead of
+    # guessing which one holds the catalogs.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FileListText,
+
+        [string] $Kb = 'KB5020044'
+    )
+
+    $pairs = [System.Collections.Generic.List[pscustomobject]]::new()
+    $currentUrl = $null
+    $currentName = $null
+    foreach ($rawLine in ($FileListText -split "`r?`n")) {
+        $line = $rawLine.Trim()
+        if (-not $line) { continue }
+        if ($line -match '^(https?://\S+)') {
+            if ($null -ne $currentUrl) {
+                $name = $currentName
+                if (-not $name) {
+                    $name = ($currentUrl -split '/')[-1]
+                }
+                $pairs.Add([pscustomobject]@{ Url = $currentUrl; FileName = $name })
+            }
+            $currentUrl = $Matches[1].Trim('"', "'")
+            $currentName = $null
+            continue
+        }
+        if ($line -match '^out\s*=\s*(.+?)\s*$' -and $null -ne $currentUrl) {
+            $currentName = $Matches[1].Trim('"', "'")
+            continue
+        }
+    }
+    if ($null -ne $currentUrl) {
+        $name = $currentName
+        if (-not $name) {
+            $name = ($currentUrl -split '/')[-1]
+        }
+        $pairs.Add([pscustomobject]@{ Url = $currentUrl; FileName = $name })
+    }
+
+    $matches = @($pairs | Where-Object {
+            $_.FileName -like '*.cab' -and $_.FileName -like "*$Kb*"
+        })
+    Assert-True -Condition ($matches.Count -eq 1) -Message (
+        "UUP file list: expected exactly one $Kb .cab, found $($matches.Count): $(($matches | ForEach-Object { $_.FileName }) -join ', ')")
+    return $matches[0]
+}
+
+function Get-CleanCatFixFileList {
+    # Resolve the 22621.900 build and download its bare file list
+    # (get.php autodl=1 -- the list only, no converter). Mirrors
+    # New-UupDownloadPackage's POST; the list is what the LCU cab URL
+    # comes from.
+    [CmdletBinding()]
+    param(
+        [string] $Build = '22621.900',
+
+        [string] $Lang = 'zh-cn',
+
+        [string] $Edition = 'professional',
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [string] $WebBase = 'https://uupdump.net',
+
+        [scriptblock] $UupInvoke
+    )
+
+    $uup = Get-UupBuild -Build $Build -Arch 'amd64' -Channel 'stable' -Invoke $UupInvoke
+    Write-SubStep ("UUP catalog build: {0} ({1})" -f $uup.Build, $uup.Title)
+
+    if (-not (Test-Path -LiteralPath $WorkDir)) {
+        New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+    }
+    $query = "id=$($uup.Uuid)&pack=$([uri]::EscapeDataString($Lang))&edition=$([uri]::EscapeDataString($Edition))"
+    $body = @{ autodl = '1' }
+    $url = "$WebBase/get.php?$query"
+    $zip = Join-Path $WorkDir 'uup-filelist.zip'
+    Write-SubStep "downloading UUP file list for $($uup.Uuid) ($Lang, $Edition)"
+    Invoke-NetworkWithRetry -Action {
+        Invoke-WebRequest -Uri $url -Method Post -Body $body -OutFile $zip -TimeoutSec 600
+    } -Label "UUP file list $url"
+    Assert-PathExists -Path $zip -Label 'UUP file-list archive'
+
+    $extractDir = Join-Path $WorkDir 'filelist'
+    if (Test-Path -LiteralPath $extractDir) {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force
+    }
+    Expand-Archive -LiteralPath $zip -DestinationPath $extractDir -Force
+    return $extractDir
+}
+
+function Invoke-CleanCatFixStep {
+    # Fetch the two 22621.900 catalog files from the official UUP dump
+    # build and inject them into the staging CatRoot. Runs after extract
+    # (the staging tree is writable by then) and before capture.
+    # -FileListZipPath / -CabPath are test seams: when given, the network
+    # fetch / download is skipped and the supplied files are used.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $StagingDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [string] $CatBuild = '22621.900',
+
+        [string] $CatKb = 'KB5020044',
+
+        [string] $CatRootRel = 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}',
+
+        [string] $SevenZipPath = '7z',
+
+        [string] $Lang = 'zh-cn',
+
+        [string] $Edition = 'professional',
+
+        [scriptblock] $UupInvoke,
+
+        [string] $FileListZipPath,
+
+        [string] $CabPath,
+
+        [object[]] $ExpectedCats = @(
+            [pscustomobject]@{
+                Name   = 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat'
+                Size   = 205062
+                Sha256 = 'e09905c4319b6194def5c9b33f53688234ef1fd80cc5a568c486e8843143dd8d'
+            },
+            [pscustomobject]@{
+                Name   = 'Microsoft-Windows-Common-Drivers-merged-Package~31bf3856ad364e35~amd64~~10.0.22621.900.cat'
+                Size   = 137452
+                Sha256 = '0a614b442f4c3a85c3f5a4615f748c5b94b2f3f401802e46f7bb2101adc03f62'
+            }
+        ),
+
+        [string] $CdromSha1 = '8f19637e8381f4406a72e06276a609bde11ef4e5',
+
+        [string] $CdromSha256 = '3ca40d030fd515fde7451e685dda10d5c52c20e7898c1b87ea3c86ce329b0d94'
+    )
+
+    Write-Step 'fetching the two 22621.900 catalog files for cdrom.sys (round 13 root cause)'
+
+    # 1. File list (autodl=1) -> the single KB5020044 LCU cab URL.
+    if ($FileListZipPath) {
+        $fileListDir = Join-Path $WorkDir 'filelist'
+        if (Test-Path -LiteralPath $fileListDir) {
+            Remove-Item -LiteralPath $fileListDir -Recurse -Force
+        }
+        Expand-Archive -LiteralPath $FileListZipPath -DestinationPath $fileListDir -Force
+    }
+    else {
+        $fileListDir = Get-CleanCatFixFileList -Build $CatBuild -Lang $Lang -Edition $Edition -WorkDir $WorkDir -UupInvoke $UupInvoke
+    }
+    $listFiles = @(Get-ChildItem -LiteralPath $fileListDir -Filter '*.txt' -Recurse -File -ErrorAction SilentlyContinue)
+    if ($listFiles.Count -eq 0) {
+        $listFiles = @(Get-ChildItem -LiteralPath $fileListDir -Filter '*.cmd' -Recurse -File -ErrorAction SilentlyContinue)
+    }
+    Assert-True -Condition ($listFiles.Count -gt 0) -Message (
+        "UUP file list contained no .txt/.cmd file under $fileListDir (contents: $((Get-ChildItem -LiteralPath $fileListDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', '))")
+    $listText = ($listFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
+    $lcu = Find-CleanCatLcuCab -FileListText $listText -Kb $CatKb
+    Write-SubStep ("LCU cab: {0}" -f $lcu.FileName)
+
+    # 2. Download only that cab (the whole conversion package is GBs;
+    # the catalogs live in this one cab).
+    $downloadedCab = $false
+    if (-not $CabPath) {
+        if (-not (Test-Path -LiteralPath $WorkDir)) {
+            New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+        }
+        $CabPath = Join-Path $WorkDir $lcu.FileName
+        Invoke-NetworkWithRetry -Action {
+            Invoke-WebRequest -Uri $lcu.Url -OutFile $CabPath -TimeoutSec 1800
+        } -Label "LCU cab download $($lcu.FileName)"
+        $downloadedCab = $true
+    }
+    Assert-PathExists -Path $CabPath -Label "LCU cab $($lcu.FileName)"
+
+    # 3. Extract just the two catalog files (wildcards, recursive: the
+    # cab stores them under component paths, not at the root).
+    $extractDir = Join-Path $WorkDir 'lcu'
+    if (Test-Path -LiteralPath $extractDir) {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+    $wildcards = @($ExpectedCats | ForEach-Object { "*$($_.Name)" })
+    # Do NOT initialise $LASTEXITCODE here: a plain assignment creates a
+    # function-local that shadows the real value (a native 7z exit code,
+    # or the fake's $global:LASTEXITCODE, would never reach the check
+    # below). The BCD experiment proved the no-init pattern; a fresh
+    # session starts with $LASTEXITCODE 0 and both 7z and the fake always
+    # set it.
+    $null = & $SevenZipPath x $CabPath ("-o{0}" -f $extractDir) -y -r @wildcards 2>&1
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message (
+        "7z failed to extract the catalog files from $($lcu.FileName) (exit $LASTEXITCODE)")
+
+    # 4. Verify each catalog (size + SHA256 + cdrom.sys hash inside),
+    # then inject it into the staging CatRoot.
+    $catRootDir = Join-Path $StagingDir $CatRootRel
+    if (-not (Test-Path -LiteralPath $catRootDir)) {
+        New-Item -ItemType Directory -Path $catRootDir -Force | Out-Null
+    }
+    $injected = [System.Collections.Generic.List[string]]::new()
+    foreach ($cat in $ExpectedCats) {
+        $found = @(Get-ChildItem -LiteralPath $extractDir -Filter $cat.Name -Recurse -File -ErrorAction SilentlyContinue)
+        Assert-True -Condition ($found.Count -eq 1) -Message (
+            "LCU cab $($lcu.FileName) did not contain exactly one $($cat.Name) (found $($found.Count))")
+        $catPath = $found[0].FullName
+        $actualSize = (Get-Item -LiteralPath $catPath).Length
+        Assert-True -Condition ($actualSize -eq $cat.Size) -Message (
+            "$($cat.Name) size is $actualSize, expected $($cat.Size)")
+        $actualHash = (Get-FileHash -LiteralPath $catPath -Algorithm SHA256).Hash.ToLower()
+        Assert-True -Condition ($actualHash -eq $cat.Sha256.ToLower()) -Message (
+            "$($cat.Name) SHA256 mismatch: expected $($cat.Sha256), got $actualHash")
+        $hasHash = Test-CleanCatHasCdromHash -CatPath $catPath -Sha1 $CdromSha1 -Sha256 $CdromSha256
+        Assert-True -Condition $hasHash -Message (
+            "$($cat.Name) does not contain the cdrom.sys Authenticode hash -- wrong catalog file")
+        Copy-Item -LiteralPath $catPath -Destination (Join-Path $catRootDir $cat.Name) -Force
+        Assert-PathExists -Path (Join-Path $catRootDir $cat.Name) -Label "staged $($cat.Name)"
+        $injected.Add($cat.Name)
+        Write-SubStep ("injected {0} ({1} bytes, SHA256 verified, cdrom.sys hash present)" -f $cat.Name, $actualSize)
+    }
+
+    # 5. Drop the big temp files (the cab is hundreds of MB, the expanded
+    # tree GBs); the injected copies live in staging now. A test-supplied
+    # cab is the caller's file, never deleted.
+    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($downloadedCab) {
+        Remove-Item -LiteralPath $CabPath -Force -ErrorAction SilentlyContinue
+    }
+
+    return [pscustomobject]@{
+        ExpectedCats = $ExpectedCats
+        CatRootRel   = $CatRootRel
+        Injected     = @($injected.ToArray())
+    }
+}
+
+function Assert-CleanCatFilesInBootWim {
+    # Read-back after capture: the two catalogs must be in boot.wim with
+    # matching SHA256. Hard failure -- this is the whole point of the
+    # round, and a silent miss would waste the QEMU run.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $BootWim,
+
+        [Parameter(Mandatory = $true)]
+        [object[]] $ExpectedCats,
+
+        [string] $CatRootRel = 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}',
+
+        [string] $WorkDir,
+
+        [string] $WimlibPath = 'wimlib-imagex'
+    )
+
+    $extractDir = if ($WorkDir) { $WorkDir } else { Join-Path (Split-Path -Parent $BootWim) 'catfix-readback' }
+    if (Test-Path -LiteralPath $extractDir) {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force
+    }
+    $patterns = @($ExpectedCats | ForEach-Object { "$CatRootRel\$($_.Name)" })
+    Export-WimFiles -WimPath $BootWim -Index 1 -Destination $extractDir -Patterns $patterns -WimlibPath $WimlibPath
+    Assert-CleanCatFiles -CatDir $extractDir -ExpectedCats $ExpectedCats
+    Write-SubStep 'catalog read-back: both 22621.900 .cat files are in boot.wim with matching SHA256'
 }
 
 function Get-CleanShellZip {
@@ -769,11 +1158,13 @@ function Invoke-CleanIsoStep {
 $base = Invoke-CleanBaseStep
 $extract = Invoke-CleanExtractStep -InstallWim $base.InstallWim
 Write-SubStep ("staged {0} file-list paths from install.wim index {1}" -f $extract.FileCount, $extract.ImageIndex)
+$catFix = Invoke-CleanCatFixStep -StagingDir $paths.Staging -WorkDir (Join-Path $paths.Logs 'catfix')
 Invoke-CleanShellStep
 $apps = Invoke-CleanAppStep
 Invoke-CleanRegistryStep -AppRegFiles $apps.RegFiles
 Assert-CleanRegistry -AppNames $apps.Names
 $capturedBootWim = Invoke-CleanCaptureStep
+Assert-CleanCatFilesInBootWim -BootWim $capturedBootWim -ExpectedCats $catFix.ExpectedCats -WimlibPath $WimlibPath
 $result = Invoke-CleanIsoStep -BootWim $capturedBootWim
 
 Write-Step 'done'

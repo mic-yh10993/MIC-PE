@@ -73,4 +73,30 @@ if ($destArg -and $hasHive) {
     }
 }
 
+# `.cat` materialization (catalog read-back tests): when the caller extracts
+# catalog patterns and MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR points at fixture
+# .cat files, copy each requested leaf into the destination preserving the
+# pattern's directory structure. Gated on the env var so existing tests
+# are unaffected.
+if ($destArg -and $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR) {
+    $dir = $destArg.Substring('--dest-dir='.Length)
+    foreach ($pattern in $args) {
+        if ($pattern -like '*.cat') {
+            $parts = @($pattern -split '[\\/]')
+            $leaf = $parts[-1]
+            $src = Join-Path $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR $leaf
+            if (Test-Path -LiteralPath $src) {
+                $destPath = $dir
+                if ($parts.Count -gt 1) {
+                    foreach ($part in $parts[0..($parts.Count - 2)]) {
+                        $destPath = Join-Path $destPath $part
+                    }
+                }
+                New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+                Copy-Item -LiteralPath $src -Destination (Join-Path $destPath $leaf) -Force
+            }
+        }
+    }
+}
+
 $LASTEXITCODE = 0
