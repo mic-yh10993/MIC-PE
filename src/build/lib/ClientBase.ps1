@@ -433,6 +433,137 @@ function Get-CleanRegistryValue {
     return $prop.Value
 }
 
+# --- guard reads through reg.exe, never the provider (round 20) -----------
+# Round 19 (run 45656051010) proved the PowerShell registry provider is
+# what breaks the guard's own hive unload: after Test-BootCriticalFiles
+# enumerated 679 services with Get-ChildItem + Get-ItemProperty, `reg
+# unload` of the verify hive failed 10/10 times with Access is denied,
+# while the 10 other unloads in the same session (all reg.exe-only
+# hives) succeeded. The provider holds an open handle on the hive and
+# GC + retry cannot release it -- the read-back step already avoids the
+# provider for exactly this reason (Build-CleanPe.ps1, CI run
+# 44001157082). So the guard reads the whole Services tree with one
+# `reg.exe query /s` call: the parent pwsh process never opens the
+# hive, so nothing in-session can hold it open and the later unload
+# succeeds on the first attempt.
+
+function ConvertTo-CleanRegDword {
+    <#
+    .SYNOPSIS
+        Converts a REG_DWORD string ('0x3') to [int]; $null when missing.
+    .DESCRIPTION
+        reg.exe prints DWORDs as hex strings. An unparseable value
+        returns $null instead of throwing, so one odd row cannot kill
+        the guard -- the caller treats $null Start as "skip" (driver
+        check) or "Start= (expected 0)" (required-service check).
+    #>
+    [CmdletBinding()]
+    param([AllowNull()][string] $Raw)
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
+    $trimmed = $Raw.Trim()
+    try {
+        if ($trimmed -match '^0x([0-9a-fA-F]+)$') { return [Convert]::ToInt32($Matches[1], 16) }
+        return [int]$trimmed
+    }
+    catch { return $null }
+}
+
+function ConvertFrom-CleanServicesRegQuery {
+    <#
+    .SYNOPSIS
+        Parses `reg.exe query <Services key> /s` output into service rows.
+    .DESCRIPTION
+        Pure text parsing, no registry access: unit-testable on Linux.
+        `reg.exe query /s` prints one block per key -- the queried key
+        itself first, then every subkey recursively -- each block headed
+        by its full path, followed by `    Name    REG_TYPE    data`
+        rows and a blank line. Only direct children of the Services key
+        are services; deeper blocks (Parameters, Enum, Linkage, ...) are
+        ignored. REG_MULTI_SZ continuation lines carry no REG_ token, so
+        they never match a value row. A missing value is $null (43 of
+        the 679 r91 service keys have no Start at all -- round 17).
+        The value-row regex mirrors Registry.ps1's
+        ConvertFrom-RegQueryOutput, so the two parsers agree on what a
+        row looks like. Returns objects with Name, Start, ErrorControl,
+        Type and ImagePath -- the same shape Test-CleanCriticalDriverFiles
+        takes.
+        [AllowEmptyString] on $Lines is load-bearing: reg.exe output
+        is full of blank lines between blocks, and a mandatory
+        [string[]] parameter refuses an array containing an empty
+        string ("Cannot bind argument ... because it is an empty
+        string") unless the attribute is present.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]] $Lines,
+        [Parameter(Mandatory)][string] $ServicesPath
+    )
+
+    $blocks = @()
+    $block = $null
+    foreach ($line in $Lines) {
+        if ($line -match '^HKEY_LOCAL_MACHINE\\') {
+            $block = [pscustomobject]@{ Path = $line.Trim(); Values = @{} }
+            $blocks += $block
+            continue
+        }
+        if ($null -eq $block) { continue }
+        if ($line -match '^\s+(.+?)\s{2,}REG_[A-Z_]+\s+(.*\S)\s*$') {
+            $block.Values[$Matches[1]] = $Matches[2].Trim()
+        }
+        elseif ($line -match '^\s+(.+?)\s{2,}REG_[A-Z_]+\s*$') {
+            $block.Values[$Matches[1]] = ''
+        }
+        # Blank lines and REG_MULTI_SZ continuation lines carry no REG_
+        # token, so they never match a value row: ignored.
+    }
+
+    $services = @()
+    $prefix = "$ServicesPath\"
+    foreach ($block in $blocks) {
+        if (-not $block.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $rest = $block.Path.Substring($prefix.Length)
+        if ($rest.Length -eq 0 -or $rest.Contains('\')) { continue }
+        $services += [pscustomobject]@{
+            Name         = $rest
+            Start        = ConvertTo-CleanRegDword -Raw $block.Values['Start']
+            ErrorControl = ConvertTo-CleanRegDword -Raw $block.Values['ErrorControl']
+            Type         = ConvertTo-CleanRegDword -Raw $block.Values['Type']
+            ImagePath    = $block.Values['ImagePath']
+        }
+    }
+    return $services
+}
+
+function Get-CleanServicesViaRegQuery {
+    <#
+    .SYNOPSIS
+        Reads every service under a mounted SYSTEM hive's Services key
+        through reg.exe, never through the PowerShell provider.
+    .DESCRIPTION
+        One `reg.exe query /s` call returns every service; the parent
+        pwsh process never opens the hive, so nothing in-session can
+        hold it open and the later `reg unload` succeeds. Returns @()
+        when the Services key is absent (same as the old Test-Path
+        guard around the provider enumeration).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Key)
+
+    # reg.exe accepts the short root (HKLM) in the query, but prints
+    # the long root (HKEY_LOCAL_MACHINE) in every output header -- the
+    # parser matches block paths against the long form, so the two
+    # paths must not be confused (passing the short form to the parser
+    # matches nothing and the guard sees zero services).
+    $queryPath = "HKLM\$Key\ControlSet001\Services"
+    $servicesPath = "HKEY_LOCAL_MACHINE\$Key\ControlSet001\Services"
+    $r = Invoke-RegExe @('query', $queryPath, '/s')
+    if ($r.ExitCode -ne 0) { return @() }
+    $lines = @($r.Output -split "`r?`n")
+    return (ConvertFrom-CleanServicesRegQuery -Lines $lines -ServicesPath $servicesPath)
+}
+
 function Test-CleanCriticalDriverFiles {
     <#
     .SYNOPSIS
@@ -542,41 +673,37 @@ function Test-BootCriticalFiles {
     if (Test-Path -LiteralPath $systemHive) {
         $key = Mount-OfflineHive -HivePath $systemHive -Prefix 'MICPEV'
         try {
+            # Round 20: read the whole Services tree through reg.exe,
+            # never through the PowerShell provider. The provider kept
+            # an open handle on the hive after the guard enumerated
+            # 679 services through it, and the guard's own `reg unload`
+            # then failed 10/10 times with Access is denied (round 19,
+            # run 45656051010) -- while the 10 other unloads in the
+            # same session (all reg.exe-only hives) succeeded. The
+            # read-back step already avoids the provider for exactly
+            # this reason (Build-CleanPe.ps1, CI run 44001157082). One
+            # query serves both the required-services check and the
+            # critical-driver enumeration, and the parent pwsh process
+            # never opens the hive, so nothing in-session can hold it
+            # open.
+            $services = Get-CleanServicesViaRegQuery -Key $key
+
             foreach ($svc in $RequiredService) {
-                $path = "HKLM:\$key\ControlSet001\Services\$svc"
-                if (-not (Test-Path -LiteralPath $path)) {
+                $row = @($services | Where-Object { $_.Name -eq $svc })
+                if ($row.Count -eq 0) {
                     $serviceProblems += "$svc missing"
                     continue
                 }
-                $start = (Get-ItemProperty -Path $path -Name Start -ErrorAction SilentlyContinue).Start
+                $start = $row[0].Start
                 if ($null -eq $start -or $start -ne 0) { $serviceProblems += "$svc Start=$start (expected 0)" }
             }
 
             # Round 16 guard: the fixed manifest above cannot catch a
             # critical driver the whitelist silently drops (FileCrypt was
             # Start=1 + ErrorControl=3 with no file in the image, and the
-            # build only died in QEMU with 0x5A). Enumerate every service
-            # and fail on any boot/system driver whose file is missing.
-            $services = @()
-            $servicesKey = "HKLM:\$key\ControlSet001\Services"
-            if (Test-Path -LiteralPath $servicesKey) {
-                foreach ($child in (Get-ChildItem -LiteralPath $servicesKey)) {
-                    $props = Get-ItemProperty -LiteralPath $child.PSPath -ErrorAction SilentlyContinue
-                    if ($null -eq $props) { continue }
-                    # Round 17: read values through
-                    # Get-CleanRegistryValue, never $props.<Name> -- 43
-                    # of the 679 r91 service keys have no Start value
-                    # at all, and a direct read throws under StrictMode
-                    # 2.0/Latest (round 16 build died on exactly that).
-                    $services += [pscustomobject]@{
-                        Name         = $child.PSChildName
-                        Start        = Get-CleanRegistryValue -Properties $props -Name 'Start'
-                        ErrorControl = Get-CleanRegistryValue -Properties $props -Name 'ErrorControl'
-                        Type         = Get-CleanRegistryValue -Properties $props -Name 'Type'
-                        ImagePath    = Get-CleanRegistryValue -Properties $props -Name 'ImagePath'
-                    }
-                }
-            }
+            # build only died in QEMU with 0x5A). $services above is the
+            # full enumeration; fail on any boot/system driver whose
+            # file is missing.
             $driverCheck = Test-CleanCriticalDriverFiles -ImageRoot $ImageRoot -Services $services
             foreach ($name in $driverCheck.CriticalMissing) {
                 $serviceProblems += "$name is a critical boot/system driver (ErrorControl=3) but its file is missing from the image"

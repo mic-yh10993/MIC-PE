@@ -921,7 +921,7 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
             }, $true)
-        foreach ($name in @('Resolve-CleanDriverImagePath', 'Get-CleanRegistryValue', 'Test-CleanCriticalDriverFiles', 'Test-BootCriticalFiles', 'Assert-BootCritical', 'Invoke-RegExe', 'Test-CleanHiveFileReadable', 'Dismount-OfflineHive')) {
+        foreach ($name in @('Resolve-CleanDriverImagePath', 'Get-CleanRegistryValue', 'Test-CleanCriticalDriverFiles', 'Test-BootCriticalFiles', 'Assert-BootCritical', 'Invoke-RegExe', 'Test-CleanHiveFileReadable', 'Dismount-OfflineHive', 'ConvertTo-CleanRegDword', 'ConvertFrom-CleanServicesRegQuery', 'Get-CleanServicesViaRegQuery')) {
             $fn = @($allFns | Where-Object { $_.Name -eq $name })
             $fn.Count | Should -Be 1
             . ([scriptblock]::Create($fn[0].Extent.Text))
@@ -936,8 +936,16 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         # Each It resets both counters before calling Dismount.
         $script:fakeRegFailuresRemaining = 0
         $script:fakeRegCalls = 0
+        # Round 20: a canned `reg query /s` dump for the
+        # Get-CleanServicesViaRegQuery tests. Only query calls see it;
+        # unload calls still go through the failure countdown below.
+        $script:fakeRegQueryOutput = $null
         function reg.exe {
             $script:fakeRegCalls++
+            if ($args.Count -ge 1 -and $args[0] -eq 'query' -and $null -ne $script:fakeRegQueryOutput) {
+                $global:LASTEXITCODE = 0
+                return $script:fakeRegQueryOutput
+            }
             if ($script:fakeRegFailuresRemaining -eq -1 -or $script:fakeRegFailuresRemaining -gt 0) {
                 if ($script:fakeRegFailuresRemaining -gt 0) { $script:fakeRegFailuresRemaining-- }
                 $global:LASTEXITCODE = 1
@@ -1190,19 +1198,26 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         }
     }
 
-    It 'Test-BootCriticalFiles reads hive service values through Get-CleanRegistryValue (round 17 guard fix)' {
-        # The hive enumeration itself needs Windows (reg.exe load), so
-        # this is a wiring assertion: no direct $props.Start /
-        # $props.ErrorControl / $props.Type / $props.ImagePath reads
-        # may remain in the enumeration loop.
+    It 'Test-BootCriticalFiles reads hive service values through reg.exe, never the provider (round 20 guard fix)' {
+        # Round 19: the guard enumerated the hive with Get-ChildItem +
+        # Get-ItemProperty, the provider kept an open handle, and the
+        # guard's own `reg unload` failed 10/10 with Access is denied
+        # (run 45656051010). Round 20 reads the Services tree with one
+        # `reg.exe query /s` call instead. The hive enumeration itself
+        # needs Windows (reg.exe load), so this is a wiring assertion:
+        # no provider access to the mounted hive may remain in the
+        # guard -- no HKLM:\ paths, no Get-ChildItem, no
+        # Get-ItemProperty -- and the services must come from
+        # Get-CleanServicesViaRegQuery. (Round 17 pinned
+        # Get-CleanRegistryValue here; the provider read it wrapped is
+        # what round 20 removes. The helper itself stays, tested.)
         $libText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/ClientBase.ps1') -Raw
-        $libText | Should -Match 'function Get-CleanRegistryValue'
         $enum = ($libText -split 'function Test-BootCriticalFiles')[1] -split 'function Assert-BootCritical' | Select-Object -First 1
-        $enum | Should -Match 'Get-CleanRegistryValue'
-        $enum | Should -Not -Match '\$props\.Start'
-        $enum | Should -Not -Match '\$props\.ErrorControl'
-        $enum | Should -Not -Match '\$props\.Type'
-        $enum | Should -Not -Match '\$props\.ImagePath'
+        $enum | Should -Match 'Get-CleanServicesViaRegQuery'
+        $enum | Should -Not -Match 'HKLM:\\'
+        $enum | Should -Not -Match 'Get-ChildItem'
+        $enum | Should -Not -Match 'Get-ItemProperty'
+        $enum | Should -Not -Match 'Get-CleanRegistryValue'
     }
 
     It 'Assert-CleanRegistry prints every disabled-service and LowerFilters read-back value (round 17 evidence)' {
@@ -1330,5 +1345,131 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         $dismount | Should -Match '\$r\.ExitCode'
         $dismount | Should -Match 'lastExit -ne 0'
         $dismount | Should -Match 'MaxUnloadAttempts'
+    }
+
+    It 'ConvertFrom-CleanServicesRegQuery parses a reg.exe query /s dump into service rows (round 20 guard fix)' {
+        # Round 19: the guard enumerated the hive with Get-ChildItem +
+        # Get-ItemProperty, the provider kept an open handle, and the
+        # guard's own `reg unload` failed 10/10 with Access is denied.
+        # Round 20 reads the Services tree with one `reg.exe query /s`
+        # call instead. The fixture models the real dump: a service
+        # with all four values, one with no values at all (43 of the
+        # 679 r91 keys have no Start), a REG_MULTI_SZ whose
+        # continuation line must not be mistaken for a value, a nested
+        # Parameters block that is not a service, and a name with
+        # spaces and dots. The full 679-service real-hive check lives
+        # in ~/workspace/micpe-r20-verify/verify_parser.ps1.
+        $lines = @(
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services',
+            '',
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services\ACPI',
+            '    Description    REG_SZ    Microsoft ACPI Driver',
+            '    ErrorControl    REG_DWORD    0x3',
+            '    Group    REG_SZ    Boot Bus Extender',
+            '    ImagePath    REG_EXPAND_SZ    System32\drivers\ACPI.sys',
+            '    Start    REG_DWORD    0x0',
+            '    Type    REG_DWORD    0x1',
+            '',
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services\.NET CLR Data',
+            '',
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services\FileCrypt',
+            '    DependOnService    REG_MULTI_SZ    FltMgr',
+            '    Tcpip',
+            '    ErrorControl    REG_DWORD    0x3',
+            '    ImagePath    REG_SZ    system32\drivers\filecrypt.sys',
+            '    Start    REG_DWORD    0x1',
+            '    Type    REG_DWORD    0x2',
+            '',
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services\Tcpip',
+            '    ErrorControl    REG_DWORD    0x1',
+            '    ImagePath    REG_EXPAND_SZ    System32\drivers\tcpip.sys',
+            '    Start    REG_DWORD    0x0',
+            '    Type    REG_DWORD    0x1',
+            '',
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services\Tcpip\Parameters',
+            '    DataBasePath    REG_EXPAND_SZ    %SystemRoot%\System32\drivers\etc',
+            ''
+        )
+        $services = ConvertFrom-CleanServicesRegQuery -Lines $lines -ServicesPath 'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services'
+        @($services).Count | Should -Be 4
+        $acpi = @($services | Where-Object { $_.Name -eq 'ACPI' })[0]
+        $acpi.Start | Should -Be 0
+        $acpi.ErrorControl | Should -Be 3
+        $acpi.Type | Should -Be 1
+        $acpi.ImagePath | Should -Be 'System32\drivers\ACPI.sys'
+        $clr = @($services | Where-Object { $_.Name -eq '.NET CLR Data' })[0]
+        $clr.Start | Should -BeNullOrEmpty
+        $clr.ErrorControl | Should -BeNullOrEmpty
+        $clr.Type | Should -BeNullOrEmpty
+        $clr.ImagePath | Should -BeNullOrEmpty
+        $fc = @($services | Where-Object { $_.Name -eq 'FileCrypt' })[0]
+        $fc.Start | Should -Be 1
+        $fc.ErrorControl | Should -Be 3
+        $fc.Type | Should -Be 2
+        $fc.ImagePath | Should -Be 'system32\drivers\filecrypt.sys'
+        # The nested Parameters block is not a service, and the
+        # DependOnService continuation line never became a value.
+        # @() around Where-Object: an empty result is $null, and
+        # $null.Count throws under StrictMode.
+        @($services | Where-Object { $_.Name -eq 'Parameters' }).Count | Should -Be 0
+        @($services | Where-Object { $_.Name -eq 'Tcpip' }).Count | Should -Be 1
+    }
+
+    It 'ConvertTo-CleanRegDword converts hex DWORD strings and returns $null for missing or garbage (round 20 guard fix)' {
+        ConvertTo-CleanRegDword -Raw '0x0' | Should -Be 0
+        ConvertTo-CleanRegDword -Raw '0x3' | Should -Be 3
+        ConvertTo-CleanRegDword -Raw '0x4' | Should -Be 4
+        ConvertTo-CleanRegDword -Raw $null | Should -BeNullOrEmpty
+        ConvertTo-CleanRegDword -Raw '' | Should -BeNullOrEmpty
+        ConvertTo-CleanRegDword -Raw 'not-a-number' | Should -BeNullOrEmpty
+    }
+
+    It 'Get-CleanServicesViaRegQuery returns the services from one reg.exe query /s call (round 20 guard fix)' {
+        # The 2-service count pins the HKLM/HKEY_LOCAL_MACHINE
+        # trap: reg.exe takes HKLM in the query but prints
+        # HKEY_LOCAL_MACHINE in every output header -- passing the
+        # short form to the parser matches nothing and the guard
+        # sees zero services.
+        $script:fakeRegQueryOutput = @(
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services',
+            '',
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services\FltMgr',
+            '    ErrorControl    REG_DWORD    0x3',
+            '    ImagePath    REG_SZ    system32\drivers\fltmgr.sys',
+            '    Start    REG_DWORD    0x0',
+            '    Type    REG_DWORD    0x2',
+            '',
+            'HKEY_LOCAL_MACHINE\MICPEV_TEST\ControlSet001\Services\FileCrypt',
+            '    ErrorControl    REG_DWORD    0x3',
+            '    ImagePath    REG_SZ    system32\drivers\filecrypt.sys',
+            '    Start    REG_DWORD    0x1',
+            '    Type    REG_DWORD    0x2',
+            ''
+        )
+        try {
+            $script:fakeRegFailuresRemaining = 0
+            $script:fakeRegCalls = 0
+            $services = Get-CleanServicesViaRegQuery -Key 'MICPEV_TEST'
+            # @() around $services: a function returning an empty array
+            # unrolls to $null, and $null.Count throws under StrictMode.
+            @($services).Count | Should -Be 2
+            $script:fakeRegCalls | Should -Be 1
+            $fc = @($services | Where-Object { $_.Name -eq 'FileCrypt' })[0]
+            $fc.Start | Should -Be 1
+            $fc.ErrorControl | Should -Be 3
+        }
+        finally { $script:fakeRegQueryOutput = $null }
+    }
+
+    It 'Get-CleanServicesViaRegQuery returns an empty list when the Services key is absent (round 20 guard fix)' {
+        # Same as the old Test-Path guard: a missing Services key means
+        # "no services to check", not a crash.
+        $script:fakeRegQueryOutput = $null
+        $script:fakeRegFailuresRemaining = -1
+        try {
+            $services = Get-CleanServicesViaRegQuery -Key 'MICPEV_TEST'
+            @($services).Count | Should -Be 0
+        }
+        finally { $script:fakeRegFailuresRemaining = 0 }
     }
 }
