@@ -75,9 +75,105 @@ function Mount-OfflineHive {
     return $key
 }
 
+function Test-CleanHiveFileReadable {
+    <#
+    .SYNOPSIS
+        True when a file can be opened for reading right now.
+    .DESCRIPTION
+        A hive file a still-mounted registry key holds is opened by
+        the kernel with no sharing, so a read open fails; a free file
+        opens. Returns $false only on a lock error (the wrapped
+        IOException); any other failure (ACL, a path that is a
+        directory) throws, so a real problem is never mistaken for a
+        transient lock. A missing file also returns $false -- the
+        caller decides whether that is an error.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $stream.Dispose()
+        return $true
+    }
+    catch {
+        $ex = $_.Exception
+        if ($ex -isnot [System.IO.IOException] -and $ex.InnerException -isnot [System.IO.IOException]) { throw }
+        return $false
+    }
+}
+
 function Dismount-OfflineHive {
-    param([Parameter(Mandatory)][string] $Key)
-    [void](Invoke-RegExe @('unload', "HKLM\$Key"))
+    <#
+    .SYNOPSIS
+        Unloads an offline hive mounted by Mount-OfflineHive.
+    .DESCRIPTION
+        The unload is verified, not assumed. reg.exe unload returns a
+        non-zero exit code while any handle to the hive is still open,
+        and the PowerShell registry provider is known to hold one
+        right after enumerating keys (Build-CleanPe.ps1 already
+        avoids the provider for the read-back step for exactly this
+        reason). The old version ignored the exit code, so a failed
+        unload was invisible: the hive stayed mounted, its file
+        stayed locked, and the build died much later in the wimlib
+        capture with error 47 / 84 (round 18, run 45642177192: the
+        guard's SYSTEM unload sits ~10 ms before capture, and the
+        file was still locked 20 s into the capture -- consistent
+        with "still mounted", not a transient close lag; it was also
+        the first round in which capture ran after the guard passed).
+        Retry with a GC + sleep between attempts -- the provider
+        releases its handles when the runspace cleans up -- and throw
+        loudly if the hive never unloads, so the build fails at the
+        unload point with a clear message instead of in capture.
+        When -HivePath is supplied, the hive file itself is then
+        polled for readability, so when Dismount returns the file is
+        free for wimlib to read (covers a post-unload close lag too).
+        Callers in a finally block: a throw here propagates, which is
+        intended -- proceeding with a mounted hive can only fail
+        later, with a worse error.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $Key,
+        [string] $HivePath,
+        [int] $MaxUnloadAttempts = 10,
+        [int] $UnloadRetryDelaySeconds = 1,
+        [int] $HiveFreeTimeoutSeconds = 30
+    )
+
+    if ($MaxUnloadAttempts -lt 1) { $MaxUnloadAttempts = 1 }
+    if ($HiveFreeTimeoutSeconds -lt 0) { $HiveFreeTimeoutSeconds = 0 }
+
+    Write-SubStep "unloading HKLM\$Key"
+    $lastOutput = ''
+    $lastExit = 1
+    for ($attempt = 1; $attempt -le $MaxUnloadAttempts; $attempt++) {
+        $r = Invoke-RegExe @('unload', "HKLM\$Key")
+        $lastExit = $r.ExitCode
+        $lastOutput = $r.Output
+        if ($lastExit -eq 0) { break }
+        if ($attempt -lt $MaxUnloadAttempts) {
+            Write-Warn ("reg unload HKLM\{0} failed (attempt {1}/{2}, exit {3}): {4}; retrying after GC + {5}s" -f $Key, $attempt, $MaxUnloadAttempts, $lastExit, $lastOutput, $UnloadRetryDelaySeconds)
+            [GC]::Collect()
+            if ($UnloadRetryDelaySeconds -gt 0) { Start-Sleep -Seconds $UnloadRetryDelaySeconds }
+        }
+    }
+    if ($lastExit -ne 0) {
+        throw ("could not unload hive HKLM\{0} after {1} attempts (round 18: a hive left mounted locks its file and the later wimlib capture fails with error 47/84): {2}" -f $Key, $MaxUnloadAttempts, $lastOutput)
+    }
+
+    if ($HivePath) {
+        if (-not (Test-Path -LiteralPath $HivePath)) {
+            throw "hive file is gone after unload: $HivePath"
+        }
+        $deadline = (Get-Date).AddSeconds($HiveFreeTimeoutSeconds)
+        while (-not (Test-CleanHiveFileReadable -Path $HivePath)) {
+            if ((Get-Date) -ge $deadline) {
+                throw ("hive file still locked {0}s after unloading HKLM\{1}: {2}" -f $HiveFreeTimeoutSeconds, $Key, $HivePath)
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
 }
 
 function Enable-WimBootStack {
@@ -193,8 +289,8 @@ function Enable-WimBootStack {
         Write-Step 'boot stack verified'
     }
     finally {
-        if ($imageKey) { Dismount-OfflineHive -Key $imageKey }
-        if ($donorKey) { Dismount-OfflineHive -Key $donorKey }
+        if ($imageKey) { Dismount-OfflineHive -Key $imageKey -HivePath $imageSystem }
+        if ($donorKey) { Dismount-OfflineHive -Key $donorKey -HivePath $donorSystem }
         Remove-Item -LiteralPath $donor -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -489,7 +585,7 @@ function Test-BootCriticalFiles {
                 Write-Warn ("non-critical boot/system drivers with missing files (failed load only, no 0x5A): {0}" -f ($driverCheck.NonCriticalMissing -join ', '))
             }
         }
-        finally { Dismount-OfflineHive -Key $key }
+        finally { Dismount-OfflineHive -Key $key -HivePath $systemHive }
     }
 
     [pscustomobject]@{

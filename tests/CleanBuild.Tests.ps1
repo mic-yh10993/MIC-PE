@@ -921,11 +921,37 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
             }, $true)
-        foreach ($name in @('Resolve-CleanDriverImagePath', 'Get-CleanRegistryValue', 'Test-CleanCriticalDriverFiles', 'Test-BootCriticalFiles', 'Assert-BootCritical')) {
+        foreach ($name in @('Resolve-CleanDriverImagePath', 'Get-CleanRegistryValue', 'Test-CleanCriticalDriverFiles', 'Test-BootCriticalFiles', 'Assert-BootCritical', 'Invoke-RegExe', 'Test-CleanHiveFileReadable', 'Dismount-OfflineHive')) {
             $fn = @($allFns | Where-Object { $_.Name -eq $name })
             $fn.Count | Should -Be 1
             . ([scriptblock]::Create($fn[0].Extent.Text))
         }
+
+        # Fake reg.exe for the Dismount-OfflineHive tests (round 19):
+        # a function wins over a native command, and it must set
+        # $global:LASTEXITCODE (a function never sets the caller's
+        # value by itself -- the Fake-Bcdedit lesson).
+        # $script:fakeRegFailuresRemaining counts down how many more
+        # unload calls fail before succeeding; -1 means "always fail".
+        # Each It resets both counters before calling Dismount.
+        $script:fakeRegFailuresRemaining = 0
+        $script:fakeRegCalls = 0
+        function reg.exe {
+            $script:fakeRegCalls++
+            if ($script:fakeRegFailuresRemaining -eq -1 -or $script:fakeRegFailuresRemaining -gt 0) {
+                if ($script:fakeRegFailuresRemaining -gt 0) { $script:fakeRegFailuresRemaining-- }
+                $global:LASTEXITCODE = 1
+                'ERROR: The parameter is incorrect.'
+            }
+            else {
+                $global:LASTEXITCODE = 0
+                'The operation completed successfully.'
+            }
+        }
+    }
+
+    AfterAll {
+        Remove-Item function:reg.exe -ErrorAction SilentlyContinue
     }
 
     It 'loads ClientBase first so Common wins Write-Step and StrictMode Latest' {
@@ -1189,5 +1215,120 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         # interpolate to the (empty) test-scope variable.
         $registryFn | Should -Match 'read-back: \$name Start is'
         $registryFn | Should -Match "read-back: Volume LowerFilters is"
+    }
+
+    It 'Dismount-OfflineHive retries a failed unload and succeeds when the handle is released (round 19 capture lock)' {
+        # Round 18: the guard's SYSTEM unload sits ~10 ms before
+        # capture; the old Dismount ignored reg.exe's exit code, so a
+        # failed unload (PS provider still holding a handle after
+        # enumerating 679 services) was invisible -- the hive stayed
+        # mounted, its file stayed locked, and wimlib capture died
+        # with error 47/84. The retry must actually retry.
+        $hiveFile = Join-Path $script:TempRoot ("micpe-dismount-{0}.hiv" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $hiveFile -Value 'FAKE' -NoNewline
+        try {
+            $script:fakeRegFailuresRemaining = 2
+            $script:fakeRegCalls = 0
+            Dismount-OfflineHive -Key 'MICPEV_TEST' -HivePath $hiveFile -MaxUnloadAttempts 5 -UnloadRetryDelaySeconds 0 -HiveFreeTimeoutSeconds 0
+            $script:fakeRegCalls | Should -Be 3
+        }
+        finally {
+            Remove-Item -LiteralPath $hiveFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Dismount-OfflineHive throws loudly when the unload never succeeds (round 19 capture lock)' {
+        # A hive that never unloads must fail the build at the unload
+        # point with a clear message -- not silently proceed to a
+        # capture that dies with error 47/84.
+        $script:fakeRegFailuresRemaining = -1
+        $script:fakeRegCalls = 0
+        { Dismount-OfflineHive -Key 'MICPEV_TEST' -MaxUnloadAttempts 3 -UnloadRetryDelaySeconds 0 } | Should -Throw '*could not unload hive*'
+        $script:fakeRegCalls | Should -Be 3
+    }
+
+    It 'Test-CleanHiveFileReadable returns $false for a locked file and $true once it is free (round 19 capture lock)' {
+        # A still-mounted hive is opened by the kernel with no
+        # sharing, so a read open fails; a free file opens. The lock
+        # is held by a background job (a real OS lock, not a mock):
+        # .NET enforces FileShare on Linux too (verified: an open
+        # with FileShare.None makes a Read open throw).
+        $hiveFile = Join-Path $script:TempRoot ("micpe-locked-{0}.hiv" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $hiveFile -Value 'FAKE' -NoNewline
+        $job = $null
+        try {
+            $job = Start-Job -ScriptBlock {
+                param($p)
+                $s = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                Start-Sleep -Seconds 4
+                $s.Dispose()
+            } -ArgumentList $hiveFile
+            $lockedBy = (Get-Date).AddSeconds(10)
+            while (Test-CleanHiveFileReadable -Path $hiveFile) {
+                if ((Get-Date) -ge $lockedBy) { throw 'test setup: the lock job never acquired the file lock' }
+                Start-Sleep -Milliseconds 200
+            }
+            Test-CleanHiveFileReadable -Path $hiveFile | Should -Be $false
+            Wait-Job $job | Out-Null
+            Test-CleanHiveFileReadable -Path $hiveFile | Should -Be $true
+        }
+        finally {
+            if ($job) { Remove-Job $job -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $hiveFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Dismount-OfflineHive waits for a locked hive file after a successful unload (round 19 capture lock)' {
+        # The unload itself succeeds (fake reg.exe exits 0), but the
+        # file is still locked -- Dismount must wait for it to become
+        # readable instead of returning into a capture that cannot
+        # open it. The job holds the lock for 4 s; Dismount must take
+        # at least 2 s (a return in ~0 s would prove the poll never
+        # waited).
+        $hiveFile = Join-Path $script:TempRoot ("micpe-locked-wait-{0}.hiv" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $hiveFile -Value 'FAKE' -NoNewline
+        $job = $null
+        try {
+            $job = Start-Job -ScriptBlock {
+                param($p)
+                $s = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                Start-Sleep -Seconds 4
+                $s.Dispose()
+            } -ArgumentList $hiveFile
+            $lockedBy = (Get-Date).AddSeconds(10)
+            while (Test-CleanHiveFileReadable -Path $hiveFile) {
+                if ((Get-Date) -ge $lockedBy) { throw 'test setup: the lock job never acquired the file lock' }
+                Start-Sleep -Milliseconds 200
+            }
+            $script:fakeRegFailuresRemaining = 0
+            $script:fakeRegCalls = 0
+            $start = Get-Date
+            Dismount-OfflineHive -Key 'MICPEV_TEST' -HivePath $hiveFile -MaxUnloadAttempts 1 -UnloadRetryDelaySeconds 0 -HiveFreeTimeoutSeconds 10
+            $elapsed = (Get-Date) - $start
+            $elapsed.TotalSeconds | Should -BeGreaterThan 2
+            $script:fakeRegCalls | Should -Be 1
+            Wait-Job $job | Out-Null
+            Test-CleanHiveFileReadable -Path $hiveFile | Should -Be $true
+        }
+        finally {
+            if ($job) { Remove-Job $job -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $hiveFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Test-BootCriticalFiles and Enable-WimBootStack pass -HivePath to Dismount-OfflineHive (round 19 capture lock)' {
+        # The readability poll after unload only runs when the caller
+        # passes the hive file: both finally blocks must pass it, or
+        # the guard's SYSTEM -- the last unload before capture -- is
+        # never checked.
+        $libText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/ClientBase.ps1') -Raw
+        $libText | Should -Match 'Dismount-OfflineHive -Key \$key -HivePath \$systemHive'
+        $libText | Should -Match 'Dismount-OfflineHive -Key \$imageKey -HivePath \$imageSystem'
+        $libText | Should -Match 'Dismount-OfflineHive -Key \$donorKey -HivePath \$donorSystem'
+        $libText | Should -Match 'could not unload hive'
+        $dismount = ($libText -split 'function Dismount-OfflineHive')[1] -split 'function Enable-WimBootStack' | Select-Object -First 1
+        $dismount | Should -Match '\$r\.ExitCode'
+        $dismount | Should -Match 'lastExit -ne 0'
+        $dismount | Should -Match 'MaxUnloadAttempts'
     }
 }
