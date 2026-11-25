@@ -1113,6 +1113,21 @@ function Assert-CleanRegistry {
         # LowerFilters line at all, so the trim could not be confirmed.
         Write-SubStep "read-back: Volume LowerFilters is '$($volumeClass['LowerFilters'])'"
 
+        # Round 21: crash-dump capture for the 0x5A bugcheck parameters.
+        # CrashDumpEnabled=1 (Complete) + DedicatedDumpFile on the QEMU
+        # second disk (C:) so the blue screen writes the dump straight
+        # to that disk; AutoReboot=0 parks QEMU on the blue screen.
+        # Warn-only like every other read-back (early-debugging rule).
+        $crashControl = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey 'ControlSet001\Control\CrashControl'
+        Assert-ReadBack -Condition ($null -ne $crashControl) -Message 'read-back: PE-SYS\ControlSet001\Control\CrashControl is missing'
+        Assert-ReadBack -Condition ($crashControl['CrashDumpEnabled'] -eq '0x1') -Message "read-back: CrashDumpEnabled is '$($crashControl['CrashDumpEnabled'])', expected 0x1"
+        Assert-ReadBack -Condition ($crashControl['DedicatedDumpFile'] -eq 'C:\dedicateddumpfile.sys') -Message "read-back: DedicatedDumpFile is '$($crashControl['DedicatedDumpFile'])', expected C:\dedicateddumpfile.sys"
+        Assert-ReadBack -Condition ($crashControl['DumpFile'] -eq 'C:\MEMORY.DMP') -Message "read-back: DumpFile is '$($crashControl['DumpFile'])', expected C:\MEMORY.DMP"
+        Assert-ReadBack -Condition ($crashControl['AutoReboot'] -eq '0x0') -Message "read-back: AutoReboot is '$($crashControl['AutoReboot'])', expected 0x0"
+        # Round 17: print the actual values -- a silent success leaves
+        # no evidence in the log.
+        Write-SubStep "read-back: CrashControl CrashDumpEnabled is $($crashControl['CrashDumpEnabled']), DedicatedDumpFile is '$($crashControl['DedicatedDumpFile'])', DumpFile is '$($crashControl['DumpFile'])', AutoReboot is $($crashControl['AutoReboot'])'"
+
         $winlogon = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon'
         Assert-ReadBack -Condition ($null -ne $winlogon) -Message 'read-back: PE-SOFT Winlogon is missing'
         Assert-ReadBack -Condition ($winlogon['Shell'] -eq 'explorer.exe') -Message "read-back: Winlogon Shell is '$($winlogon['Shell'])', expected explorer.exe"

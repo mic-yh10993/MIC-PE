@@ -926,3 +926,114 @@ Describe 'Test-CleanScreenshot' {
         $script:cleanVerify | Should -Match 'every screenshot is a black screen'
     }
 }
+
+Describe 'Round 21 crash-dump capture helpers' {
+    BeforeAll {
+        # Same dot-source pattern as Find-CleanOvmfVars: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:capDir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-cap-$(Get-Random)"
+        $script:capShare = Join-Path $script:capDir 'share'
+        New-Item -ItemType Directory -Path $script:capShare -Force | Out-Null
+        $script:capIso = Join-Path $script:capDir 'test.iso'
+        New-Item -ItemType File -Path $script:capIso -Force | Out-Null
+        $script:capWork = Join-Path $script:capDir 'work'
+        New-Item -ItemType Directory -Path $script:capWork -Force | Out-Null
+        $script:capCode = Join-Path $script:capShare 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:capCode, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:capIso -OvmfPath $script:capCode -WorkDir $script:capWork
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:capDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'parses a real 0x5A i~bugcheck output into code and four parameters' {
+        # Example A from the round 21 research (Tom's Hardware, filecrypt):
+        # Arg2/Arg3 are kernel pointers to UNICODE_STRINGs, Arg4 is the
+        # NTSTATUS that failed the load.
+        $out = @'
+bugcheck=0x0000005a (CRITICAL_SERVICE_FAILED)
+bugcheck.arg1=0x0000000000000001
+bugcheck.arg2=0xffffba8f4e9f8c50
+bugcheck.arg3=0xffffce06bf0caa90
+bugcheck.arg4=0xffffffffc0000428
+'@
+        $parsed = ConvertFrom-CleanRizinBugCheck -Output $out
+        $parsed.BugCheckCode | Should -Be '0x0000005a'
+        $parsed.Arg1 | Should -Be '0x0000000000000001'
+        $parsed.Arg2 | Should -Be '0xffffba8f4e9f8c50'
+        $parsed.Arg3 | Should -Be '0xffffce06bf0caa90'
+        $parsed.Arg4 | Should -Be '0xffffffffc0000428'
+    }
+
+    It 'parses the CmBootLastKnownGood example (round 21 research, example B)' {
+        $out = @'
+bugcheck=0x0000005a (CRITICAL_SERVICE_FAILED)
+bugcheck.arg1=0x0000000000000001
+bugcheck.arg2=0xffffdd8d275d1fd0
+bugcheck.arg3=0xffffa202e8dfd6c0
+bugcheck.arg4=0xfffffffc0e90002
+'@
+        $parsed = ConvertFrom-CleanRizinBugCheck -Output $out
+        $parsed.BugCheckCode | Should -Be '0x0000005a'
+        $parsed.Arg4 | Should -Be '0xfffffffc0e90002'
+    }
+
+    It 'returns null when Rizin printed no bugcheck line' {
+        ConvertFrom-CleanRizinBugCheck -Output 'no dump loaded' | Should -BeNullOrEmpty
+        ConvertFrom-CleanRizinBugCheck -Output '' | Should -BeNullOrEmpty
+    }
+
+    It 'tolerates a partial i~bugcheck (missing parameters stay empty)' {
+        $out = @'
+bugcheck=0x0000005a (CRITICAL_SERVICE_FAILED)
+bugcheck.arg1=0x0000000000000001
+'@
+        $parsed = ConvertFrom-CleanRizinBugCheck -Output $out
+        $parsed.BugCheckCode | Should -Be '0x0000005a'
+        $parsed.Arg1 | Should -Be '0x0000000000000001'
+        $parsed.Arg2 | Should -BeNullOrEmpty
+        $parsed.Arg4 | Should -BeNullOrEmpty
+    }
+
+    It 'builds a diskpart script that creates an expandable VHDX, attaches, partitions and quick-formats NTFS' {
+        $script = New-CleanDiskpartScript -VhdxPath 'C:\x\micpe-dumpdisk.vhdx' -SizeMb 8192 -Letter 'Z'
+        $script | Should -Match 'create vdisk file="C:\\x\\micpe-dumpdisk\.vhdx" maximum=8192 type=expandable'
+        $script | Should -Match 'select vdisk file="C:\\x\\micpe-dumpdisk\.vhdx"'
+        $script | Should -Match 'attach vdisk'
+        $script | Should -Match 'create partition primary'
+        $script | Should -Match 'format fs=ntfs quick'
+        $script | Should -Match 'assign letter=Z'
+    }
+
+    It 'returns the first free drive letter from Z Y X W V U T' {
+        Find-CleanFreeDriveLetter -UsedLetters @('C', 'D') | Should -Be 'Z'
+        Find-CleanFreeDriveLetter -UsedLetters @('C', 'Z', 'Y') | Should -Be 'X'
+        Find-CleanFreeDriveLetter -UsedLetters @('Z', 'Y', 'X', 'W', 'V', 'U', 'T') | Should -BeNullOrEmpty
+    }
+
+    It 'resolves qemu-img next to qemu-system-x86_64' {
+        Get-CleanQemuImgPath -QemuPath 'C:\Program Files\qemu\qemu-system-x86_64.exe' | Should -Be 'C:\Program Files\qemu\qemu-img.exe'
+        Get-CleanQemuImgPath -QemuPath 'qemu-system-x86_64' | Should -Be 'qemu-img'
+        # The separator found is kept (the function must not depend on
+        # Split-Path/Join-Path, which are platform-specific: on the Linux
+        # test host Join-Path throws DriveNotFoundException on 'C:').
+        Get-CleanQemuImgPath -QemuPath '/usr/bin/qemu-system-x86_64' | Should -Be '/usr/bin/qemu-img.exe'
+    }
+
+    It 'attaches the crash-dump disk as ide index 0 (primary master, before the CD-ROM)' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'if=ide,index=0'
+        $verify | Should -Match 'format=qcow2'
+        $verify | Should -Match 'New-CleanCrashDumpDisk'
+    }
+
+    It 'captures the dump after QEMU exits, even when the screen gate threw, and writes micpe-bugcheck.txt' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'Invoke-CleanCrashDumpCapture'
+        $verify | Should -Match 'micpe-bugcheck\.txt'
+        $verify | Should -Match 'Get-CleanRizinPath'
+        $verify | Should -Match 'i~bugcheck'
+    }
+}

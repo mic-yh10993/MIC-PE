@@ -209,6 +209,18 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $readBack | Should -Match "LowerFilters.*-notmatch 'rdyboost'"
     }
 
+    It 'reads back the CrashControl dump capture values (round 21)' {
+        # Round 21: the 0x5A parameters must come from a crash dump, so
+        # the read-back must verify CrashDumpEnabled=1, the dedicated
+        # dump file path, the DumpFile path and AutoReboot=0 landed.
+        $readBack = ($script:CleanScriptText -split 'function Assert-CleanRegistry')[1] -split 'function Invoke-CleanCaptureStep' | Select-Object -First 1
+        $readBack | Should -Match ([regex]::Escape('ControlSet001\Control\CrashControl'))
+        $readBack | Should -Match "CrashDumpEnabled.*-eq '0x1'"
+        $readBack | Should -Match "DedicatedDumpFile.*-eq 'C:\\dedicateddumpfile\.sys'"
+        $readBack | Should -Match "DumpFile.*-eq 'C:\\MEMORY\.DMP'"
+        $readBack | Should -Match "AutoReboot.*-eq '0x0'"
+    }
+
     It 'captures the staging tree into a fresh boot.wim and packages a boot.wim-only ISO' {
         $script:CleanScriptText | Should -Match 'New-WimCapture'
         $script:CleanScriptText | Should -Match 'Set-WimBootIndex'
@@ -378,6 +390,26 @@ Describe 'clean .reg patches' {
         $section | Should -Match '"LowerFilters"=hex\(7\):66,00,76,00,65,00,76,00,6f,00,6c,00,00,00,00,00'
         $section | Should -Not -Match 'iorate'
         $section | Should -Not -Match 'rdyboost'
+    }
+
+    It '10-clean-boot.reg enables the crash-dump capture for the 0x5A parameters (round 21)' {
+        # Round 21: the 0x5A page has no Parameters section and the blue
+        # screen prints only the stop code, so the parameters must come
+        # from a crash dump; the offline analysis exhausted every static
+        # hypothesis. CrashDumpEnabled=1 (Complete) + DedicatedDumpFile
+        # on the QEMU second disk (C:) writes the dump straight to that
+        # disk at bugcheck time; AutoReboot=0 parks QEMU on the blue
+        # screen. DumpFile is REG_EXPAND_SZ (hex(2)) to match the native
+        # type; DedicatedDumpFile is REG_SZ (plain string).
+        $text = $script:RegTexts['10-clean-boot.reg']
+        $text | Should -Match 'PE-SYS\\ControlSet001\\Control\\CrashControl'
+        $section = ($text -split 'Control\\CrashControl')[1]
+        $section | Should -Match '"CrashDumpEnabled"=dword:00000001'
+        $section | Should -Match '"DedicatedDumpFile"="C:\\\\dedicateddumpfile\.sys"'
+        $section | Should -Match '"DumpFile"=hex\(2\):43,00,3a,00,5c,00,4d,00,45,00,4d,00,4f,00,52,00,59,00,2e,00,44,00,4d,00,50,00,00,00'
+        $section | Should -Match '"AutoReboot"=dword:00000000'
+        $section | Should -Match '"LogEvent"=dword:00000001'
+        $section | Should -Match '"Overwrite"=dword:00000001'
     }
 
     It '20-clean-start11.reg carries Start11 settings but no pinned-item groups' {
