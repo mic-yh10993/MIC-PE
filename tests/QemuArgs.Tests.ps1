@@ -824,20 +824,52 @@ Describe 'Test-CleanScreenshot' {
         $c.Classification | Should -Be 'Other'
     }
 
-    It 'classifies a solid BSOD blue (0,120,215) frame as Recovery' {
-        # The classic bugcheck blue must trip the same rule as the
-        # Recovery blue: a blue screen anywhere in the run fails the gate.
+    It 'classifies a solid BSOD blue (0,120,215) frame as BlueScreen, not Recovery' {
+        # The classic bugcheck blue must trip the same gate as the
+        # Recovery blue, but must not be reported as Recovery: round 14
+        # died on a BSOD (IO1 INITIALIZATION FAILED) and the old code
+        # blamed 0xc0000428 for it.
         $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-shots-bsod-$(Get-Random)"
         try {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
             $ppm = Join-Path $dir 'bsod.ppm'
             [System.IO.File]::WriteAllBytes($ppm, (New-SolidPpm -Width 64 -Height 40 -R 0 -G 120 -B 215))
             $c = Test-CleanScreenshot -Path $ppm
-            $c.Classification | Should -Be 'Recovery'
+            $c.Classification | Should -Be 'BlueScreen'
+            $c.BlueMeanR | Should -Be 0
         }
         finally {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It 'classifies a solid Recovery blue (32,103,178) frame as Recovery' {
+        # The Recovery blue has red 32, so the mean-red rule must keep it
+        # on the Recovery side of the 16 midpoint.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-shots-rec-$(Get-Random)"
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $ppm = Join-Path $dir 'rec.ppm'
+            [System.IO.File]::WriteAllBytes($ppm, (New-SolidPpm -Width 64 -Height 40 -R 32 -G 103 -B 178))
+            $c = Test-CleanScreenshot -Path $ppm
+            $c.Classification | Should -Be 'Recovery'
+            $c.BlueMeanR | Should -Be 32
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'classifies the real round-14 shot-02 (BSOD, IO1 INITIALIZATION FAILED) as BlueScreen' {
+        # Fixture is a 64x40 crop of the real r90 shot-02.ppm, taken from
+        # the top-left corner: pure BSOD blue as rendered in QEMU
+        # (0,61,146), mean red ~1. Round 14 shot-02..07 were all this
+        # screen; the old code called it Recovery and blamed 0xc0000428.
+        $ppm = Join-Path $script:fixtures 'r90-shot-02-bsod.ppm'
+        $c = Test-CleanScreenshot -Path $ppm
+        $c.Classification | Should -Be 'BlueScreen'
+        $c.BlueFraction | Should -BeGreaterThan 0.9
+        $c.BlueMeanR | Should -BeLessThan 16
     }
 
     It 'does not mistake a dark LogonUI-like background for Recovery' {
@@ -884,10 +916,13 @@ Describe 'Test-CleanScreenshot' {
         }
     }
 
-    It 'the verifier fails the run when any screenshot is a Recovery screen' {
+    It 'the verifier fails the run when any screenshot is a blue failure screen, and names its kind' {
         $script:cleanVerify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\\src\\ci\\Invoke-CleanQemuVerify.ps1') -Raw
         $script:cleanVerify | Should -Match 'Test-CleanScreenshot -Path'
-        $script:cleanVerify | Should -Match "QEMU screen check failed.*Recovery screen"
+        $script:cleanVerify | Should -Match "QEMU screen check failed"
+        $script:cleanVerify | Should -Match 'bugcheck blue screen'
+        $script:cleanVerify | Should -Match 'Windows Recovery screen'
+        $script:cleanVerify | Should -Not -Match 'e\.g\. 0xc0000428'
         $script:cleanVerify | Should -Match 'every screenshot is a black screen'
     }
 }

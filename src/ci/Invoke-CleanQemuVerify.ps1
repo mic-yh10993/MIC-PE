@@ -194,20 +194,31 @@ function Test-CleanScreenshot {
         encoder already proved this approach works there. Reads the PPM
         raster, samples a grid of pixels, and classifies:
 
-          Recovery  >= 50% of sampled pixels are Windows Recovery/BSOD
-                    blue: bright blue, B >= 100, B > R + 40, G > R + 20.
-                    The round-10 Recovery screen is (32,103,178) and
-                    fills 99% of the frame; a BSOD (0,120,215) matches
-                    the same rule. A dark LogonUI background does not:
-                    its blue is dark (B < 100) and desaturated.
+          Recovery  >= 50% of sampled pixels are bright blue, and the
+                    mean red of those blue pixels is above 16: the
+                    Windows Recovery screen, (32,103,178), fills 99%
+                    of the frame in round 10. A dark LogonUI background
+                    does not trip this: its blue is dark (B < 100)
+                    and desaturated.
+          BlueScreen >= 50% of sampled pixels are bright blue, and the
+                    mean red of those blue pixels is 16 or below: a
+                    bugcheck blue screen. The classic BSOD blue is
+                    (0,120,215); round 14 rendered it as (0,61,146)
+                    in QEMU, mean red ~1. Both have red 0, while the
+                    Recovery blue has red 32, so the midpoint 16
+                    separates them. Round 14 lesson: the old code lumped
+                    both blues into 'Recovery' and the caller blamed
+                    0xc0000428 for a BSOD that was really
+                    IO1 INITIALIZATION FAILED.
           Boot      >= 80% of sampled pixels are near-black (all channels
                     < 16): the TianoCore firmware screen. Round-10 shot-01
                     is 98% black.
           Other     anything else (LogonUI, desktop, Start menu).
 
         Returns a [pscustomobject] with Classification, BlueFraction,
-        BlackFraction, Sampled and Path. Throws on an unreadable or
-        malformed PPM; the caller treats that as unknown, not a failure.
+        BlackFraction, BlueMeanR/G/B, Sampled and Path. Throws on an
+        unreadable or malformed PPM; the caller treats that as unknown,
+        not a failure.
     #>
     [CmdletBinding()]
     param(
@@ -254,6 +265,9 @@ function Test-CleanScreenshot {
     $sampled = 0
     $blue = 0
     $black = 0
+    $blueSumR = 0
+    $blueSumG = 0
+    $blueSumB = 0
     for ($y = 0; $y -lt $height; $y += $stepY) {
         for ($x = 0; $x -lt $width; $x += $stepX) {
             $off = $rasterStart + ($y * $width + $x) * 3
@@ -261,14 +275,29 @@ function Test-CleanScreenshot {
             $g = $bytes[$off + 1]
             $b = $bytes[$off + 2]
             $sampled++
-            if ($b -ge 100 -and $b -gt ($r + 40) -and $g -gt ($r + 20)) { $blue++ }
+            if ($b -ge 100 -and $b -gt ($r + 40) -and $g -gt ($r + 20)) {
+                $blue++
+                $blueSumR += $r
+                $blueSumG += $g
+                $blueSumB += $b
+            }
             if ($r -lt 16 -and $g -lt 16 -and $b -lt 16) { $black++ }
         }
     }
     $blueFraction = if ($sampled -gt 0) { $blue / $sampled } else { 0 }
     $blackFraction = if ($sampled -gt 0) { $black / $sampled } else { 0 }
+    $blueMeanR = if ($blue -gt 0) { $blueSumR / $blue } else { 0 }
+    $blueMeanG = if ($blue -gt 0) { $blueSumG / $blue } else { 0 }
+    $blueMeanB = if ($blue -gt 0) { $blueSumB / $blue } else { 0 }
     $classification = 'Other'
-    if ($blueFraction -ge 0.5) { $classification = 'Recovery' }
+    if ($blueFraction -ge 0.5) {
+        # Recovery blue (32,103,178) has red 32; both BSOD blues --
+        # classic (0,120,215) and round-14 QEMU (0,61,146) -- have red 0.
+        # The midpoint 16 separates them; white text / QR pixels are not
+        # blue-matched, so they do not move the mean.
+        if ($blueMeanR -le 16) { $classification = 'BlueScreen' }
+        else { $classification = 'Recovery' }
+    }
     elseif ($blackFraction -ge 0.8) { $classification = 'Boot' }
 
     return [pscustomobject]@{
@@ -276,6 +305,9 @@ function Test-CleanScreenshot {
         Classification = $classification
         BlueFraction  = $blueFraction
         BlackFraction = $blackFraction
+        BlueMeanR     = $blueMeanR
+        BlueMeanG     = $blueMeanG
+        BlueMeanB     = $blueMeanB
         Sampled       = $sampled
     }
 }
@@ -478,9 +510,12 @@ try {
     # Screen-content gate (round 10 lesson): counting screenshots is not
     # a pass/fail signal -- round 10 captured 7 of 7 while the guest had
     # died on the Windows Recovery screen. Classify each shot by its
-    # dominant content; a Recovery screen anywhere in the run means the
-    # system never booted, so the step fails and says so instead of
-    # pressing Enter / Win into a dead guest and calling it a pass.
+    # dominant content; a blue failure screen (Recovery or BSOD) anywhere
+    # in the run means the system never booted, so the step fails and
+    # says which kind it was instead of pressing Enter / Win into a dead
+    # guest and calling it a pass. Round 14 lesson: do not default the
+    # blame to 0xc0000428 -- the blue screen there was a bugcheck
+    # (IO1 INITIALIZATION FAILED), not Recovery.
     $classifications = @()
     Get-ChildItem -LiteralPath $shotDir -File -Filter 'shot-*.ppm' |
         Sort-Object Name |
@@ -488,16 +523,21 @@ try {
             try {
                 $c = Test-CleanScreenshot -Path $_.FullName
                 $classifications += $c
-                Write-Host ("  shot content: {0}: {1} (blue {2:P0}, black {3:P0}, {4} sampled)" -f $_.Name, $c.Classification, $c.BlueFraction, $c.BlackFraction, $c.Sampled)
+                Write-Host ("  shot content: {0}: {1} (blue {2:P0}, black {3:P0}, blue mean RGB {4:N0}/{5:N0}/{6:N0}, {7} sampled)" -f $_.Name, $c.Classification, $c.BlueFraction, $c.BlackFraction, $c.BlueMeanR, $c.BlueMeanG, $c.BlueMeanB, $c.Sampled)
             }
             catch {
                 Write-Host ("!!! could not classify {0}: {1} (treated as unknown, not a failure)" -f $_.Name, $_.Exception.Message)
             }
         }
-    $recoveryShots = @($classifications | Where-Object { $_.Classification -eq 'Recovery' })
-    if ($recoveryShots.Count -gt 0) {
-        $names = ($recoveryShots | ForEach-Object { Split-Path -Leaf $_.Path }) -join ', '
-        throw ("QEMU screen check failed: {0} show(s) the Windows Recovery screen (boot failure, e.g. 0xc0000428) -- the system never reached LogonUI/desktop: {1}" -f $recoveryShots.Count, $names)
+    $blueFailureShots = @($classifications | Where-Object { $_.Classification -eq 'Recovery' -or $_.Classification -eq 'BlueScreen' })
+    if ($blueFailureShots.Count -gt 0) {
+        $names = ($blueFailureShots | ForEach-Object { Split-Path -Leaf $_.Path }) -join ', '
+        $kinds = [System.Collections.Generic.List[string]]::new()
+        $recoveryCount = @($blueFailureShots | Where-Object { $_.Classification -eq 'Recovery' }).Count
+        if ($recoveryCount -gt 0) { $kinds.Add(("{0} show(s) the Windows Recovery screen" -f $recoveryCount)) }
+        $bsodCount = @($blueFailureShots | Where-Object { $_.Classification -eq 'BlueScreen' }).Count
+        if ($bsodCount -gt 0) { $kinds.Add(("{0} show(s) a bugcheck blue screen (BSOD)" -f $bsodCount)) }
+        throw ("QEMU screen check failed: {0} -- the system never reached LogonUI/desktop: {1}" -f ($kinds -join '; '), $names)
     }
     if ($classifications.Count -gt 0 -and @($classifications | Where-Object { $_.Classification -ne 'Boot' }).Count -eq 0) {
         throw 'QEMU screen check failed: every screenshot is a black screen (boot stalled at firmware / no display output); the system never reached LogonUI'
