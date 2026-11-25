@@ -988,17 +988,69 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
 
     It 'Resolve-CleanDriverImagePath handles every ImagePath spelling (round 16 guard)' {
         $root = Join-Path $script:TempRoot ("micpe-driverpath-{0}" -f [guid]::NewGuid())
+        # Round 18: the remainder is relative to the Windows directory
+        # under the staging root, so every spelling resolves under
+        # Windows\... -- the old expectations (no Windows\) were the
+        # wrong-path bug that killed run 45628441308 with 28 EC=3 +
+        # 83 non-critical false positives.
         Resolve-CleanDriverImagePath -ImagePath 'system32\drivers\filecrypt.sys' -ServiceName 'FileCrypt' -ImageRoot $root |
-            Should -Be (Join-Path $root 'system32\drivers\filecrypt.sys')
+            Should -Be (Join-Path $root 'Windows\system32\drivers\filecrypt.sys')
         Resolve-CleanDriverImagePath -ImagePath '\SystemRoot\system32\drivers\filecrypt.sys' -ServiceName 'FileCrypt' -ImageRoot $root |
-            Should -Be (Join-Path $root 'system32\drivers\filecrypt.sys')
+            Should -Be (Join-Path $root 'Windows\system32\drivers\filecrypt.sys')
         Resolve-CleanDriverImagePath -ImagePath '%SystemRoot%\System32\drivers\filecrypt.sys' -ServiceName 'FileCrypt' -ImageRoot $root |
-            Should -Be (Join-Path $root 'System32\drivers\filecrypt.sys')
+            Should -Be (Join-Path $root 'Windows\System32\drivers\filecrypt.sys')
+        Resolve-CleanDriverImagePath -ImagePath 'System32\DriverStore\FileRepository\basicrender.inf_amd64_x\BasicRender.sys' -ServiceName 'BasicRender' -ImageRoot $root |
+            Should -Be (Join-Path $root 'Windows\System32\DriverStore\FileRepository\basicrender.inf_amd64_x\BasicRender.sys')
+        Resolve-CleanDriverImagePath -ImagePath '\??\C:\Windows\System32\drivers\disk.sys' -ServiceName 'disk' -ImageRoot $root |
+            Should -Be (Join-Path $root 'Windows\System32\drivers\disk.sys')
+        Resolve-CleanDriverImagePath -ImagePath 'C:\Windows\System32\drivers\disk.sys' -ServiceName 'disk' -ImageRoot $root |
+            Should -Be (Join-Path $root 'Windows\System32\drivers\disk.sys')
         # No ImagePath defaults to System32\drivers\<ServiceName>.sys.
         Resolve-CleanDriverImagePath -ImagePath $null -ServiceName 'CimFS' -ImageRoot $root |
-            Should -Be (Join-Path $root 'System32\drivers\CimFS.sys')
+            Should -Be (Join-Path $root 'Windows\System32\drivers\CimFS.sys')
         Resolve-CleanDriverImagePath -ImagePath '' -ServiceName 'CimFS' -ImageRoot $root |
-            Should -Be (Join-Path $root 'System32\drivers\CimFS.sys')
+            Should -Be (Join-Path $root 'Windows\System32\drivers\CimFS.sys')
+    }
+
+    It 'the guard finds drivers under a staging root and still catches a truly missing EC=3 driver (round 18 guard fix)' {
+        # Round 18 regression: production calls the guard with
+        # -ImageRoot $paths.Staging, whose files live under
+        # Windows\System32\drivers\, not directly under the root.
+        # The old resolver dropped the Windows\ segment, so every
+        # driver looked missing (run 45628441308). The file must sit
+        # exactly where the ImagePath resolves: the test host (Linux)
+        # is case-sensitive, so 'system32' in the ImagePath and
+        # 'System32' in the fixture path are different directories
+        # there (on Windows they are the same).
+        $root = Join-Path $script:TempRoot ("micpe-stagingroot-{0}" -f [guid]::NewGuid())
+        $fltMgrPath = Join-Path $root 'Windows/system32/drivers/fltmgr.sys'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $fltMgrPath) -Force | Out-Null
+        Set-Content -LiteralPath $fltMgrPath -Value 'FAKE' -NoNewline
+        try {
+            # The resolved path must be the staging-root file that
+            # actually exists -- not a path one level too high.
+            Test-Path -LiteralPath $fltMgrPath | Should -Be $true
+            Resolve-CleanDriverImagePath -ImagePath 'system32\drivers\fltmgr.sys' -ServiceName 'FltMgr' -ImageRoot $root |
+                Should -Be $fltMgrPath
+            $services = @(
+                [pscustomobject]@{ Name = 'FltMgr'; Start = 0; ErrorControl = 3; Type = 2; ImagePath = 'system32\drivers\fltmgr.sys' }
+                [pscustomobject]@{ Name = 'FileCrypt'; Start = 1; ErrorControl = 3; Type = 2; ImagePath = 'system32\drivers\filecrypt.sys' }
+            )
+            # Present EC=3 driver: no false positive; genuinely
+            # missing EC=3 driver: still caught.
+            $r = Test-CleanCriticalDriverFiles -ImageRoot $root -Services $services
+            $r.CriticalMissing | Should -Be @('FileCrypt')
+            # Remove the file: the guard must now flag FltMgr too,
+            # or the fix turned the guard into a no-op.
+            Remove-Item -LiteralPath $fltMgrPath -Force
+            $r2 = Test-CleanCriticalDriverFiles -ImageRoot $root -Services $services
+            $r2.CriticalMissing | Should -Contain 'FltMgr'
+            $r2.CriticalMissing | Should -Contain 'FileCrypt'
+            $r2.CriticalMissing.Count | Should -Be 2
+        }
+        finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     It 'Test-CleanCriticalDriverFiles flags a missing ErrorControl=3 driver and only warns on the rest (round 16 guard)' {

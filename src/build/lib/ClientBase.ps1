@@ -270,9 +270,10 @@ function Resolve-CleanDriverImagePath {
         '\SystemRoot\system32\drivers\x.sys',
         '%SystemRoot%\System32\drivers\x.sys', a DriverStore path).
         A driver with no ImagePath defaults to
-        System32\drivers\<ServiceName>.sys. Returns the absolute path
-        under $ImageRoot; the file itself may not exist -- callers
-        Test-Path the result.
+        System32\drivers\<ServiceName>.sys. The remainder is relative
+        to the Windows directory under $ImageRoot, and the returned
+        path is $ImageRoot\Windows\<remainder>; the file itself may
+        not exist -- callers Test-Path the result.
     #>
     [CmdletBinding()]
     param(
@@ -285,10 +286,28 @@ function Resolve-CleanDriverImagePath {
     if ([string]::IsNullOrWhiteSpace($rel)) {
         $rel = "System32\drivers\$ServiceName.sys"
     }
-    # Strip a %SystemRoot% / \SystemRoot prefix in any spelling; what
-    # remains is relative to the image root.
+    # Strip a %SystemRoot% / \SystemRoot prefix in any spelling, and
+    # any NT-path (\??\) or drive-letter prefix; what remains is
+    # relative to the Windows directory.
     $rel = $rel -replace '^(?i)(%SystemRoot%|\\SystemRoot|SystemRoot)\\?', ''
+    $rel = $rel -replace '^(?i)\\*\?+\\[A-Za-z]:\\', ''
+    $rel = $rel -replace '^(?i)[A-Za-z]:\\', ''
     $rel = $rel.TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($rel)) {
+        $rel = "System32\drivers\$ServiceName.sys"
+    }
+    # The image root is the staging root, which holds a Windows\
+    # subdir (the fixed manifest in Test-BootCriticalFiles joins
+    # 'Windows\...' paths onto it, and production calls this guard
+    # with -ImageRoot $paths.Staging). The remainder is relative to
+    # that Windows directory, not to the staging root itself.
+    # Round 18: the old code joined the remainder straight onto
+    # $ImageRoot and looked in staging\System32\... instead of
+    # staging\Windows\System32\..., so every driver looked "missing"
+    # and Assert-BootCritical refused to capture (run 45628441308:
+    # 28 EC=3 + 83 non-critical false positives, including the
+    # just-transplanted FBWF/WimFsf/Ramdisk).
+    if ($rel -notmatch '^(?i)Windows\\') { $rel = "Windows\$rel" }
     return (Join-Path $ImageRoot $rel)
 }
 
