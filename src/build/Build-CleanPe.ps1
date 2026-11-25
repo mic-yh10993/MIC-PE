@@ -108,7 +108,12 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libDir = Join-Path $PSScriptRoot 'lib'
 
-foreach ($lib in 'Common', 'Payload', 'Disk', 'Wim', 'Registry', 'AdminAccount', 'BaseImage', 'Iso') {
+# ClientBase loads FIRST on purpose: it defines Write-Step and sets
+# StrictMode 2.0, and Common (loaded after) must win both -- the build's
+# log format is Common's "==> " and the dispatch runs under Latest.
+# Round 15: ClientBase was never loaded, so Enable-WimBootStack and
+# Assert-BootCritical were dead code and r90 booted without WimFsf/FBWF.
+foreach ($lib in 'ClientBase', 'Common', 'Payload', 'Disk', 'Wim', 'Registry', 'AdminAccount', 'BaseImage', 'Iso') {
     . (Join-Path $libDir "$lib.ps1")
 }
 
@@ -762,6 +767,39 @@ function Get-CleanShellZip {
     return $zipPath
 }
 
+function Invoke-CleanWimBootStep {
+    # Transplant the WIM boot stack (WimFsf + FBWF) from the stock install
+    # media boot.wim into staging (round 15: IO1 INITIALIZATION FAILED).
+    # The clean rebuild copies only whitelist files out of install.wim,
+    # and install.wim never WIM-boots, so it carries neither wimfsf.sys /
+    # fbwf.sys nor the WimFsf / FBWF service definitions -- the whitelist
+    # lists them, but the copy step silently skips them with a warning
+    # (round 14 log: 4x "No matches for path pattern"). Without the stack
+    # the kernel cannot mount its own boot volume and bugchecks 0x69.
+    # Enable-WimBootStack (ClientBase.ps1) does the transplant from the
+    # stock boot.wim and verifies Start=0 by read-back; it throws when
+    # the donor lacks the drivers. fbwflib.dll / fbwf.sys.mui are NOT
+    # transplanted here: the driver does not import the user-mode library
+    # and the .mui is only localized strings -- if round 15 still 0x69s,
+    # add them next. Runs after the registry step (its hive edits must
+    # land first) and before capture.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $StagingDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $PeDonorWim,
+
+        [int] $OverlayMegabytes = 4096,
+
+        [string] $WimlibPath = 'wimlib-imagex'
+    )
+
+    Write-Step 'transplanting the WIM boot stack (WimFsf + FBWF) from the stock boot.wim'
+    Enable-WimBootStack -ImageRoot $StagingDir -PeDonorWim $PeDonorWim -OverlayMegabytes $OverlayMegabytes -WimlibPath $WimlibPath
+}
+
 function Invoke-CleanShellStep {
     # Lay StartAllBack + Start11 out under Windows\System32\MICPE\.
     # Start11\Links\ (the pinned-item shortcuts) is left out on purpose:
@@ -1175,6 +1213,8 @@ Invoke-CleanShellStep
 $apps = Invoke-CleanAppStep
 Invoke-CleanRegistryStep -AppRegFiles $apps.RegFiles
 Assert-CleanRegistry -AppNames $apps.Names
+Invoke-CleanWimBootStep -StagingDir $paths.Staging -PeDonorWim $base.BootWim -WimlibPath $WimlibPath
+Assert-BootCritical -ImageRoot $paths.Staging
 $capturedBootWim = Invoke-CleanCaptureStep
 Assert-CleanCatFilesInBootWim -BootWim $capturedBootWim -ExpectedCats $catFix.ExpectedCats -WimlibPath $WimlibPath
 $result = Invoke-CleanIsoStep -BootWim $capturedBootWim

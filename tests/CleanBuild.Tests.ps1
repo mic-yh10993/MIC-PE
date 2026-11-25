@@ -837,3 +837,85 @@ https://download.windowsupdate.com/x/windows11.0-kb5020044-x64_bbbb.cab
         }
     }
 }
+
+Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot stack)' {
+    BeforeAll {
+        # Pull the boot-critical guard functions out of ClientBase.ps1 via
+        # the AST (ClientBase cannot be dot-sourced in the test session:
+        # it sets StrictMode 2.0 and defines Write-Step, both of which
+        # would leak into the session; Build-CleanPe.ps1 loads it first
+        # so Common wins both). Same AST pattern as the catfix tests.
+        $tokens = $null
+        $errors = $null
+        $clientBase = Join-Path $script:RepoRoot 'src/build/lib/ClientBase.ps1'
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($clientBase, [ref] $tokens, [ref] $errors)
+        $errors.Count | Should -Be 0
+        $allFns = $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true)
+        foreach ($name in @('Test-BootCriticalFiles', 'Assert-BootCritical')) {
+            $fn = @($allFns | Where-Object { $_.Name -eq $name })
+            $fn.Count | Should -Be 1
+            . ([scriptblock]::Create($fn[0].Extent.Text))
+        }
+    }
+
+    It 'loads ClientBase first so Common wins Write-Step and StrictMode Latest' {
+        # ClientBase defines Write-Step ("  -> ") and sets StrictMode 2.0;
+        # loading it before Common keeps the build log format ("==> ") and
+        # the dispatch under Latest. Round 15: it was never loaded at all.
+        $script:CleanScriptText | Should -Match "'ClientBase', 'Common'"
+    }
+
+    It 'defines the WimBoot transplant and the boot-critical guard in ClientBase.ps1' {
+        $libText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/ClientBase.ps1') -Raw
+        $libText | Should -Match 'function Enable-WimBootStack'
+        $libText | Should -Match 'function Test-BootCriticalFiles'
+        $libText | Should -Match 'function Assert-BootCritical'
+        # The guard's manifest must cover the WIM boot stack itself.
+        $libText | Should -Match 'Windows\\System32\\drivers\\wimfsf\.sys'
+        $libText | Should -Match 'Windows\\System32\\drivers\\fbwf\.sys'
+        $libText | Should -Match "'WimFsf', 'FBWF', 'FltMgr', 'Ramdisk'"
+    }
+
+    It 'runs the WimBoot transplant after the registry step and before capture, and guards before capture' {
+        $dispatch = ($script:CleanScriptText -split '# Dispatch')[1]
+        $dispatch.IndexOf('Invoke-CleanWimBootStep') | Should -BeGreaterThan $dispatch.IndexOf('Invoke-CleanRegistryStep')
+        $dispatch.IndexOf('Invoke-CleanWimBootStep') | Should -BeLessThan $dispatch.IndexOf('Invoke-CleanCaptureStep')
+        $dispatch.IndexOf('Assert-BootCritical') | Should -BeGreaterThan $dispatch.IndexOf('Invoke-CleanWimBootStep')
+        $dispatch.IndexOf('Assert-BootCritical') | Should -BeLessThan $dispatch.IndexOf('Invoke-CleanCaptureStep')
+    }
+
+    It 'transplants from the stock install-media boot.wim, not from Ramos' {
+        $script:CleanScriptText | Should -Match 'Invoke-CleanWimBootStep -StagingDir \$paths\.Staging -PeDonorWim \$base\.BootWim'
+        # The donor is the stock boot.wim the base step extracts from the
+        # UUP ISO; Ramos is a comparison reference only, never a source.
+        $script:CleanScriptText | Should -Not -Match 'PeDonorWim.*[Rr]amos'
+    }
+
+    It 'Test-BootCriticalFiles reports wimfsf.sys and fbwf.sys missing on an empty image root' {
+        $root = Join-Path $script:TempRoot ("micpe-wimboot-empty-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $root 'Windows/System32/drivers') -Force | Out-Null
+        try {
+            $r = Test-BootCriticalFiles -ImageRoot $root
+            $r.IsBootable | Should -Be $false
+            $r.Missing | Should -Contain 'Windows\System32\drivers\wimfsf.sys'
+            $r.Missing | Should -Contain 'Windows\System32\drivers\fbwf.sys'
+        }
+        finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Assert-BootCritical throws on an image root without the WIM boot stack' {
+        $root = Join-Path $script:TempRoot ("micpe-wimboot-nostack-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $root 'Windows/System32/drivers') -Force | Out-Null
+        try {
+            { Assert-BootCritical -ImageRoot $root } | Should -Throw '*not bootable*'
+        }
+        finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
