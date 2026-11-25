@@ -458,6 +458,8 @@ jobs:
             verify-clean-out/micpe-serial.log
             verify-clean-out/micpe-qemu.log
             verify-clean-out/micpe-bugcheck.txt
+            verify-clean-out/micpe-dumpdisk-read.vhdx
+            verify-clean-out/micpe-dumpdisk-read.vhd
           retention-days: 30
           if-no-files-found: warn
           compression-level: 0
@@ -517,6 +519,21 @@ jobs:
             foreach ($logName in 'micpe-serial.log', 'micpe-qemu.log', 'micpe-bugcheck.txt') {
               $logPath = Join-Path $env:GITHUB_WORKSPACE "verify-clean-out\$logName"
               if (Test-Path -LiteralPath $logPath) { $releaseExtras += $logPath }
+            }
+            # Round 22: the crash-dump disk itself, preserved by the
+            # verify script so the dump survives the runner. GitHub
+            # caps release assets at 2 GB; a complete dump of a 4 GB
+            # VM is ~4.3 GB, so an oversize disk is skipped with a log
+            # line instead of failing the upload (the parameters in
+            # micpe-bugcheck.txt are the primary evidence; the disk is
+            # the backup for when Rizin could not parse it here).
+            foreach ($diskName in 'micpe-dumpdisk-read.vhdx', 'micpe-dumpdisk-read.vhd') {
+              $diskPath = Join-Path $env:GITHUB_WORKSPACE "verify-clean-out\$diskName"
+              if (Test-Path -LiteralPath $diskPath) {
+                $diskBytes = (Get-Item -LiteralPath $diskPath).Length
+                if ($diskBytes -lt 1900MB) { $releaseExtras += $diskPath }
+                else { Write-Host ("release extra skipped: {0} is {1:N0} bytes (over the ~1.9 GB Release asset limit)" -f $diskName, $diskBytes) }
+              }
             }
             if ($releaseExtras.Count -gt 0) {
               Write-Host ("release extras: {0} files" -f $releaseExtras.Count)

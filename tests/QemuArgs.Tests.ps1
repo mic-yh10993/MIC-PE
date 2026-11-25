@@ -1037,3 +1037,93 @@ bugcheck.arg1=0x0000000000000001
         $verify | Should -Match 'i~bugcheck'
     }
 }
+
+Describe 'Round 22 crash-dump capture read-back fix' {
+    BeforeAll {
+        # Same dot-source pattern as the round 21 block: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:rbDir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-rb-$(Get-Random)"
+        $script:rbShare = Join-Path $script:rbDir 'share'
+        New-Item -ItemType Directory -Path $script:rbShare -Force | Out-Null
+        $script:rbIso = Join-Path $script:rbDir 'test.iso'
+        New-Item -ItemType File -Path $script:rbIso -Force | Out-Null
+        $script:rbWork = Join-Path $script:rbDir 'work'
+        New-Item -ItemType Directory -Path $script:rbWork -Force | Out-Null
+        $script:rbCode = Join-Path $script:rbShare 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:rbCode, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:rbIso -OvmfPath $script:rbCode -WorkDir $script:rbWork
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:rbDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'selects the partition before assigning the drive letter (round 21 root cause)' {
+        # Round 21 failed with "crash-dump disk attached but drive Z:
+        # never appeared" because the attach script ran `assign` with
+        # no volume selected: `attach vdisk` selects the disk, not a
+        # volume, and `assign` works on the volume with focus. The
+        # disk was created with exactly one primary partition, so
+        # partition 1 is the volume.
+        $script = New-CleanDiskpartAttachScript -DiskPath 'C:\x\micpe-dumpdisk-read.vhdx' -Letter 'Z'
+        $script | Should -Match 'select vdisk file="C:\\x\\micpe-dumpdisk-read\.vhdx"'
+        $script | Should -Match 'attach vdisk'
+        $script | Should -Match 'select partition 1'
+        $script | Should -Match 'assign letter=Z'
+        # The partition select must come between the attach and the
+        # assign -- the order is the fix, not just the presence.
+        $script.IndexOf('attach vdisk') | Should -BeLessThan $script.IndexOf('select partition 1')
+        $script.IndexOf('select partition 1') | Should -BeLessThan $script.IndexOf('assign letter=Z')
+    }
+
+    It 'converts the dump disk back to VHDX and falls back to VHD (vpc) when the attach fails' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'convert -f qcow2 -O vhdx'
+        $verify | Should -Match "convert -f qcow2 -O vpc"
+        $verify | Should -Match 'VHDX attach failed; retrying as VHD \(vpc\)'
+        $verify | Should -Match 'Invoke-CleanDiskAttach'
+    }
+
+    It 'polls for the drive letter and accepts a letter Windows automounted instead' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        # A single 3-second sleep plus one check was the round 21
+        # failure mode (the letter never appeared in that window).
+        $verify | Should -Match 'WaitSec = 30'
+        $verify | Should -Match 'new letter.*showed up after the attach'
+        $verify | Should -Match 'never appeared within'
+    }
+
+    It 'records diskpart output and the runner volumes in bugcheck.txt when the attach fails' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'attach diskpart output:'
+        $verify | Should -Match 'volumes on the runner:'
+        $verify | Should -Match 'There is no volume selected'
+    }
+
+    It 'preserves the converted disk file for upload instead of deleting it' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'preserved disk file for upload:'
+        $verify | Should -Match 'DiskPath = \$diskFile'
+        # The qcow2 (the intermediate) is still deleted; the converted
+        # VHDX/VHD is what survives for upload.
+        $verify | Should -Match 'Remove-Item -LiteralPath \$Qcow2Path'
+    }
+
+    It 'uploads the dump disk as an artifact (backup when Rizin could not parse it)' {
+        $workflow = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $workflow | Should -Match 'verify-clean-out/micpe-dumpdisk-read\.vhdx'
+        $workflow | Should -Match 'verify-clean-out/micpe-dumpdisk-read\.vhd'
+    }
+
+    It 'uploads the dump disk to the Release only under the 2 GB asset limit' {
+        $workflow = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $workflow | Should -Match "micpe-dumpdisk-read\.vhdx"
+        $workflow | Should -Match "micpe-dumpdisk-read\.vhd"
+        # A complete dump of a 4 GB VM is ~4.3 GB; GitHub caps release
+        # assets at 2 GB, so an oversize disk must be skipped with a
+        # log line instead of failing the upload.
+        $workflow | Should -Match '1900MB'
+        $workflow | Should -Match 'over the ~1\.9 GB Release asset limit'
+    }
+}

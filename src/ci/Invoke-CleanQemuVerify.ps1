@@ -461,6 +461,34 @@ function New-CleanDiskpartScript {
     ) -join "`n"
 }
 
+function New-CleanDiskpartAttachScript {
+    # diskpart script that attaches an existing VHD/VHDX and assigns a
+    # drive letter to its volume. Round 22 lesson: `assign` works on
+    # the VOLUME with focus, not on the disk -- after `attach vdisk`
+    # the disk is selected but no volume is, so a bare `assign` fails
+    # with "There is no volume selected" and the drive letter never
+    # appears (round 21: "crash-dump disk attached but drive Z: never
+    # appeared"). `select partition 1` focuses the volume first. The
+    # disk was created with exactly one primary partition, so
+    # partition 1 is the volume. Pure text builder (diskpart itself
+    # only runs on the Windows runner), so it is unit-testable.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $DiskPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Letter
+    )
+
+    return @(
+        "select vdisk file=`"$DiskPath`""
+        'attach vdisk'
+        'select partition 1'
+        "assign letter=$Letter"
+    ) -join "`n"
+}
+
 function Get-CleanQemuImgPath {
     # qemu-img sits next to qemu-system-x86_64. The parent is parsed by
     # hand: Split-Path/Join-Path are platform-specific (on the Linux test
@@ -639,14 +667,99 @@ function Invoke-CleanRizin {
     return ($out -as [string])
 }
 
+function Invoke-CleanDiskAttach {
+    # Attaches a VHD/VHDX on the runner and waits for its drive
+    # letter. Returns a pscustomobject @{ Letter = <letter>;
+    # DiskPath = <path> } or $null. Never throws: every failure mode
+    # writes its diagnostics into $Lines (diskpart output, the
+    # volumes visible on the runner) so micpe-bugcheck.txt says WHY
+    # the disk did not come back, instead of one bare "never
+    # appeared" line (round 21). A failed attach detaches the disk
+    # again so a retry starts clean. Runs only on the Windows runner
+    # (diskpart + Get-Volume); the caller wraps it.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $DiskPath,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[string]] $Lines,
+
+        [int] $WaitSec = 30
+    )
+
+    $usedBefore = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Name.ToUpperInvariant() })
+    $letter = Find-CleanFreeDriveLetter -UsedLetters $usedBefore
+    if (-not $letter) {
+        $Lines.Add('attach: no free drive letter to attach the crash-dump disk (tried Z Y X W V U T)')
+        return $null
+    }
+    $script = New-CleanDiskpartAttachScript -DiskPath $DiskPath -Letter $letter
+    $diskpartOut = ''
+    try {
+        $diskpartOut = ($script | diskpart | Out-String)
+    }
+    catch {
+        $Lines.Add(('attach: diskpart did not run: {0}' -f $_.Exception.Message))
+        return $null
+    }
+    $flatOut = ($diskpartOut -replace "`r`n|`n", ' | ').Trim()
+    $Lines.Add(('attach diskpart output: {0}' -f $flatOut))
+    if ($LASTEXITCODE -ne 0) {
+        $Lines.Add(('attach: diskpart exited {0}' -f $LASTEXITCODE))
+    }
+    if ($diskpartOut -match 'DiskPart has encountered an error|There is no volume selected|The system cannot find the file|The specified disk is not found|Virtual Disk Service error') {
+        $Lines.Add('attach: diskpart reported an error (see output above); detaching and giving up on this image')
+        try { @("select vdisk file=`"$DiskPath`"", 'detach vdisk') -join "`n" | diskpart | Out-Null } catch {}
+        return $null
+    }
+    for ($i = 0; $i -lt $WaitSec; $i++) {
+        if (Test-Path -LiteralPath "${letter}:\") {
+            return [pscustomobject]@{ Letter = $letter; DiskPath = $DiskPath }
+        }
+        # Windows may have automounted the volume under a different
+        # letter (assign raced it, or assign failed but the volume
+        # still came up). Any letter that was not there before the
+        # attach is this disk; take it rather than failing.
+        $usedNow = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Name.ToUpperInvariant() })
+        $newLetters = @($usedNow | Where-Object { $usedBefore -notcontains $_ })
+        if ($newLetters.Count -gt 0) {
+            $Lines.Add(('attach: drive {0}: never appeared, but a new letter {1}: showed up after the attach; using it' -f $letter, $newLetters[0]))
+            return [pscustomobject]@{ Letter = $newLetters[0]; DiskPath = $DiskPath }
+        }
+        Start-Sleep -Seconds 1
+    }
+    $Lines.Add(('attach: drive {0}: never appeared within {1} s' -f $letter, $WaitSec))
+    try {
+        $vols = @(Get-Volume -ErrorAction Stop | ForEach-Object { '{0}: {1} {2} ({3:N0} bytes)' -f $_.DriveLetter, $_.FileSystemLabel, $_.FileSystem, $_.Size })
+        $Lines.Add(('volumes on the runner: {0}' -f ($vols -join '; ')))
+    }
+    catch {
+        $Lines.Add(('attach: could not list volumes: {0}' -f $_.Exception.Message))
+    }
+    try { @("select vdisk file=`"$DiskPath`"", 'detach vdisk') -join "`n" | diskpart | Out-Null } catch {}
+    return $null
+}
+
 function Invoke-CleanCrashDumpCapture {
-    # Round 21: after QEMU exits, convert the dump disk back to VHDX,
+    # Round 22: after QEMU exits, convert the dump disk back to VHDX,
     # attach it, and read the dedicated dump file the blue screen was
     # supposed to write. Never throws: a missing dump file is itself the
     # finding (dump stack not ready at IopLoadDriver, or the wrong drive
     # letter), and it is written to micpe-bugcheck.txt either way. The
     # caller runs this in the finally block so it runs even when the
     # screen gate threw (a blue screen is exactly when the dump matters).
+    # Round 22 fix: the round 21 read-back failed with "drive Z: never
+    # appeared" because the diskpart attach script ran `assign` with no
+    # volume selected (attach selects the disk, not a volume) and
+    # discarded diskpart's output, so the failure was invisible; the
+    # converted VHDX was then deleted, destroying the evidence. The
+    # attach now selects partition 1 first, captures diskpart's output,
+    # polls for the letter, falls back to VHD (vpc) if the VHDX will
+    # not attach, and preserves the converted disk file for upload
+    # instead of deleting it.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -665,25 +778,35 @@ function Invoke-CleanCrashDumpCapture {
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add('MICPE crash-dump capture (round 21: 0x5A bugcheck parameters)')
     $lines.Add(('QEMU dump disk: {0}' -f $Qcow2Path))
-    $result = [pscustomobject]@{ DumpFound = $false; BugCheck = $null; ReportPath = $reportPath }
+    $result = [pscustomobject]@{ DumpFound = $false; BugCheck = $null; ReportPath = $reportPath; DiskPath = $null }
     $vhdx = Join-Path $WorkDir 'micpe-dumpdisk-read.vhdx'
+    $vhd = Join-Path $WorkDir 'micpe-dumpdisk-read.vhd'
     $attachedLetter = $null
+    $diskFile = $null
     try {
-        # Windows cannot attach qcow2, so convert back to VHDX first.
+        # Windows cannot attach qcow2, so convert back first. VHDX is
+        # the format the disk was created in; VHD (vpc) is the fallback
+        # if the qemu-img VHDX will not attach (known qemu-img VHDX
+        # quirks). The qcow2 is deleted only once a converted image
+        # has attached -- it is the only source for the fallback.
         & $QemuImgPath convert -f qcow2 -O vhdx $Qcow2Path $vhdx
         if ($LASTEXITCODE -ne 0) { throw "qemu-img convert back to VHDX failed ($Qcow2Path -> $vhdx)" }
+        $attached = Invoke-CleanDiskAttach -DiskPath $vhdx -Lines $lines
+        if ($null -eq $attached) {
+            $lines.Add('VHDX attach failed; retrying as VHD (vpc)...')
+            & $QemuImgPath convert -f qcow2 -O vpc $Qcow2Path $vhd
+            if ($LASTEXITCODE -ne 0) { throw "qemu-img convert back to VHD failed ($Qcow2Path -> $vhd)" }
+            Remove-Item -LiteralPath $vhdx -Force -ErrorAction SilentlyContinue
+            $attached = Invoke-CleanDiskAttach -DiskPath $vhd -Lines $lines
+        }
+        if ($null -eq $attached) { throw 'crash-dump disk could not be attached (VHDX and VHD both failed; the diskpart output and volume listing above are the evidence)' }
+        $attachedLetter = $attached.Letter
+        $diskFile = $attached.DiskPath
+        $result.DiskPath = $diskFile
         Remove-Item -LiteralPath $Qcow2Path -Force -ErrorAction SilentlyContinue
-        $used = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-        $letter = Find-CleanFreeDriveLetter -UsedLetters $used
-        if (-not $letter) { throw 'no free drive letter to attach the crash-dump disk (tried Z Y X W V U T)' }
-        $attachedLetter = $letter
-        @("select vdisk file=`"$vhdx`"", 'attach vdisk', "assign letter=$letter") -join "`n" | diskpart | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "diskpart failed while attaching the crash-dump disk $vhdx" }
-        Start-Sleep -Seconds 3
-        if (-not (Test-Path -LiteralPath "${letter}:\")) { throw "crash-dump disk attached but drive ${letter}: never appeared" }
-        $dumpFile = "${letter}:\dedicateddumpfile.sys"
-        $lines.Add(('attached as {0}: ; dump file path {1}' -f $letter, $dumpFile))
-        $volFiles = @(Get-ChildItem -LiteralPath "${letter}:\" -Force -ErrorAction SilentlyContinue |
+        $dumpFile = "${attachedLetter}:\dedicateddumpfile.sys"
+        $lines.Add(('attached as {0}: ; dump file path {1}' -f $attachedLetter, $dumpFile))
+        $volFiles = @(Get-ChildItem -LiteralPath "${attachedLetter}:\" -Force -ErrorAction SilentlyContinue |
             ForEach-Object { '{0} ({1:N0} bytes)' -f $_.Name, $_.Length })
         $lines.Add(('volume contents: {0}' -f ($volFiles -join '; ')))
         if (-not (Test-Path -LiteralPath $dumpFile)) {
@@ -734,10 +857,19 @@ function Invoke-CleanCrashDumpCapture {
         $lines.Add(('RESULT: capture failed: {0}' -f $_.Exception.Message))
     }
     finally {
-        if ($attachedLetter) {
-            @("select vdisk file=`"$vhdx`"", 'detach vdisk') -join "`n" | diskpart | Out-Null
+        if ($attachedLetter -and $diskFile) {
+            @("select vdisk file=`"$diskFile`"", 'detach vdisk') -join "`n" | diskpart | Out-Null
         }
-        if (Test-Path -LiteralPath $vhdx) { Remove-Item -LiteralPath $vhdx -Force -ErrorAction SilentlyContinue }
+        # The qcow2 is the intermediate: delete it. The converted disk
+        # file (VHDX or VHD) is PRESERVED for upload (artifact +
+        # Release) so the dump survives the runner even if Rizin could
+        # not parse it here; the workflow deletes nothing.
+        Remove-Item -LiteralPath $Qcow2Path -Force -ErrorAction SilentlyContinue
+        foreach ($candidate in @($vhdx, $vhd)) {
+            if (Test-Path -LiteralPath $candidate) {
+                $lines.Add(('preserved disk file for upload: {0} ({1:N0} bytes)' -f $candidate, (Get-Item -LiteralPath $candidate).Length))
+            }
+        }
         $lines | Set-Content -LiteralPath $reportPath -Encoding UTF8
     }
     Write-Host ($lines -join "`n")
