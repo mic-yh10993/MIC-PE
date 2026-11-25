@@ -45,7 +45,11 @@
                   sources\install.wim (the finished ISO carries only
                   boot.wim, user decision 2026-11-17 15:09), and package
                   MICPE-clean.iso with oscdimg. Sizes are reported as
-                  measured; the 3 GB boot.wim cap still applies.
+                  measured; the 3 GB boot.wim cap still applies. The ISO
+                  step also enables kernel debugging on the default boot
+                  entry (COM1, 115200) so the QEMU serial log carries KD
+                  output instead of only the two UEFI lines (round 16
+                  evidence).
 
     FILE LIST IS FINAL (user decision 2026-11-24 15:00: no hash diff):
     src/build/data/clean-22621.1105-enterprise-files.txt is the reference
@@ -1065,12 +1069,39 @@ function Assert-CleanRegistry {
         # of these 9 services at all. Two are ErrorControl=3 (critical):
         # iorate and rdyboost. WdBoot is the Early-Launch (ELAM) driver.
         # Disable all 9 so winload never tries to load a boot driver that
-        # is not in the image.
-        foreach ($name in @('WdBoot', 'WdFilter', 'MsSecFlt', 'SgrmAgent', 'IntelPMT', 'intelpep', 'cnghwassist', 'iorate', 'rdyboost')) {
+        # is not in the image. FileCrypt joins the list in round 16: it is
+        # Start=1 + ErrorControl=3 with its file missing, and the kernel
+        # bugchecks 0x5A when it cannot load it; the reference PE has no
+        # FileCrypt service and no service depends on it.
+        foreach ($name in @('WdBoot', 'WdFilter', 'MsSecFlt', 'SgrmAgent', 'IntelPMT', 'intelpep', 'cnghwassist', 'iorate', 'rdyboost', 'FileCrypt')) {
             $svc = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey "ControlSet001\Services\$name"
             Assert-ReadBack -Condition ($null -ne $svc) -Message "read-back: PE-SYS\ControlSet001\Services\$name is missing"
             Assert-ReadBack -Condition ($svc['Start'] -eq '0x4') -Message "read-back: $name Start is '$($svc['Start'])', expected 0x4"
         }
+
+        # Round 16 cleanup: 7 more services with the same defect class as
+        # FileCrypt (hive lists the service, whitelist has no file,
+        # reference has no such service) but ErrorControl <= 1, so they
+        # cannot cause 0x5A -- only a failed load. Disabled for alignment
+        # with the reference, which boots without them.
+        foreach ($name in @('afunix', 'bam', 'CimFS', 'CSC', 'dam', 'Psched', 'Vid')) {
+            $svc = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey "ControlSet001\Services\$name"
+            Assert-ReadBack -Condition ($null -ne $svc) -Message "read-back: PE-SYS\ControlSet001\Services\$name is missing"
+            Assert-ReadBack -Condition ($svc['Start'] -eq '0x4') -Message "read-back: $name Start is '$($svc['Start'])', expected 0x4"
+        }
+
+        # Round 16, second suspect: the Volume device class still listed
+        # the two disabled filters (iorate, rdyboost) in LowerFilters
+        # even though round 11 disabled them as services; PnP still tries
+        # to load the missing filter drivers when it builds the volume
+        # device stack. The reference lists fvevol only. The read-back is
+        # deliberately loose about reg.exe's REG_MULTI_SZ rendering (it
+        # may show 'fvevol' or 'fvevol\0'): fvevol must be present and
+        # neither disabled filter may appear.
+        $volumeClass = Get-RegistryKeyValues -KeyName 'PE-SYS' -SubKey 'ControlSet001\Control\Class\{71a27cdd-812a-11d0-bec7-08002be2092f}'
+        Assert-ReadBack -Condition ($null -ne $volumeClass) -Message 'read-back: PE-SYS\ControlSet001\Control\Class\{71a27cdd-812a-11d0-bec7-08002be2092f} is missing'
+        Assert-ReadBack -Condition ($volumeClass['LowerFilters'] -match 'fvevol') -Message "read-back: Volume LowerFilters is '$($volumeClass['LowerFilters'])', expected fvevol only"
+        Assert-ReadBack -Condition ($volumeClass['LowerFilters'] -notmatch 'iorate' -and $volumeClass['LowerFilters'] -notmatch 'rdyboost') -Message "read-back: Volume LowerFilters still lists a disabled filter: '$($volumeClass['LowerFilters'])'"
 
         $winlogon = Get-RegistryKeyValues -KeyName 'PE-SOFT' -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon'
         Assert-ReadBack -Condition ($null -ne $winlogon) -Message 'read-back: PE-SOFT Winlogon is missing'
@@ -1155,6 +1186,59 @@ function Invoke-CleanCaptureStep {
     return $bootWim
 }
 
+function Set-CleanBcdKernelDebug {
+    # Round 16 evidence (CRITICAL_SERVICE_FAILED 0x5A, run 45594660145):
+    # the QEMU serial log only ever showed the two UEFI BdsDxe lines --
+    # no Windows output at all -- because kernel debugging was never
+    # enabled, and micpe-qemu.log is 0 bytes (QEMU's -D log file gets
+    # nothing without -d flags) so the Release step skips it as an empty
+    # asset. Enabling kernel debugging on the default boot entry makes
+    # the kernel send its debug output to COM1 at 115200, which QEMU
+    # already captures to micpe-serial.log and the Release step already
+    # attaches -- so the next blue screen leaves a KD trace in the
+    # Release instead of nothing. A bootlog (ntbtlog.txt) was considered
+    # and rejected: it lands in the FBWF overlay in RAM and is gone when
+    # QEMU exits. Runs on both BCD stores in the media tree (UEFI +
+    # BIOS); the QEMU verify boots UEFI, so the EFI BCD is the one that
+    # matters. Kernel debugging with no debugger attached does not stop
+    # the boot: the kernel sends KD packets to the port and carries on,
+    # and on a bugcheck it still writes the dump and reboots per
+    # CrashControl.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MediaDir,
+
+        [string] $BcdeditPath = 'bcdedit'
+    )
+
+    $bcdPaths = @(
+        (Join-Path $MediaDir 'efi\\microsoft\\boot\\bcd'),
+        (Join-Path $MediaDir 'boot\\bcd')
+    )
+
+    $found = 0
+    foreach ($bcd in $bcdPaths) {
+        if (-not (Test-Path -LiteralPath $bcd)) {
+            Write-Warn "BCD kernel debug: no BCD store at $bcd, skipping"
+            continue
+        }
+        $found++
+        Write-Step "BCD kernel debug: debug on + serial 115200 on {default} in $bcd"
+        & $BcdeditPath /store $bcd /set '{default}' debug on | Out-Host
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /set debug failed for $bcd (exit $LASTEXITCODE)"
+        & $BcdeditPath /store $bcd /dbgsettings serial debugport:1 baudrate:115200 | Out-Host
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /dbgsettings failed for $bcd (exit $LASTEXITCODE)"
+        $enum = & $BcdeditPath /store $bcd /enum '{default}' 2>&1 | Out-String
+        Assert-True -Condition ($enum -match '(?m)^debug\s+Yes\s*$') -Message "BCD kernel debug: debug not confirmed on {default} in $bcd"
+        $dbg = & $BcdeditPath /store $bcd /dbgsettings 2>&1 | Out-String
+        Assert-True -Condition ($dbg -match 'Serial' -and $dbg -match '115200') -Message "BCD kernel debug: serial 115200 not confirmed in $bcd"
+        Write-SubStep "BCD kernel debug: $bcd now debugs on COM1 at 115200"
+    }
+
+    Assert-True -Condition ($found -gt 0) -Message 'BCD kernel debug: no BCD store found in the media tree'
+}
+
 function Invoke-CleanIsoStep {
     [CmdletBinding()]
     param(
@@ -1185,6 +1269,10 @@ function Invoke-CleanIsoStep {
     # here, after the last step that needs it. The installer finds the
     # user's own install.wim on another volume (install.mic protocol).
     Remove-InstallWimFromMedia -MediaDir $paths.Media
+    # Round 16 evidence: kernel debugging on the default boot entry, so
+    # the QEMU serial log carries KD output instead of only the two UEFI
+    # lines (see Set-CleanBcdKernelDebug).
+    Set-CleanBcdKernelDebug -MediaDir $paths.Media
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
 
     $isoBytes = (Get-Item -LiteralPath $isoPath).Length

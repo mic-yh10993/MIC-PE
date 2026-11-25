@@ -180,6 +180,35 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $readBack | Should -Match "\['Start'\] -eq '0x4'"
     }
 
+    It 'reads back FileCrypt and the 7 cleanup services as disabled (Start=4, round 16)' {
+        # Round 16 root cause: FileCrypt is Start=1 + ErrorControl=3 in
+        # the install.wim SYSTEM hive but its file is not in the image;
+        # the kernel bugchecks 0x5A when it cannot load it. FileCrypt
+        # joins the round-11 disabled-drivers list; the 7 cleanup
+        # services are the same defect class with ErrorControl <= 1.
+        # The read-back must verify all 8 are disabled (Start=4) after
+        # the registry import.
+        $readBack = ($script:CleanScriptText -split 'function Assert-CleanRegistry')[1] -split 'function Invoke-CleanCaptureStep' | Select-Object -First 1
+        foreach ($name in 'FileCrypt', 'afunix', 'bam', 'CimFS', 'CSC', 'dam', 'Psched', 'Vid') {
+            $readBack | Should -Match ([regex]::Escape($name))
+        }
+        $readBack | Should -Match "\['Start'\] -eq '0x4'"
+    }
+
+    It 'reads back the Volume class LowerFilters as fvevol only (round 16, second suspect)' {
+        # Round 11 disabled iorate and rdyboost as services but never
+        # cleaned the Volume class filter list, so r91 still listed both
+        # in LowerFilters while the reference lists fvevol only. The
+        # read-back must verify fvevol is present and neither disabled
+        # filter appears; it is deliberately loose about reg.exe's
+        # REG_MULTI_SZ rendering (fvevol vs fvevol\0).
+        $readBack = ($script:CleanScriptText -split 'function Assert-CleanRegistry')[1] -split 'function Invoke-CleanCaptureStep' | Select-Object -First 1
+        $readBack | Should -Match ([regex]::Escape('ControlSet001\Control\Class\{71a27cdd-812a-11d0-bec7-08002be2092f}'))
+        $readBack | Should -Match "LowerFilters.*-match 'fvevol'"
+        $readBack | Should -Match "LowerFilters.*-notmatch 'iorate'"
+        $readBack | Should -Match "LowerFilters.*-notmatch 'rdyboost'"
+    }
+
     It 'captures the staging tree into a fresh boot.wim and packages a boot.wim-only ISO' {
         $script:CleanScriptText | Should -Match 'New-WimCapture'
         $script:CleanScriptText | Should -Match 'Set-WimBootIndex'
@@ -311,6 +340,44 @@ Describe 'clean .reg patches' {
             $section | Should -Match '"Start"=dword:00000004'
         }
         $text | Should -Not -Match 'ControlSet001\\Services\\WindowsTrustedRTProxy'
+    }
+
+    It '10-clean-boot.reg disables FileCrypt and the 7 non-critical missing drivers (round 16: 0x5A)' {
+        # Round 16 root cause: FileCrypt is Start=1 + ErrorControl=3 in
+        # the install.wim SYSTEM hive but filecrypt.sys is not in the
+        # image at all; the kernel bugchecks CRITICAL_SERVICE_FAILED
+        # (0x5A) when it cannot load it. The Ramos reference PE has no
+        # FileCrypt service and no service depends on it, so it is
+        # disabled like the round-11 drivers. The 7 cleanup services
+        # (afunix, bam, CimFS, CSC, dam, Psched, Vid) are the same
+        # defect class with ErrorControl <= 1 -- they cannot cause 0x5A,
+        # only a failed load -- and the reference has none of them.
+        # BasicRender is deliberately NOT disabled: the reference lists
+        # it at Start=1 (its DriverStore path just differs). The
+        # WindowsTrustedRTProxy exclusion is already asserted above.
+        $text = $script:RegTexts['10-clean-boot.reg']
+        foreach ($name in 'FileCrypt', 'afunix', 'bam', 'CimFS', 'CSC', 'dam', 'Psched', 'Vid') {
+            $text | Should -Match "PE-SYS\\ControlSet001\\Services\\$name"
+            $section = ($text -split "ControlSet001\\Services\\$name")[1]
+            $section | Should -Match '"Start"=dword:00000004'
+        }
+        $text | Should -Not -Match 'ControlSet001\\Services\\BasicRender'
+    }
+
+    It '10-clean-boot.reg trims the Volume class LowerFilters to fvevol only (round 16, second suspect)' {
+        # Round 11 disabled iorate and rdyboost as services but never
+        # cleaned the Volume class filter list, so r91 still listed both
+        # while the reference lists fvevol only; PnP still tries to load
+        # the two missing filter drivers when it builds the volume device
+        # stack. The value is REG_MULTI_SZ (hex(7)) with the single entry
+        # 'fvevol' -- 66,00,76,00,65,00,76,00,6f,00,6c,00 plus the double
+        # null terminator 00,00,00,00.
+        $text = $script:RegTexts['10-clean-boot.reg']
+        $text | Should -Match 'PE-SYS\\ControlSet001\\Control\\Class\\\{71a27cdd-812a-11d0-bec7-08002be2092f\}'
+        $section = ($text -split 'Control\\Class\\\{71a27cdd-812a-11d0-bec7-08002be2092f\}')[1]
+        $section | Should -Match '"LowerFilters"=hex\(7\):66,00,76,00,65,00,76,00,6f,00,6c,00,00,00,00,00'
+        $section | Should -Not -Match 'iorate'
+        $section | Should -Not -Match 'rdyboost'
     }
 
     It '20-clean-start11.reg carries Start11 settings but no pinned-item groups' {
@@ -854,7 +921,7 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
             }, $true)
-        foreach ($name in @('Test-BootCriticalFiles', 'Assert-BootCritical')) {
+        foreach ($name in @('Resolve-CleanDriverImagePath', 'Test-CleanCriticalDriverFiles', 'Test-BootCriticalFiles', 'Assert-BootCritical')) {
             $fn = @($allFns | Where-Object { $_.Name -eq $name })
             $fn.Count | Should -Be 1
             . ([scriptblock]::Create($fn[0].Extent.Text))
@@ -917,5 +984,78 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         finally {
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It 'Resolve-CleanDriverImagePath handles every ImagePath spelling (round 16 guard)' {
+        $root = Join-Path $script:TempRoot ("micpe-driverpath-{0}" -f [guid]::NewGuid())
+        Resolve-CleanDriverImagePath -ImagePath 'system32\drivers\filecrypt.sys' -ServiceName 'FileCrypt' -ImageRoot $root |
+            Should -Be (Join-Path $root 'system32\drivers\filecrypt.sys')
+        Resolve-CleanDriverImagePath -ImagePath '\SystemRoot\system32\drivers\filecrypt.sys' -ServiceName 'FileCrypt' -ImageRoot $root |
+            Should -Be (Join-Path $root 'system32\drivers\filecrypt.sys')
+        Resolve-CleanDriverImagePath -ImagePath '%SystemRoot%\System32\drivers\filecrypt.sys' -ServiceName 'FileCrypt' -ImageRoot $root |
+            Should -Be (Join-Path $root 'System32\drivers\filecrypt.sys')
+        # No ImagePath defaults to System32\drivers\<ServiceName>.sys.
+        Resolve-CleanDriverImagePath -ImagePath $null -ServiceName 'CimFS' -ImageRoot $root |
+            Should -Be (Join-Path $root 'System32\drivers\CimFS.sys')
+        Resolve-CleanDriverImagePath -ImagePath '' -ServiceName 'CimFS' -ImageRoot $root |
+            Should -Be (Join-Path $root 'System32\drivers\CimFS.sys')
+    }
+
+    It 'Test-CleanCriticalDriverFiles flags a missing ErrorControl=3 driver and only warns on the rest (round 16 guard)' {
+        # Round 16: FileCrypt (Start=1, Type=2, ErrorControl=3, file
+        # missing) is a guaranteed 0x5A; the same missing file at
+        # ErrorControl=1, at Start=3, or on a Win32 service (Type=32)
+        # must not fail the guard.
+        $root = Join-Path $script:TempRoot ("micpe-critdrv-{0}" -f [guid]::NewGuid())
+        # The present file must sit exactly where the ImagePath resolves:
+        # the test host (Linux) is case-sensitive, so 'system32' in the
+        # ImagePath and 'System32' in the fixture path are different
+        # directories there (on Windows they are the same).
+        $fltMgrPath = Resolve-CleanDriverImagePath -ImagePath 'system32\drivers\fltmgr.sys' -ServiceName 'FltMgr' -ImageRoot $root
+        New-Item -ItemType Directory -Path (Split-Path -Parent $fltMgrPath) -Force | Out-Null
+        Set-Content -LiteralPath $fltMgrPath -Value 'FAKE' -NoNewline
+        try {
+            $services = @(
+                [pscustomobject]@{ Name = 'FileCrypt'; Start = 1; ErrorControl = 3; Type = 2; ImagePath = 'system32\drivers\filecrypt.sys' }
+                [pscustomobject]@{ Name = 'FltMgr'; Start = 0; ErrorControl = 3; Type = 2; ImagePath = 'system32\drivers\fltmgr.sys' }
+                [pscustomobject]@{ Name = 'CimFS'; Start = 1; ErrorControl = 1; Type = 2; ImagePath = $null }
+                [pscustomobject]@{ Name = 'BasicRender'; Start = 1; ErrorControl = 0; Type = 1; ImagePath = 'System32\DriverStore\FileRepository\basicrender.inf_amd64_x\BasicRender.sys' }
+                [pscustomobject]@{ Name = 'ManualSvc'; Start = 3; ErrorControl = 3; Type = 2; ImagePath = 'system32\drivers\manualsvc.sys' }
+                [pscustomobject]@{ Name = 'Win32Svc'; Start = 1; ErrorControl = 3; Type = 32; ImagePath = 'System32\svchost.exe -k LocalService' }
+            )
+            $r = Test-CleanCriticalDriverFiles -ImageRoot $root -Services $services
+            $r.CriticalMissing | Should -Be @('FileCrypt')
+            $r.NonCriticalMissing | Should -Contain 'CimFS'
+            $r.NonCriticalMissing | Should -Contain 'BasicRender'
+            $r.NonCriticalMissing.Count | Should -Be 2
+        }
+        finally {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Test-BootCriticalFiles runs the critical-driver guard on the mounted hive (round 16)' {
+        # The hive enumeration itself needs Windows (reg.exe load), so
+        # this is a wiring assertion: the guard call must sit inside
+        # Test-BootCriticalFiles, after the required-services check.
+        $libText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/ClientBase.ps1') -Raw
+        $guard = ($libText -split 'function Test-BootCriticalFiles')[1] -split 'function Assert-BootCritical' | Select-Object -First 1
+        $guard | Should -Match 'Test-CleanCriticalDriverFiles'
+        $guard | Should -Match 'CriticalMissing'
+        $guard | Should -Match 'ErrorControl=3'
+    }
+
+    It 'enables kernel debugging on the default boot entry before packaging the ISO (round 16 evidence)' {
+        # Round 16: the serial log only ever showed the two UEFI lines
+        # because kernel debugging was off, and micpe-qemu.log is 0 bytes
+        # (QEMU -D logs nothing without -d flags) so the Release step
+        # skips it. KD on COM1 at 115200 puts the kernel debug output
+        # into micpe-serial.log, which the Release already attaches.
+        $script:CleanScriptText | Should -Match 'function Set-CleanBcdKernelDebug'
+        $script:CleanScriptText | Should -Match "debug on"
+        $script:CleanScriptText | Should -Match 'dbgsettings serial debugport:1 baudrate:115200'
+        $isoStep = ($script:CleanScriptText -split 'function Invoke-CleanIsoStep')[1] -split '# Dispatch' | Select-Object -First 1
+        $isoStep | Should -Match 'Set-CleanBcdKernelDebug'
+        $isoStep.IndexOf('Set-CleanBcdKernelDebug') | Should -BeLessThan $isoStep.IndexOf('New-MicpeIso')
     }
 }

@@ -258,6 +258,83 @@ function Restore-Keep {
     Write-Step "$count file(s) restored from [KEEP]"
 }
 
+# --- critical-driver file guard (round 16: 0x5A) ---------------------------
+
+function Resolve-CleanDriverImagePath {
+    <#
+    .SYNOPSIS
+        Maps a service ImagePath to a path inside an applied image.
+    .DESCRIPTION
+        Kernel drivers name their image relative to %SystemRoot% in
+        several spellings ('system32\drivers\x.sys',
+        '\SystemRoot\system32\drivers\x.sys',
+        '%SystemRoot%\System32\drivers\x.sys', a DriverStore path).
+        A driver with no ImagePath defaults to
+        System32\drivers\<ServiceName>.sys. Returns the absolute path
+        under $ImageRoot; the file itself may not exist -- callers
+        Test-Path the result.
+    #>
+    [CmdletBinding()]
+    param(
+        [string] $ImagePath,
+        [Parameter(Mandatory)][string] $ServiceName,
+        [Parameter(Mandatory)][string] $ImageRoot
+    )
+
+    $rel = $ImagePath
+    if ([string]::IsNullOrWhiteSpace($rel)) {
+        $rel = "System32\drivers\$ServiceName.sys"
+    }
+    # Strip a %SystemRoot% / \SystemRoot prefix in any spelling; what
+    # remains is relative to the image root.
+    $rel = $rel -replace '^(?i)(%SystemRoot%|\\SystemRoot|SystemRoot)\\?', ''
+    $rel = $rel.TrimStart('\')
+    return (Join-Path $ImageRoot $rel)
+}
+
+function Test-CleanCriticalDriverFiles {
+    <#
+    .SYNOPSIS
+        Checks every boot/system driver in $Services for its file.
+    .DESCRIPTION
+        Round 16 root cause: FileCrypt was Start=1 + ErrorControl=3
+        with its file missing from the image, and the fixed
+        boot-critical manifest never listed it, so the build sailed
+        through capture and only died in QEMU with
+        CRITICAL_SERVICE_FAILED (0x5A). The kernel bugchecks 0x5A when
+        a driver with ErrorControl=3 fails to load during IoInitSystem's
+        driver-load phase, so any Start=0/1, Type=1/2, ErrorControl=3
+        service whose driver file is missing is a guaranteed 0x5A.
+        Non-critical (ErrorControl < 3) missing drivers only fail their
+        load and log it; they are reported separately and never fail
+        this check. $Services is a list of objects with Name, Start,
+        ErrorControl, Type and ImagePath (ImagePath may be empty).
+        Returns CriticalMissing and NonCriticalMissing (service names).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $ImageRoot,
+        [AllowEmptyCollection()][object[]] $Services = @()
+    )
+
+    $criticalMissing = @()
+    $nonCriticalMissing = @()
+    foreach ($svc in $Services) {
+        if ($null -eq $svc.Start -or ($svc.Start -ne 0 -and $svc.Start -ne 1)) { continue }
+        if ($null -eq $svc.Type -or ($svc.Type -ne 1 -and $svc.Type -ne 2)) { continue }
+        $driverPath = Resolve-CleanDriverImagePath -ImagePath $svc.ImagePath -ServiceName $svc.Name -ImageRoot $ImageRoot
+        if (Test-Path -LiteralPath $driverPath) { continue }
+        $ec = $svc.ErrorControl
+        if ($null -eq $ec) { $ec = 1 }
+        if ($ec -eq 3) { $criticalMissing += $svc.Name }
+        else { $nonCriticalMissing += $svc.Name }
+    }
+    return [pscustomobject]@{
+        CriticalMissing    = $criticalMissing
+        NonCriticalMissing = $nonCriticalMissing
+    }
+}
+
 # --- pre-capture proof -----------------------------------------------------
 
 function Test-BootCriticalFiles {
@@ -332,6 +409,34 @@ function Test-BootCriticalFiles {
                 }
                 $start = (Get-ItemProperty -Path $path -Name Start -ErrorAction SilentlyContinue).Start
                 if ($null -eq $start -or $start -ne 0) { $serviceProblems += "$svc Start=$start (expected 0)" }
+            }
+
+            # Round 16 guard: the fixed manifest above cannot catch a
+            # critical driver the whitelist silently drops (FileCrypt was
+            # Start=1 + ErrorControl=3 with no file in the image, and the
+            # build only died in QEMU with 0x5A). Enumerate every service
+            # and fail on any boot/system driver whose file is missing.
+            $services = @()
+            $servicesKey = "HKLM:\$key\ControlSet001\Services"
+            if (Test-Path -LiteralPath $servicesKey) {
+                foreach ($child in (Get-ChildItem -LiteralPath $servicesKey)) {
+                    $props = Get-ItemProperty -LiteralPath $child.PSPath -ErrorAction SilentlyContinue
+                    if ($null -eq $props) { continue }
+                    $services += [pscustomobject]@{
+                        Name         = $child.PSChildName
+                        Start        = $props.Start
+                        ErrorControl = $props.ErrorControl
+                        Type         = $props.Type
+                        ImagePath    = $props.ImagePath
+                    }
+                }
+            }
+            $driverCheck = Test-CleanCriticalDriverFiles -ImageRoot $ImageRoot -Services $services
+            foreach ($name in $driverCheck.CriticalMissing) {
+                $serviceProblems += "$name is a critical boot/system driver (ErrorControl=3) but its file is missing from the image"
+            }
+            if ($driverCheck.NonCriticalMissing.Count -gt 0) {
+                Write-Warn ("non-critical boot/system drivers with missing files (failed load only, no 0x5A): {0}" -f ($driverCheck.NonCriticalMissing -join ', '))
             }
         }
         finally { Dismount-OfflineHive -Key $key }
