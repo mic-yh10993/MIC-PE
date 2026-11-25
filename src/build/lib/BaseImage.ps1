@@ -241,8 +241,11 @@ function New-UupDownloadPackage {
     $query = "id=$Uuid&pack=$([uri]::EscapeDataString($Lang))&edition=$([uri]::EscapeDataString($Edition))"
     # autodl=2 is the "download and convert" flavour: it ships
     # uup_download_windows.cmd together with ConvertConfig.ini.
-    # autodl=1 only produces the bare file list, autodl=3 asks for a virtual
-    # edition and rejects plain professional.
+    # autodl=1 returns the same downloader scripts WITHOUT ConvertConfig.ini
+    # -- it does NOT produce the bare file list (round 13 died on exactly
+    # that assumption: the ZIP has no list in it). The bare file list comes
+    # from aria2=2, which returns the plain-text aria2 input file.
+    # autodl=3 asks for a virtual edition and rejects plain professional.
     $body = @{
         autodl  = '2'
         cleanup = '1'

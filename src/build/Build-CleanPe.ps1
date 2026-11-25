@@ -512,10 +512,17 @@ function Find-CleanCatLcuCab {
 }
 
 function Get-CleanCatFixFileList {
-    # Resolve the 22621.900 build and download its bare file list
-    # (get.php autodl=1 -- the list only, no converter). Mirrors
-    # New-UupDownloadPackage's POST; the list is what the LCU cab URL
-    # comes from.
+    # Resolve the 22621.900 build and download its bare file list as
+    # plain text (get.php aria2=2 -- the aria2 input file: URL lines
+    # followed by indented `out=<filename>` lines). That is the list
+    # the LCU cab URL comes from.
+    #
+    # Do NOT use autodl=1 here: round 13 proved it returns a
+    # downloader-script ZIP (uup_download_windows.cmd etc.) with no file
+    # list in it, so the matcher found 0 cabs and the whole round died
+    # before QEMU. aria2=2 is the endpoint that returns the list itself
+    # (verified 2026-11-25: GET returns 324 lines, exactly one
+    # Windows11.0-KB5020044-x64.cab).
     [CmdletBinding()]
     param(
         [string] $Build = '22621.900',
@@ -538,22 +545,27 @@ function Get-CleanCatFixFileList {
     if (-not (Test-Path -LiteralPath $WorkDir)) {
         New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
     }
-    $query = "id=$($uup.Uuid)&pack=$([uri]::EscapeDataString($Lang))&edition=$([uri]::EscapeDataString($Edition))"
-    $body = @{ autodl = '1' }
+    $query = "id=$($uup.Uuid)&pack=$([uri]::EscapeDataString($Lang))&edition=$([uri]::EscapeDataString($Edition))&aria2=2"
     $url = "$WebBase/get.php?$query"
-    $zip = Join-Path $WorkDir 'uup-filelist.zip'
+    $listDir = Join-Path $WorkDir 'filelist'
+    if (Test-Path -LiteralPath $listDir) {
+        Remove-Item -LiteralPath $listDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $listDir -Force | Out-Null
+    $listFile = Join-Path $listDir 'uup-filelist.txt'
     Write-SubStep "downloading UUP file list for $($uup.Uuid) ($Lang, $Edition)"
     Invoke-NetworkWithRetry -Action {
-        Invoke-WebRequest -Uri $url -Method Post -Body $body -OutFile $zip -TimeoutSec 600
+        Invoke-WebRequest -Uri $url -OutFile $listFile -TimeoutSec 600
     } -Label "UUP file list $url"
-    Assert-PathExists -Path $zip -Label 'UUP file-list archive'
-
-    $extractDir = Join-Path $WorkDir 'filelist'
-    if (Test-Path -LiteralPath $extractDir) {
-        Remove-Item -LiteralPath $extractDir -Recurse -Force
-    }
-    Expand-Archive -LiteralPath $zip -DestinationPath $extractDir -Force
-    return $extractDir
+    Assert-PathExists -Path $listFile -Label 'UUP file list'
+    # The endpoint must have returned the aria2 list, not an error page
+    # or a script ZIP: fail loudly here instead of letting the matcher
+    # report a misleading "found 0 cabs" downstream.
+    $listText = Get-Content -LiteralPath $listFile -Raw
+    $preview = if ($listText) { $listText.Substring(0, [Math]::Min(200, $listText.Length)) } else { '<empty>' }
+    Assert-True -Condition ($listText -match '(?m)^\s*out\s*=') -Message (
+        "UUP file list from $url is not an aria2 list (no 'out=' lines; first 200 chars: $preview)")
+    return $listDir
 }
 
 function Invoke-CleanCatFixStep {
@@ -608,7 +620,7 @@ function Invoke-CleanCatFixStep {
 
     Write-Step 'fetching the two 22621.900 catalog files for cdrom.sys (round 13 root cause)'
 
-    # 1. File list (autodl=1) -> the single KB5020044 LCU cab URL.
+    # 1. File list (aria2=2) -> the single KB5020044 LCU cab URL.
     if ($FileListZipPath) {
         $fileListDir = Join-Path $WorkDir 'filelist'
         if (Test-Path -LiteralPath $fileListDir) {

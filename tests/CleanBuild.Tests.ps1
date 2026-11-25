@@ -617,7 +617,11 @@ Describe 'Invoke-CleanCatFixStep (round 13: the two 22621.900 .cat files for cdr
         $script:CleanScriptText | Should -Match 'Get-UupBuild -Build'
         $script:CleanScriptText | Should -Match 'https://uupdump\.net'
         $script:CleanScriptText | Should -Match 'get\.php'
-        $script:CleanScriptText | Should -Match "autodl = '1'"
+        $script:CleanScriptText | Should -Match 'aria2=2'
+        # Round 13 died on autodl=1: it returns a downloader-script ZIP
+        # with no file list in it, so the matcher found 0 cabs. The
+        # endpoint must stay aria2=2, which returns the plain-text list.
+        $script:CleanScriptText | Should -Not -Match "autodl = '1'"
         $script:CleanScriptText | Should -Match 'F750E6C3-38EE-11D1-85E5-00C04FC295EE'
     }
 
@@ -651,6 +655,66 @@ https://download.windowsupdate.com/x/windows11.0-kb5020044-x64_bbbb.cab
   out=windows11.0-kb5020044-x64_bbbb.cab
 '@
         { Find-CleanCatLcuCab -FileListText $text -Kb 'KB5020044' } | Should -Throw '*expected exactly one KB5020044*'
+    }
+
+    It 'Get-CleanCatFixFileList fetches the plain-text aria2 list (aria2=2), not the autodl=1 script ZIP (round 14)' {
+        $work = Join-Path $script:TempRoot ("micpe-catfix-list-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $fakeUup = {
+            param($url)
+            @{
+                response = @{
+                    builds = @{
+                        '2858' = [pscustomobject]@{ uuid = '5d5ef944-1ba0-436b-b7d3-571d59a15cbb'; build = '22621.900'; arch = 'amd64'; title = 'Windows 11, version 22H2 (22621.900)' }
+                    }
+                }
+            }
+        }
+        try {
+            Mock Invoke-WebRequest {
+                param($Uri, $OutFile)
+                $script:capturedListUri = $Uri
+                Set-Content -LiteralPath $OutFile -Value $script:aria2Text -NoNewline
+            }
+            $listDir = Get-CleanCatFixFileList -Build '22621.900' -Lang 'zh-cn' -Edition 'professional' -WorkDir $work -UupInvoke $fakeUup
+            $script:capturedListUri | Should -Match 'aria2=2'
+            $script:capturedListUri | Should -Not -Match 'autodl'
+            $script:capturedListUri | Should -Match '5d5ef944-1ba0-436b-b7d3-571d59a15cbb'
+            $listFile = Join-Path $listDir 'uup-filelist.txt'
+            Test-Path -LiteralPath $listFile | Should -BeTrue
+            (Get-Content -LiteralPath $listFile -Raw) | Should -Be $script:aria2Text
+            (Find-CleanCatLcuCab -FileListText (Get-Content -LiteralPath $listFile -Raw) -Kb 'KB5020044').FileName |
+                Should -Be 'windows11.0-kb5020044-x64_0123456789abcdef.cab'
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Get-CleanCatFixFileList throws loudly when the fetched content is not an aria2 list (round 14)' {
+        $work = Join-Path $script:TempRoot ("micpe-catfix-badlist-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $fakeUup = {
+            param($url)
+            @{
+                response = @{
+                    builds = @{
+                        '2858' = [pscustomobject]@{ uuid = '5d5ef944-1ba0-436b-b7d3-571d59a15cbb'; build = '22621.900'; arch = 'amd64'; title = 'Windows 11, version 22H2 (22621.900)' }
+                    }
+                }
+            }
+        }
+        try {
+            Mock Invoke-WebRequest {
+                param($Uri, $OutFile)
+                Set-Content -LiteralPath $OutFile -Value 'not a list at all' -NoNewline
+            }
+            { Get-CleanCatFixFileList -Build '22621.900' -Lang 'zh-cn' -Edition 'professional' -WorkDir $work -UupInvoke $fakeUup } |
+                Should -Throw '*not an aria2 list*'
+        }
+        finally {
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     It 'Test-CleanCatHasCdromHash finds the cdrom.sys hash in a fixture catalog and not in a plain file' {
