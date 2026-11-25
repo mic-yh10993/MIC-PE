@@ -195,6 +195,108 @@ Describe 'Build-CleanPe.ps1 pipeline' {
     }
 }
 
+Describe 'Set-CleanBcdNoIntegrityChecks (BCD experiment, temporary branch only)' {
+    BeforeAll {
+        $script:fakeBcdedit = Join-Path $PSScriptRoot 'Fake-Bcdedit.ps1'
+        # Pull the function definition out of Build-CleanPe.ps1 via the AST
+        # (the script cannot be dot-sourced: its dispatch section runs on load).
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:CleanScript, [ref] $tokens, [ref] $errors)
+        $errors.Count | Should -Be 0
+        $fn = $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq 'Set-CleanBcdNoIntegrityChecks'
+            }, $true)
+        @($fn).Count | Should -Be 1
+        . ([scriptblock]::Create($fn[0].Extent.Text))
+    }
+
+    It 'exists and uses bcdedit /store /set {default} nointegritychecks on, then verifies with /enum' {
+        $script:CleanScriptText | Should -Match 'function Set-CleanBcdNoIntegrityChecks'
+        $script:CleanScriptText | Should -Match "bcdedit.* /store .* /set '\{default\}' nointegritychecks on"
+        $script:CleanScriptText | Should -Match "bcdedit.* /store .* /enum '\{default\}'"
+        $script:CleanScriptText | Should -Match 'nointegritychecks'
+    }
+
+    It 'is called by the ISO step before oscdimg packages the media tree' {
+        $isoStep = ($script:CleanScriptText -split 'function Invoke-CleanIsoStep')[1] -split '# ---' | Select-Object -First 1
+        $isoStep | Should -Match 'Set-CleanBcdNoIntegrityChecks'
+        $isoStep.IndexOf('Set-CleanBcdNoIntegrityChecks') | Should -BeLessThan $isoStep.IndexOf('New-MicpeIso')
+    }
+
+    It 'sets nointegritychecks on both BCD stores and verifies each one' {
+        $media = Join-Path $script:TempRoot ("micpe-bcd-media-{0}" -f [guid]::NewGuid())
+        $efiDir = Join-Path $media 'efi\microsoft\boot'
+        $biosDir = Join-Path $media 'boot'
+        New-Item -ItemType Directory -Path $efiDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $biosDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $efiDir 'bcd') -Value 'FAKE-BCD' -NoNewline
+        Set-Content -LiteralPath (Join-Path $biosDir 'bcd') -Value 'FAKE-BCD' -NoNewline
+        $log = Join-Path $script:TempRoot ("micpe-bcd-log-{0}.txt" -f [guid]::NewGuid())
+        try {
+            $env:MICPE_FAKE_BCDEDIT_LOG = $log
+            { Set-CleanBcdNoIntegrityChecks -MediaDir $media -BcdeditPath $script:fakeBcdedit } | Should -Not -Throw
+            $calls = Get-Content -LiteralPath $log
+            # Two /set calls (one per store) and two /enum calls.
+            @($calls | Where-Object { $_ -eq '/set' }).Count | Should -Be 2
+            @($calls | Where-Object { $_ -eq '/enum' }).Count | Should -Be 2
+            @($calls | Where-Object { $_ -eq 'nointegritychecks' }).Count | Should -Be 2
+            $efiBcd = Join-Path $media 'efi\microsoft\boot\bcd'
+            $biosBcd = Join-Path $media 'boot\bcd'
+            $calls | Should -Contain $efiBcd
+            $calls | Should -Contain $biosBcd
+        }
+        finally {
+            Remove-Item -LiteralPath $env:MICPE_FAKE_BCDEDIT_LOG -ErrorAction SilentlyContinue
+            $env:MICPE_FAKE_BCDEDIT_LOG = $null
+            Remove-Item -LiteralPath $media -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws when neither BCD store exists in the media tree' {
+        $media = Join-Path $script:TempRoot ("micpe-bcd-empty-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $media -Force | Out-Null
+        try {
+            { Set-CleanBcdNoIntegrityChecks -MediaDir $media -BcdeditPath $script:fakeBcdedit } | Should -Throw '*no BCD store*'
+        }
+        finally {
+            Remove-Item -LiteralPath $media -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws loudly when bcdedit /set fails (the experiment must not silently proceed)' {
+        $media = Join-Path $script:TempRoot ("micpe-bcd-fail-{0}" -f [guid]::NewGuid())
+        $efiDir = Join-Path $media 'efi\microsoft\boot'
+        New-Item -ItemType Directory -Path $efiDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $efiDir 'bcd') -Value 'FAKE-BCD' -NoNewline
+        try {
+            $env:MICPE_FAKE_BCDEDIT_FAIL_SET = '1'
+            { Set-CleanBcdNoIntegrityChecks -MediaDir $media -BcdeditPath $script:fakeBcdedit } | Should -Throw '*bcdedit /set nointegritychecks failed*'
+        }
+        finally {
+            $env:MICPE_FAKE_BCDEDIT_FAIL_SET = $null
+            Remove-Item -LiteralPath $media -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws loudly when /enum does not confirm nointegritychecks (a /set that did not stick)' {
+        $media = Join-Path $script:TempRoot ("micpe-bcd-enum-{0}" -f [guid]::NewGuid())
+        $efiDir = Join-Path $media 'efi\microsoft\boot'
+        New-Item -ItemType Directory -Path $efiDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $efiDir 'bcd') -Value 'FAKE-BCD' -NoNewline
+        try {
+            $env:MICPE_FAKE_BCDEDIT_ENUM_NO = '1'
+            { Set-CleanBcdNoIntegrityChecks -MediaDir $media -BcdeditPath $script:fakeBcdedit } | Should -Throw '*nointegritychecks not confirmed*'
+        }
+        finally {
+            $env:MICPE_FAKE_BCDEDIT_ENUM_NO = $null
+            Remove-Item -LiteralPath $media -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'New-WimCapture' {
     It 'captures with LZX compression, --boot and an integrity table' {
         $src = Join-Path $script:TempRoot ("micpe-cap-src-{0}" -f [guid]::NewGuid())

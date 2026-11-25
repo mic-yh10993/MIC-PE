@@ -716,6 +716,53 @@ function Invoke-CleanCaptureStep {
     return $bootWim
 }
 
+function Set-CleanBcdNoIntegrityChecks {
+    # BCD EXPERIMENT (temporary branch experiment/bcd-nointegritychecks
+    # only -- never merge into feature/clean-22621-rebuild): rounds 10-12
+    # all die in winload on cdrom.sys 0xc0000428 (STATUS_INVALID_IMAGE_HASH)
+    # with byte-identical screenshots, after the .cat, Start-value and
+    # missing-driver hypotheses were all disproven with evidence. This
+    # experiment asks the one question those hypotheses cannot answer:
+    # is the failure really signature verification at all? Setting
+    # nointegritychecks on the default boot entry disables winload's
+    # driver-signature check for that entry. If the ISO then boots past
+    # Recovery to LogonUI, the problem is definitively in signature
+    # verification (dig into the CI policy / certificate chain next). If
+    # it still dies on the same error, the cause is elsewhere despite
+    # what the error message says (winload/bootmgr/BCD/WIM integrity).
+    # Runs on both BCD stores in the media tree (UEFI + BIOS); the QEMU
+    # verify boots UEFI, so the EFI BCD is the one that matters.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $MediaDir,
+
+        [string] $BcdeditPath = 'bcdedit'
+    )
+
+    $bcdPaths = @(
+        (Join-Path $MediaDir 'efi\microsoft\boot\bcd'),
+        (Join-Path $MediaDir 'boot\bcd')
+    )
+
+    $found = 0
+    foreach ($bcd in $bcdPaths) {
+        if (-not (Test-Path -LiteralPath $bcd)) {
+            Write-Warn "BCD experiment: no BCD store at $bcd, skipping"
+            continue
+        }
+        $found++
+        Write-Step "BCD experiment: nointegritychecks on {default} in $bcd"
+        & $BcdeditPath /store $bcd /set '{default}' nointegritychecks on | Out-Host
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD experiment: bcdedit /set nointegritychecks failed for $bcd (exit $LASTEXITCODE)"
+        $enum = & $BcdeditPath /store $bcd /enum '{default}' 2>&1 | Out-String
+        Assert-True -Condition ($enum -match 'nointegritychecks' -and $enum -match 'Yes') -Message "BCD experiment: nointegritychecks not confirmed on {default} in $bcd"
+        Write-SubStep "BCD experiment: $bcd now has nointegritychecks on {default}"
+    }
+
+    Assert-True -Condition ($found -gt 0) -Message 'BCD experiment: no BCD store found in the media tree'
+}
+
 function Invoke-CleanIsoStep {
     [CmdletBinding()]
     param(
@@ -746,6 +793,10 @@ function Invoke-CleanIsoStep {
     # here, after the last step that needs it. The installer finds the
     # user's own install.wim on another volume (install.mic protocol).
     Remove-InstallWimFromMedia -MediaDir $paths.Media
+    # BCD EXPERIMENT (temporary branch only): disable winload's driver
+    # signature check on the default boot entry, so the QEMU run tells us
+    # whether 0xc0000428 is really a signature-verification failure.
+    Set-CleanBcdNoIntegrityChecks -MediaDir $paths.Media
     New-MicpeIso -MediaDir $paths.Media -OutIso $isoPath -OscdimgPath (Get-OscdimgPath)
 
     $isoBytes = (Get-Item -LiteralPath $isoPath).Length
