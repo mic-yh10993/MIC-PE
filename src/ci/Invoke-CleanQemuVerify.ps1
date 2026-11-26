@@ -61,30 +61,28 @@ param(
 
     # Round 26: live kernel-debugger (KD) serial port. The guest's
     # COM1 (kernel debug, serial 115200, enabled on both BCDs since
-    # round 16) is wired to a named pipe here so kd.exe can attach
+    # round 16) is wired to a TCP server here so kd.exe can attach
     # live and catch the 0x5A bugcheck the moment it fires; the
-    # monitor stays on $MonitorPort (TCP). Round 31: the pipe
-    # replaces the round 26 TCP chardev (QEMU -serial
-    # tcp:127.0.0.1:50001 + kd com:ipport=50001). Three rounds
-    # (28/29/30) of the same shape -- kd.exe connects at the initial
-    # breakpoint (uptime 0.014 s) and the transport drops immediately
-    # (64->320 retries, no recovery) before the init script prints
-    # anything -- point at the QEMU TCP chardev, not at the script
-    # or the symbols: the script never ran, so reordering it cannot
-    # fix the handshake. A named pipe is the standard VM kernel-debug
-    # transport (no TCP stack, no listen backlog, one peer only).
-    # The default name is arbitrary; the probe uses 'micpe-kd-probe'.
-    # Round 32: the -serial argument below must be this BARE name --
-    # QEMU creates the pipe at \\.\pipe\<name> itself
-    # (qemu-options.hx, -chardev pipe: "On Windows, a single duplex
-    # pipe will be created at \\.\pipe\path"). Round 31 passed the
-    # full \\.\pipe\micpe-kd, so QEMU tried \\.\pipe\\.\pipe\micpe-kd:
-    # the pipe never appeared under the checked name, kd.exe died
-    # with "file not found" (exit -2147024894), and QEMU itself was
-    # gone ~100 s in. kd.exe takes the full path (com:pipe,
-    # port=\\.\pipe\micpe-kd in Get-CleanKdArgList); only the QEMU
-    # side is bare.
-    [string] $KdPipeName = 'micpe-kd',
+    # monitor stays on $MonitorPort. The default 50001 is a high
+    # port nothing else on the runner uses. The round 24 serial log
+    # proved the kernel re-sends its initial breakpoint (26 identical
+    # packets) with no debugger attached and then stops sending KD
+    # packets entirely, so offline parsing of serial.log is dead --
+    # the debugger must be attached from the start.
+    # Round 33: back to TCP. Rounds 31-32 tried the named pipe
+    # (round 31: full \\.\pipe\micpe-kd path, pipe never appeared,
+    # kd.exe died exit -2147024894, QEMU gone ~100 s in; round 32:
+    # bare pipe:micpe-kd, the pipe appeared and kd.exe connected at
+    # the initial breakpoint -- but the transport dropped the same
+    # way, 64->384 retries, and the CONTROL pass QEMU died again
+    # ~92 s in, exit -1, all three QEMU logs 0 bytes). TCP is the
+    # known-good QEMU state: rounds 28/29/30 ran three full passes
+    # with QEMU alive throughout and the control pass reaching the
+    # blue screen. The drop itself is transport-independent (same
+    # shape on TCP and on the pipe), so the fallback restores QEMU
+    # survival and isolates the drop as the one remaining variable.
+    # The probe uses port 50099.
+    [string] $KdPort = '50001',
 
     # Round 26: skip the live KD session (escape hatch for a re-run
     # if the debugger misbehaves in CI; the serial output is then
@@ -1797,22 +1795,49 @@ function Get-CleanCdbPath {
 }
 
 function Write-CleanKdInitScript {
-    # Round 27: writes the two-line kd-init.txt the -c "$$>..." token
-    # runs at the initial break-in: a deferred breakpoint on
-    # KeBugCheckEx that prints the registers and the two
-    # UNICODE_STRING arguments, then `g` to continue into the
-    # bugcheck. Idempotent: the probe and the real session share it.
-    # Round 30: the script now echoes its own progress -- rounds
-    # 28-29 left no trace of whether the script ran at all (the log
-    # went straight from the kernel banner to the transport retry
-    # storm). The markers say exactly where it stopped: START means
-    # the -c script began executing; BU ISSUED means the `bu` line
-    # ran (and `bl` right after it shows whether the breakpoint
-    # resolved to an address or stayed deferred); G ISSUED prints on
-    # the NEXT break-in after `g` resumes the target, so its absence
-    # with BU ISSUED present means `g` never got through. The
-    # markers are plain .echo lines, so ConvertFrom-CleanKdLog can
-    # read them without parsing debugger output.
+    # Round 27: writes the kd-init.txt the -c "$$>..." token runs
+    # at the initial break-in. Idempotent: the probe and the real
+    # session share it.
+    # Round 30: the script echoed its own progress -- rounds 28-29
+    # left no trace of whether the script ran at all (the log went
+    # straight from the kernel banner to the transport retry storm).
+    # The markers say exactly where it stopped: START means the -c
+    # script began executing; BU ISSUED means the `bu` line ran (and
+    # `bl` right after it shows whether the breakpoint resolved to
+    # an address or stayed deferred); G ISSUED prints on the NEXT
+    # break-in after `g` resumes the target, so its absence with BU
+    # ISSUED present means `g` never got through. The markers are
+    # plain .echo lines, so ConvertFrom-CleanKdLog can read them
+    # without parsing debugger output.
+    # Round 33: MINIMAL script -- only `.echo START`, `g`, `.echo
+    # G ISSUED`. The `bu` breakpoint, `bl` and BU ISSUED are out
+    # for this round only (not deleted: they come back in round 34
+    # once `g` is proven to get through). Why: rounds 28-32 prove
+    # the script NEVER ran at all -- START is absent from
+    # micpe-kd.log, micpe-kd-console.out and the full run log in
+    # all five rounds -- so the first question is not "does the
+    # breakpoint resolve" but "does ANY debugger command get
+    # through the transport". The -c timing is now verified
+    # (Microsoft Learn, WinDbg Command-Line Options: `-c` executes
+    # "after the debugger is attached"; Corelan: the -c commands run
+    # when WinDbg hits the initial break): the script runs at the
+    # initial break-in, and the retry storm starts at exactly that
+    # moment, so the script and the drop are the same event -- the
+    # minimal script is the only way to tell them apart. If START
+    # appears, the script mechanism works and the problem was in
+    # the `bu` line; if START still never appears, the drop is in
+    # the break-in handshake itself, not in any script content.
+    # Note what G ISSUED means here: `g` pauses the script until
+    # the next break-in, and this round the next break-in IS the
+    # 0x5A bugcheck itself (a bugcheck always breaks into an
+    # attached kernel debugger), where the debugger prints the
+    # `*** Fatal System Error: 0x0000005a` banner -- which
+    # ConvertFrom-CleanKdLog already parses -- so the minimal round
+    # may capture the parameters for free, without the `bu`
+    # breakpoint. `-b` needs nothing here: it is no longer
+    # supported (same Microsoft page), and the initial breakpoint
+    # is hit automatically because the kernel boots with debugging
+    # on.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -1820,9 +1845,6 @@ function Write-CleanKdInitScript {
     )
     $initLines = @(
         '.echo *** KD-INIT START ***'
-        'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"'
-        'bl'
-        '.echo *** KD-INIT BU ISSUED ***'
         'g'
         '.echo *** KD-INIT G ISSUED ***'
     )
@@ -1836,21 +1858,20 @@ function Get-CleanKdArgList {
     # launched verbatim against QEMU. Every variant is a single
     # variable change from 'baseline' (the round 26 command line), so
     # the first surviving variant identifies the trigger. Variants:
-    # baseline | nosymbols | nologo | inline-c | noc. ('kd' is
+    # baseline | baud | nosymbols | nologo | inline-c | noc. ('kd' is
     # not an argv variant: it is the same argv with kd.exe as the
     # binary, selected by the caller.) 'noc' drops -c entirely and is
     # probe-only: without -c nothing issues `g`, so the guest would
-    # halt at the initial breakpoint. Round 31: the -k connect string
-    # is a named pipe ('com:pipe,port=\\.\pipe\micpe-kd'), replacing
-    # the round 26 TCP connect string ('com:ipport=50001,
-    # port=127.0.0.1') -- three rounds of kd.exe connecting at the
-    # initial breakpoint and dropping immediately point at the QEMU
-    # TCP chardev. The 'baud' variant is gone with it: a baud rate
-    # is meaningless on a pipe.
+    # halt at the initial breakpoint. Round 33: the -k connect string
+    # is back to TCP ('com:ipport=50001, port=127.0.0.1') -- the
+    # round 31-32 pipe experiment is over (round 32: the pipe
+    # connected but the transport dropped the same way, and the
+    # control QEMU died again). The 'baud' variant is back with it:
+    # a baud rate is meaningless on a pipe but real on TCP.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string] $KdPipeName,
+        [string] $KdPort,
 
         [Parameter(Mandatory = $true)]
         [string] $WorkDir,
@@ -1861,13 +1882,14 @@ function Get-CleanKdArgList {
         [Parameter(Mandatory = $true)]
         [string] $InitScriptPath,
 
-        [ValidateSet('baseline', 'nosymbols', 'nologo', 'inline-c', 'noc')]
+        [ValidateSet('baseline', 'baud', 'nosymbols', 'nologo', 'inline-c', 'noc')]
         [string] $Variant = 'baseline'
     )
     $symPath = ('SRV*{0}\kd-symbols*https://msdl.microsoft.com/download/symbols' -f $WorkDir)
     $args = [System.Collections.Generic.List[string]]::new()
     $args.Add('-k')
-    $com = ('com:pipe,port=\\.\pipe\{0}' -f $KdPipeName)
+    $com = ('com:ipport={0},port=127.0.0.1' -f $KdPort)
+    if ($Variant -eq 'baud') { $com += ',baud=115200' }
     $args.Add($com)
     if ($Variant -ne 'nosymbols') {
         $args.Add('-y')
@@ -2076,7 +2098,7 @@ function Invoke-CleanSymbolPrestage {
     $finish = {
         param($success, $reason, $pdbPath, $details)
         $summary = [System.Collections.Generic.List[string]]::new()
-        $summary.Add('symbol pre-stage (round 32: ntkrnlmp.pdb into the local KD symbol cache)')
+        $summary.Add('symbol pre-stage (round 33: ntkrnlmp.pdb into the local KD symbol cache)')
         $summary.Add(('outcome: {0}' -f $(if ($success) { 'cached' } else { 'not cached' })))
         $summary.Add(('reason: {0}' -f $reason))
         $summary.Add(('cache: {0}' -f $cacheDir))
@@ -2088,7 +2110,7 @@ function Invoke-CleanSymbolPrestage {
         # tell a wrong path from a wrong cache directory from a
         # silent no-op. Only the symchk branches pass $details.
         if ($null -ne $details -and $details.Count -gt 0) {
-            $summary.Add('--- symchk diagnostics (round 31) ---')
+            $summary.Add('--- symchk diagnostics (round 33) ---')
             foreach ($d in $details) { $summary.Add($d) }
         }
         $summary | Set-Content -LiteralPath $summaryPath -Encoding ASCII
@@ -2187,27 +2209,41 @@ function Invoke-CleanSymbolPrestage {
     }
 }
 
-function Test-CleanKdPipe {
-    # Round 31: does a named pipe \\.\pipe\$PipeName exist? The
-    # pipe is QEMU's serial chardev (-serial pipe:) and the debugger
-    # connects to it, so this is the round 27 TCP pre-check's
-    # replacement: it proves (or disproves) that QEMU's serial
-    # endpoint is up when kd.exe starts. It only ENUMERATES the pipe
-    # directory -- it never opens or connects to the pipe, because a
-    # named pipe accepts exactly one client and a probe connection
-    # here would steal the debugger's only slot. Returns $false on
-    # a missing pipe or any error (including a non-Windows host,
-    # where \\.\pipe\ does not exist). Never throws.
+function Test-CleanTcpPort {
+    # Round 27: is anything listening on 127.0.0.1:$Port? A short
+    # TCP connect with a timeout; returns $false on refusal, timeout
+    # or any error. Used before the real KD session to prove (or
+    # disprove) that QEMU's serial listener is up when cdb starts --
+    # round 26 never proved it. Never throws.
+    # Round 33: back from the round 31-32 pipe pre-check. The pipe
+    # check only enumerated \\.\pipe\ (a pipe accepts one client
+    # only, so a probe connect would steal the debugger's slot);
+    # the TCP check CONNECTS -- and that is safe here for the same
+    # reason the round 27-30 check was safe: it runs right after
+    # the monitor comes up, while the guest is still in firmware,
+    # so no KD packet can be stolen (the kernel's first packet is
+    # ~100 s away), and QEMU's TCP chardev re-listens after the
+    # pre-check disconnects (rounds 27-30 proved it: the session
+    # connected fine after the check every time).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string] $PipeName
+        [string] $Port,
+
+        [int] $TimeoutSec = 5
     )
+    $client = $null
     try {
-        $files = [System.IO.Directory]::GetFiles('\\.\pipe\')
-        return ($files -contains ('\\.\pipe\' + $PipeName))
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $task = $client.ConnectAsync('127.0.0.1', [int]$Port)
+        if (-not $task.Wait([timespan]::FromSeconds($TimeoutSec))) { return $false }
+        if ($task.IsFaulted -or $task.IsCanceled) { return $false }
+        return $client.Connected
     }
     catch { return $false }
+    finally {
+        if ($null -ne $client) { try { $client.Dispose() } catch {} }
+    }
 }
 
 function Save-CleanKdConsoleOutput {
@@ -2255,65 +2291,64 @@ function Save-CleanKdConsoleOutput {
 
 function Start-CleanKdSession {
     # Round 26: start cdb.exe as a background process attached to
-    # the guest's KD serial port (QEMU -serial pipe:\\.\pipe\...,
-    # round 31: a named pipe instead of the round 26 TCP chardev),
-    # with a log file and a script file that sets a
-    # deferred breakpoint on KeBugCheckEx and continues. Returns the
-    # Process object, or $null when cdb is missing or could not start
+    # the guest's KD serial port (QEMU -serial tcp:127.0.0.1:$KdPort,
+    # round 33: back to the TCP chardev after the round 31-32 pipe
+    # experiment), with a log file and a script file that continues
+    # the target past the initial breakpoint. Returns the Process
+    # object, or $null when cdb is missing or could not start
     # (best-effort: the caller logs the reason and continues without
     # live KD). The caller kills the process in the finally block
-    # (it exits on its own when QEMU quits and the pipe disconnects,
-    # but never rely on that).
+    # (it exits on its own when QEMU quits and the TCP connection
+    # drops, but never rely on that).
     #
-    # Round 31 note on the script order (why `bu` still comes
-    # before `g`, not the round 30 fallback (b) "g first, breakpoint
-    # after"): the fallback was written for a session that stalls
-    # INSIDE the script, but rounds 28/29/30 prove the script never
-    # runs at all -- the START echo is absent from micpe-kd.log,
-    # micpe-kd-console.out and the full run log in all three rounds,
+    # Round 33 note on the minimal script (why there is no `bu`
+    # this round): rounds 28-32 prove the script NEVER runs at all
+    # -- the START echo is absent from micpe-kd.log,
+    # micpe-kd-console.out and the full run log in all five rounds,
     # and kd.exe goes straight from the kernel banner into the retry
-    # storm. Reordering lines the debugger never reaches cannot fix
-    # the handshake; the pipe is the one variable that can. And a
-    # g-first script would be strictly worse once the handshake
-    # works: `g` pauses the script until the next break-in, so `bu`
-    # would only be set at the bugcheck break itself -- too late --
-    # and the Arg2/Arg3 `du` strings (the whole point of the round)
-    # would be lost. The old order (bu, bl, g) is kept verbatim.
+    # storm. The -c timing is now verified (Microsoft Learn, WinDbg
+    # Command-Line Options: `-c` executes "after the debugger is
+    # attached"; the script runs at the initial break-in), so the
+    # script and the drop are the same event: the first question is
+    # whether ANY debugger command gets through, not whether the
+    # breakpoint resolves. The round 33 script is only `.echo
+    # START`, `g`, `.echo G ISSUED`. Once `g` is proven to get
+    # through, round 34 puts the breakpoint back: `bu
+    # nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du
+    # poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"` + `bl` +
+    # `.echo BU ISSUED` before the `g` (the round 27-32 order). `bu`
+    # (not `bp`) is a deferred breakpoint: at the initial break-in
+    # the symbols may not be ready yet, and `bu` resolves via the
+    # export table (KeBugCheckEx is exported by ntoskrnl) and stays
+    # pending until it can bind. `r` prints the registers (rcx =
+    # bugcheck code, rdx = Arg1, r8 = Arg2, r9 = Arg3); the two `du`
+    # print the UNICODE_STRING contents Arg2/Arg3 point at (service
+    # registry path, driver image path); `?` prints the Arg4
+    # NTSTATUS from the stack; the trailing `g` continues into the
+    # bugcheck, where cdb breaks again and logs the bugcheck banner.
+    # No `!analyze -v` (needs interactive work at the bugcheck
+    # break; a later round can add it). The bp commands use only
+    # `r`/`du`/`?`/`.echo`, none of which needs PDBs -- but round 29
+    # showed the assumption "a slow symbol download can only delay
+    # `g`" is wrong in practice: the log went straight from the
+    # kernel banner to the transport retry storm with no script
+    # output at all, so the download stall (DBGHELP timeout on the
+    # SRV* store) coincides with the transport dropping. Round 30
+    # therefore pre-stages the ntoskrnl PDB into the local cache
+    # before the session (Invoke-CleanSymbolPrestage) and the script
+    # echoes its own progress, so the log now shows exactly where
+    # the session stopped.
     #
     # The debugger commands live in $InitScriptPath (a file, not a
     # -c string): -c "$$><path>" is a single quote-free token, so no
-    # quoting layer can mangle the breakpoint's command list. The
-    # argv is built with ProcessStartInfo.ArgumentList, so each
-    # element is exactly one argument on any host (round 23 lesson:
-    # Start-Process -ArgumentList splits arguments on spaces on
-    # Linux). The init script itself:
+    # quoting layer can mangle the command list. The argv is built
+    # with ProcessStartInfo.ArgumentList, so each element is exactly
+    # one argument on any host (round 23 lesson: Start-Process
+    # -ArgumentList splits arguments on spaces on Linux). The init
+    # script this round (see Write-CleanKdInitScript):
     #   .echo *** KD-INIT START ***
-    #   bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"
-    #   bl
-    #   .echo *** KD-INIT BU ISSUED ***
     #   g
     #   .echo *** KD-INIT G ISSUED ***
-    # `bu` (not `bp`) is a deferred breakpoint: at the initial
-    # break-in the symbols may not be ready yet, and `bu` resolves
-    # via the export table (KeBugCheckEx is exported by ntoskrnl)
-    # and stays pending until it can bind. `r` prints the registers
-    # (rcx = bugcheck code, rdx = Arg1, r8 = Arg2, r9 = Arg3); the
-    # two `du` print the UNICODE_STRING contents Arg2/Arg3 point at
-    # (service registry path, driver image path); `?` prints the
-    # Arg4 NTSTATUS from the stack; the trailing `g` continues into
-    # the bugcheck, where cdb breaks again and logs the bugcheck
-    # banner. No `!analyze -v` (needs interactive work at the
-    # bugcheck break; a later round can add it). The bp commands use
-    # only `r`/`du`/`?`/`.echo`, none of which needs PDBs -- but
-    # round 29 showed the assumption "a slow symbol download can
-    # only delay `g`" is wrong in practice: the log went straight
-    # from the kernel banner to the transport retry storm with no
-    # script output at all, so the download stall (DBGHELP timeout
-    # on the SRV* store) coincides with the transport dropping.
-    # Round 30 therefore pre-stages the ntoskrnl PDB into the
-    # local cache before the session (Invoke-CleanSymbolPrestage)
-    # and the script echoes its own progress, so the log now shows
-    # exactly where the session stopped.
     #
     # Round 27: the argv comes from Get-CleanKdArgList (shared with
     # the probe, so a variant that survives the probe is launched
@@ -2328,7 +2363,7 @@ function Start-CleanKdSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string] $KdPipeName,
+        [string] $KdPort,
 
         [Parameter(Mandatory = $true)]
         [string] $WorkDir,
@@ -2341,7 +2376,7 @@ function Start-CleanKdSession {
 
         [string] $DebuggerPath,
 
-        [ValidateSet('baseline', 'nosymbols', 'nologo', 'inline-c', 'noc')]
+        [ValidateSet('baseline', 'baud', 'nosymbols', 'nologo', 'inline-c', 'noc')]
         [string] $Variant = 'baseline',
 
         [string] $ConsoleOutPath,
@@ -2365,7 +2400,7 @@ function Start-CleanKdSession {
         return $null
     }
     Write-CleanKdInitScript -InitScriptPath $InitScriptPath
-    $argv = Get-CleanKdArgList -KdPipeName $KdPipeName -WorkDir $WorkDir -KdLogPath $KdLogPath -InitScriptPath $InitScriptPath -Variant $Variant
+    $argv = Get-CleanKdArgList -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $KdLogPath -InitScriptPath $InitScriptPath -Variant $Variant
     Write-Host ('live KD session argv: {0} {1}' -f $debugger, ($argv -join ' '))
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $debugger
@@ -2404,7 +2439,7 @@ function Start-CleanKdSession {
         Write-Host ('live KD session: {0} exited immediately (exit {1}){2}' -f [System.IO.Path]::GetFileName($debugger), $proc.ExitCode, $consoleHint)
         return $null
     }
-    Write-Host ('live KD session started: {0} (pid {1}) attached to pipe \\.\pipe\{2}, log {3}' -f [System.IO.Path]::GetFileName($debugger), $proc.Id, $KdPipeName, $KdLogPath)
+    Write-Host ('live KD session started: {0} (pid {1}) attached to 127.0.0.1:{2}, log {3}' -f [System.IO.Path]::GetFileName($debugger), $proc.Id, $KdPort, $KdLogPath)
     return $proc
 }
 
@@ -2417,16 +2452,16 @@ function Invoke-CleanKdProbeAttempt {
     # timeout means ALIVE (the process had to be killed); a return
     # means it exited, with the exit code and the console files as
     # evidence. Never throws for a debugger failure; only a broken
-    # pipe setup returns a failed attempt.
-    # Round 31: the fake peer is a named pipe server
-    # (\\.\pipe\$PipeName), not a TCP listener. Each attempt creates
-    # its OWN server on the same name and disposes it in the finally
-    # block: a NamedPipeServerStream accepts exactly one connection
-    # per WaitForConnectionAsync call and cannot be re-armed, so
-    # reusing one server across attempts would throw. A connected
-    # peer is disconnected before disposal so the next attempt's
-    # server can bind the same name. The probe's finally block
-    # observes every AcceptTask (the connect task) when it stops.
+    # listener setup throws.
+    # Round 33: back to the TCP listener (round 31-32 used a named
+    # pipe server per attempt; the pipe experiment is over -- the
+    # real session is TCP again, so the probe must present the same
+    # kind of peer). The listener is shared across attempts: each
+    # attempt starts its own AcceptTcpClientAsync and consumes the
+    # accepted connection (if the debugger connected) so the next
+    # attempt starts clean; a still-pending accept is left alone
+    # (the listener stays up for the next variant; the probe's
+    # finally block observes every accept task when it stops).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -2436,7 +2471,7 @@ function Invoke-CleanKdProbeAttempt {
         [string[]] $ArgumentList,
 
         [Parameter(Mandatory = $true)]
-        [string] $PipeName,
+        [System.Net.Sockets.TcpListener] $Listener,
 
         [Parameter(Mandatory = $true)]
         [string] $WorkDir,
@@ -2448,23 +2483,12 @@ function Invoke-CleanKdProbeAttempt {
     )
     $outFile = Join-Path $WorkDir ('micpe-kd-probe-{0}.out' -f $Label)
     $errFile = Join-Path $WorkDir ('micpe-kd-probe-{0}.err' -f $Label)
-    $connectTask = $null
+    $acceptTask = $null
+    $accepted = $null
+    try { $acceptTask = $Listener.AcceptTcpClientAsync() } catch {}
     $alive = $false
     $exitCode = $null
     $errorText = ''
-    $pipe = $null
-    try {
-        $pipe = [System.IO.Pipes.NamedPipeServerStream]::new($PipeName, [System.IO.Pipes.PipeDirection]::InOut, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous)
-        $connectTask = $pipe.WaitForConnectionAsync()
-    }
-    catch {
-        $errorText = ('cannot create a pipe server named \\.\pipe\{0}: {1}' -f $PipeName, $_.Exception.Message)
-        return [pscustomobject]@{
-            Label = $Label; Alive = $false; ExitCode = $null
-            OutFile = $outFile; ErrFile = $errFile; Error = $errorText
-            AcceptTask = $null
-        }
-    }
     try {
         $run = Invoke-CleanProcessToFile -FilePath $DebuggerPath `
             -ArgumentList $ArgumentList -OutFile $outFile -ErrFile $errFile `
@@ -2475,38 +2499,45 @@ function Invoke-CleanKdProbeAttempt {
         if ($_.Exception.Message -match 'timed out') { $alive = $true }
         else { $errorText = $_.Exception.Message }
     }
-    finally {
-        # Disconnect a connected peer (the debugger did connect)
-        # before disposing, so the next attempt can create a fresh
-        # server on the same name; a still-pending wait is dropped
-        # with the server.
-        try { if ($pipe.IsConnected) { $pipe.Disconnect() } } catch {}
-        try { $pipe.Dispose() } catch {}
+    # Consume the accepted connection (if the debugger connected) so
+    # the next attempt starts clean; a still-pending accept is left
+    # alone (the listener stays up for the next variant; the probe's
+    # finally block observes every accept task when it stops).
+    if ($null -ne $acceptTask) {
+        try {
+            if ($acceptTask.Wait(500)) {
+                if (-not $acceptTask.IsFaulted -and -not $acceptTask.IsCanceled) {
+                    $accepted = $acceptTask.Result
+                }
+            }
+        }
+        catch {}
     }
+    if ($null -ne $accepted) { try { $accepted.Close() } catch {} }
     return [pscustomobject]@{
         Label = $Label; Alive = $alive; ExitCode = $exitCode
         OutFile = $outFile; ErrFile = $errFile; Error = $errorText
-        AcceptTask = $connectTask
+        AcceptTask = $acceptTask
     }
 }
 
 function Invoke-CleanKdProbe {
     # Round 27: pre-flight probe (see round27-design.md). Runs the
-    # cdb variants against a fake pipe server (a silent peer: the
+    # cdb variants against a fake TCP listener (a silent peer: the
     # debugger must sit waiting for the target's initial breakpoint)
     # and returns the first variant that stays alive, or a result
     # with Variant $null when none does. Writes micpe-kd-probe.txt
     # (per-variant outcomes) and micpe-kd-probe-<variant>.out/.err
     # (each attempt's console). Returns $null when cdb is missing or
-    # the pipe server cannot be created (probe inconclusive: the caller falls
+    # the listener cannot start (probe inconclusive: the caller falls
     # back to the round 26 behaviour). Never throws for a debugger
-    # failure; only a broken pipe setup returns $null.
-    # Round 31: the fake peer is a named pipe server, not a TCP
-    # listener -- the real session now connects to a pipe, so the
-    # probe must present the same kind of peer. The server is
-    # created fresh per attempt (see Invoke-CleanKdProbeAttempt);
-    # the one-shot creation here only proves the pipe name is
-    # usable on this host before the variants run.
+    # failure; only a broken listener setup returns $null.
+    # Round 33: back to the TCP listener (round 31-32 used a named
+    # pipe server; the pipe experiment is over -- the real session
+    # is TCP again, so the probe must present the same kind of
+    # peer). The listener is shared across attempts (see
+    # Invoke-CleanKdProbeAttempt); starting it here only proves the
+    # port is free on this host before the variants run.
     # Round 28: the returned Variant is the ARGV variant for the
     # real session, never a probe label. The variants table splits
     # Label from Variant on purpose -- 'kd' wins with the baseline
@@ -2526,7 +2557,7 @@ function Invoke-CleanKdProbe {
         [Parameter(Mandatory = $true)]
         [string] $InitScriptPath,
 
-        [string] $ProbePipeName = 'micpe-kd-probe',
+        [int] $ProbePort = 50099,
 
         [int] $ObserveSeconds = 10,
 
@@ -2540,19 +2571,15 @@ function Invoke-CleanKdProbe {
     }
     $version = Get-CleanDebuggerVersion -Path $cdb
     $verText = if ($version) { $version } else { 'unknown' }
-    Write-Host ('KD probe: debugger {0} (version {1}), fake pipe server on \\.\pipe\{2}' -f $cdb, $verText, $ProbePipeName)
+    Write-Host ('KD probe: debugger {0} (version {1}), fake listener on 127.0.0.1:{2}' -f $cdb, $verText, $ProbePort)
     Write-CleanKdInitScript -InitScriptPath $InitScriptPath
-    # Round 31: prove the pipe name is creatable on this host
-    # before the variants run (a name the host cannot create makes
-    # the probe inconclusive, exactly like the round 27 listener
-    # that could not start). The server is disposed immediately;
-    # each attempt creates its own.
+    $listener = $null
     try {
-        $testPipe = [System.IO.Pipes.NamedPipeServerStream]::new($ProbePipeName, [System.IO.Pipes.PipeDirection]::InOut, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous)
-        $testPipe.Dispose()
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $ProbePort)
+        $listener.Start()
     }
     catch {
-        Write-Host ('KD probe inconclusive: cannot create a pipe server named \\.\pipe\{0} ({1})' -f $ProbePipeName, $_.Exception.Message)
+        Write-Host ('KD probe inconclusive: cannot listen on 127.0.0.1:{0} ({1})' -f $ProbePort, $_.Exception.Message)
         return $null
     }
     $attempts = @()
@@ -2563,6 +2590,7 @@ function Invoke-CleanKdProbe {
         $kdExe = Get-CleanKdPath -CdbPath $cdb
         $variants = @(
             @{ Label = 'baseline'; Debugger = $cdb; Variant = 'baseline' }
+            @{ Label = 'baud'; Debugger = $cdb; Variant = 'baud' }
             @{ Label = 'kd'; Debugger = $kdExe; Variant = 'baseline' }
             @{ Label = 'nosymbols'; Debugger = $cdb; Variant = 'nosymbols' }
             @{ Label = 'nologo'; Debugger = $cdb; Variant = 'nologo' }
@@ -2575,8 +2603,8 @@ function Invoke-CleanKdProbe {
                 continue
             }
             $probeLog = Join-Path $WorkDir ('micpe-kd-probe-{0}.log' -f $v.Label)
-            $argv = Get-CleanKdArgList -KdPipeName $ProbePipeName -WorkDir $WorkDir -KdLogPath $probeLog -InitScriptPath $InitScriptPath -Variant $v.Variant
-            $attempt = Invoke-CleanKdProbeAttempt -DebuggerPath $v.Debugger -ArgumentList $argv -PipeName $ProbePipeName -WorkDir $WorkDir -Label $v.Label -ObserveSeconds $ObserveSeconds
+            $argv = Get-CleanKdArgList -KdPort ([string]$ProbePort) -WorkDir $WorkDir -KdLogPath $probeLog -InitScriptPath $InitScriptPath -Variant $v.Variant
+            $attempt = Invoke-CleanKdProbeAttempt -DebuggerPath $v.Debugger -ArgumentList $argv -Listener $listener -WorkDir $WorkDir -Label $v.Label -ObserveSeconds $ObserveSeconds
             $attempts += $attempt
             if ($attempt.Alive) {
                 if ($v.Label -eq 'noc') {
@@ -2611,10 +2639,7 @@ function Invoke-CleanKdProbe {
         }
     }
     finally {
-        # Round 31: no shared listener to stop -- each attempt
-        # creates and disposes its own pipe server. Only the connect
-        # tasks are observed here (a disposed server's pending wait
-        # faults, which the try/catch swallows).
+        try { $listener.Stop() } catch {}
         foreach ($a in $attempts) {
             if ($null -ne $a.AcceptTask) {
                 try { $null = $a.AcceptTask.Wait(1000) } catch {}
@@ -2623,9 +2648,9 @@ function Invoke-CleanKdProbe {
     }
     $summaryPath = Join-Path $WorkDir 'micpe-kd-probe.txt'
     $summary = [System.Collections.Generic.List[string]]::new()
-    $summary.Add('KD launch probe (round 27, fake pipe server -- the debugger must sit waiting for the target initial breakpoint)')
+    $summary.Add('KD launch probe (round 27, fake TCP listener -- the debugger must sit waiting for the target initial breakpoint)')
     $summary.Add(('debugger: {0} (version {1})' -f $cdb, $verText))
-    $summary.Add(('fake pipe server: \\.\pipe\{0}; observation window: {1} s per variant' -f $ProbePipeName, $ObserveSeconds))
+    $summary.Add(('fake listener: 127.0.0.1:{0}; observation window: {1} s per variant' -f $ProbePort, $ObserveSeconds))
     foreach ($a in $attempts) {
         if ($a.Alive) { $summary.Add(('variant {0}: ALIVE at {1} s (still running when killed)' -f $a.Label, $ObserveSeconds)) }
         elseif ($a.Error) { $summary.Add(('variant {0}: FAILED to launch ({1})' -f $a.Label, $a.Error)) }
@@ -2757,7 +2782,18 @@ function ConvertFrom-CleanKdLog {
                 # START with no G ISSUED means the transport dropped
                 # while the script ran and `g` never got through.
                 if ($result.InitGIssued) {
-                    $result.Reason = 'KD connected and the init script ran (g issued), but the KeBugCheckEx breakpoint never fired (the guest never bugchecked, or the breakpoint did not resolve)'
+                    if ($result.InitBuIssued) {
+                        $result.Reason = 'KD connected and the init script ran (g issued), but the KeBugCheckEx breakpoint never fired (the guest never bugchecked, or the breakpoint did not resolve)'
+                    }
+                    else {
+                        # Round 33: the minimal init script has no
+                        # breakpoint, so "breakpoint never fired" is
+                        # the wrong diagnosis -- g was issued and the
+                        # guest ran, but no bugcheck banner appeared
+                        # within the session (kd was killed first, or
+                        # the transport dropped after g).
+                        $result.Reason = 'KD connected and the init script ran (g issued, no breakpoint this round), but no bugcheck banner appeared (the guest never bugchecked within the session, or kd was killed first)'
+                    }
                 }
                 else {
                     $result.Reason = 'KD connected and the init script started, but g was never issued (the transport dropped while the script ran)'
@@ -2893,7 +2929,7 @@ function Invoke-CleanCrashDumpCapture {
     if ($SymbolPrestagePath -and (Test-Path -LiteralPath $SymbolPrestagePath)) {
         $preContent = Get-Content -LiteralPath $SymbolPrestagePath -Raw -ErrorAction SilentlyContinue
         if ($preContent) {
-            $lines.Add('--- symbol pre-stage (round 32, ntkrnlmp.pdb) ---')
+            $lines.Add('--- symbol pre-stage (round 33, ntkrnlmp.pdb) ---')
             foreach ($pl in ($preContent -split "`r`n|`n")) {
                 if ($pl.Trim() -ne '') { $lines.Add(('  {0}' -f $pl)) }
             }
@@ -2955,7 +2991,7 @@ function Invoke-CleanCrashDumpCapture {
         if ($KdProbePath -and (Test-Path -LiteralPath $KdProbePath)) {
             $probeContent = Get-Content -LiteralPath $KdProbePath -Raw -ErrorAction SilentlyContinue
             if ($probeContent) {
-                $lines.Add('--- KD launch probe (round 27, fake pipe server) ---')
+                $lines.Add('--- KD launch probe (round 27, fake TCP listener) ---')
                 foreach ($pl in ($probeContent -split "`r`n|`n")) {
                     if ($pl.Trim() -ne '') { $lines.Add(('  {0}' -f $pl)) }
                 }
@@ -3140,8 +3176,9 @@ $varsTemplate = Find-CleanOvmfVars -CodePath $OvmfPath
 $varsPath = Join-Path $WorkDir 'OVMF_VARS.fd'
 Copy-Item -LiteralPath $varsTemplate -Destination $varsPath -Force
 
-# Round 26: the serial port now goes to the KD named pipe (see
-# -serial below), so there is no micpe-serial.log any more; the KD
+# Round 26: the serial port now goes to the KD TCP chardev (see
+# -serial below; round 33 rolled back from the round 31-32 named
+# pipe), so there is no micpe-serial.log any more; the KD
 # session log (micpe-kd.log) is the replacement, uploaded by the
 # workflow.
 $kdLog = Join-Path $WorkDir 'micpe-kd.log'
@@ -3189,20 +3226,16 @@ $qemuArgs = @(
     '-no-shutdown'
     '-rtc', 'base=localtime'
     '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
-    # Round 31: the guest COM1 (kernel debug) goes to a named pipe
+    # Round 26: the guest COM1 (kernel debug) goes to a TCP server
     # for the live KD session instead of a file; without a debugger
     # the output is discarded (the old micpe-serial.log is gone --
-    # see micpe-kd.log). Round 32: the argument MUST be the bare
-    # pipe name -- QEMU creates the pipe at \\.\pipe\<name> itself
-    # (qemu-options.hx, -chardev pipe: "On Windows, a single duplex
-    # pipe will be created at \\.\pipe\path"). Round 31 passed the
-    # full \\.\pipe\micpe-kd, so QEMU tried \\.\pipe\\.\pipe\micpe-kd:
-    # the pipe never appeared under the checked name, kd.exe died
-    # with "file not found" (exit -2147024894), and QEMU itself was
-    # gone ~100 s in. kd.exe takes the full path (com:pipe,
-    # port=\\.\pipe\micpe-kd in Get-CleanKdArgList); only the QEMU
-    # side is bare.
-    '-serial', "pipe:$KdPipeName"
+    # see micpe-kd.log). Round 33: back to TCP after the round 31-32
+    # pipe experiment (round 32: the bare pipe connected but the
+    # transport dropped the same way, and the control QEMU died
+    # again ~92 s in with exit -1). TCP is the known-good QEMU
+    # state: rounds 28/29/30 ran three full passes with QEMU alive
+    # throughout and the control pass reaching the blue screen.
+    '-serial', "tcp:127.0.0.1:$KdPort,server,nowait"
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$OvmfPath"
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath"
     '-cdrom', $IsoPath
@@ -3241,7 +3274,7 @@ if (-not $NoKdSession) {
 }
 
 # Round 27: pre-flight KD probe -- reproduce the round 26 cdb launch
-# against a fake pipe server BEFORE QEMU starts, so a failing argv
+# against a fake TCP listener BEFORE QEMU starts, so a failing argv
 # is diagnosed without touching the guest. Runs only when the KD
 # session is enabled; never throws, never changes the verdict. The
 # result decides which argv (if any) the real session uses below.
@@ -3316,7 +3349,7 @@ try {
     # that survived it is launched verbatim); when the probe ran and
     # every variant failed, the real session is not launched with a
     # known-bad argv. When the probe was inconclusive (no cdb, or the
-    # fake pipe server could not be created), fall back to the round 26
+    # fake TCP listener could not be started), fall back to the round 26
     # baseline -- the new console redirect captures any failure.
     if (-not $NoKdSession) {
         try {
@@ -3333,30 +3366,35 @@ try {
                 }
                 # Round 27: confirm the QEMU serial endpoint is up
                 # before launching the debugger (round 26 never
-                # proved it was). Round 31: the check enumerates the
-                # pipe directory only -- it never opens the pipe (one
-                # client only; a probe connection would steal the
-                # debugger's slot). Round 32: WAIT for the pipe
+                # proved it was). Round 33: WAIT for the TCP port
                 # (up to 30 s) instead of starting kd.exe anyway --
-                # round 31 proved kd.exe does NOT retry the connect:
-                # it died instantly with exit -2147024894 (0x80070002,
-                # file not found) the moment the pipe was absent, and
-                # the "it retries the connect" comment was wrong. If
-                # the pipe never appears, skip the session (the disk
-                # and ELF paths remain) instead of launching kd.exe
-                # into a certain immediate failure.
-                $kdPipePresent = $false
-                for ($waitSec = 0; $waitSec -le 30 -and -not $kdPipePresent; $waitSec += 2) {
-                    $kdPipePresent = Test-CleanKdPipe -PipeName $KdPipeName
-                    if (-not $kdPipePresent) { Start-Sleep -Seconds 2 }
+                # round 31 proved kd.exe does NOT retry the connect
+                # on a missing endpoint (it died instantly with exit
+                # -2147024894 the moment the pipe was absent), and
+                # the round 30 "it retries the connect" comment was
+                # wrong. If the port never listens, skip the session
+                # (the disk and ELF paths remain) instead of
+                # launching kd.exe into a certain immediate failure.
+                # The wait CONNECTS to the port, which is safe here
+                # for the same reason the round 27-30 check was
+                # safe: it runs right after the monitor comes up,
+                # while the guest is still in firmware, so no KD
+                # packet can be stolen (the kernel's first packet is
+                # ~100 s away), and QEMU's TCP chardev re-listens
+                # after the pre-check disconnects (rounds 27-30
+                # proved it). The loop stops at the first success.
+                $kdPortListening = $false
+                for ($waitSec = 0; $waitSec -le 30 -and -not $kdPortListening; $waitSec += 2) {
+                    $kdPortListening = Test-CleanTcpPort -Port $KdPort -TimeoutSec 5
+                    if (-not $kdPortListening) { Start-Sleep -Seconds 2 }
                 }
-                Write-Host ('KD named pipe \\.\pipe\{0} present: {1}' -f $KdPipeName, $kdPipePresent)
-                if (-not $kdPipePresent) {
-                    Write-Host '!!! KD named pipe never appeared; skipping the live KD session (kd.exe does not retry the connect -- round 31) and continuing without live KD (disk/ELF paths remain)'
+                Write-Host ('KD TCP port 127.0.0.1:{0} listening: {1}' -f $KdPort, $kdPortListening)
+                if (-not $kdPortListening) {
+                    Write-Host '!!! KD TCP port never came up; skipping the live KD session (kd.exe does not retry the connect -- round 31) and continuing without live KD (disk/ELF paths remain)'
                     $script:kdProc = $null
                 }
                 else {
-                    $script:kdProc = Start-CleanKdSession -KdPipeName $KdPipeName -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit -DebuggerPath $probeDebugger -Variant $probeVariant -ConsoleOutPath $kdConsoleOut -ConsoleErrPath $kdConsoleErr
+                    $script:kdProc = Start-CleanKdSession -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit -DebuggerPath $probeDebugger -Variant $probeVariant -ConsoleOutPath $kdConsoleOut -ConsoleErrPath $kdConsoleErr
                     if ($null -eq $script:kdProc) { Write-Host '!!! live KD session not started; continuing without live KD (disk/ELF paths remain)' }
                 }
             }
