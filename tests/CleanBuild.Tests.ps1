@@ -679,7 +679,7 @@ Describe 'Invoke-CleanCatFixStep (round 13: the two 22621.900 .cat files for cdr
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
             }, $true)
-        foreach ($name in @('Find-ByteSequence', 'Test-CleanCatHasCdromHash', 'Assert-CleanCatFiles', 'Find-CleanCatLcuCab', 'Get-CleanCatFixFileList', 'Invoke-CleanCatFixStep', 'Assert-CleanCatFilesInBootWim')) {
+        foreach ($name in @('Find-ByteSequence', 'Test-CleanCatHasAuthenticodeHash', 'Test-CleanCatHasCdromHash', 'Assert-CleanCatFiles', 'Find-CleanCatLcuCab', 'Get-CleanCatFixFileList', 'Invoke-CleanCatFixStep', 'Assert-CleanCatFilesInBootWim')) {
             $fn = @($allFns | Where-Object { $_.Name -eq $name })
             $fn.Count | Should -Be 1
             . ([scriptblock]::Create($fn[0].Extent.Text))
@@ -933,6 +933,175 @@ https://download.windowsupdate.com/x/windows11.0-kb5020044-x64_bbbb.cab
             Remove-Item -LiteralPath $bootWim -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $oneOnly -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Invoke-CleanGdiPlusCatFixStep (round 36: GdiPlus.dll catalog for smss)' {
+    BeforeAll {
+        $script:fixtures = Join-Path $PSScriptRoot 'fixtures'
+        $script:fakeWimlib = Join-Path $PSScriptRoot 'Fake-Wimlib.ps1'
+        # Pull the GdiPlus functions out of Build-CleanPe.ps1 via the
+        # AST (the script cannot be dot-sourced: its dispatch section
+        # runs on load). Same pattern as the catfix tests.
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:CleanScript, [ref] $tokens, [ref] $errors)
+        $errors.Count | Should -Be 0
+        $allFns = $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true)
+        foreach ($name in @('Find-ByteSequence', 'Get-CleanAuthenticodeHash', 'Test-CleanCatHasAuthenticodeHash', 'Test-CleanCatHasCdromHash', 'Assert-CleanCatFiles', 'Invoke-CleanGdiPlusCatFixStep', 'Assert-CleanCatFilesInBootWim')) {
+            $fn = @($allFns | Where-Object { $_.Name -eq $name })
+            $fn.Count | Should -Be 1
+            . ([scriptblock]::Create($fn[0].Extent.Text))
+        }
+        # The fixture PE (tests/fixtures/gdiplus-fixture.dll) is a
+        # minimal valid PE64; its Authenticode hashes were computed
+        # with the independent Python oracle
+        # (~/workspace/micpe-catfix/authenticode_hash.py) and are
+        # pinned here. The covering fixture .cat embeds both hashes;
+        # the sha1-only one embeds only the SHA1 (must be rejected:
+        # both digests are required for coverage).
+        $script:fixtureDllSha1 = '3de19f46bdaf5e3596ceba0659b3149524d34168'
+        $script:fixtureDllSha256 = '8b73fcb60a1e9906da521230f201aa7eb920f29c28fa8ab8bc6d35a18f32d863'
+        $script:fixtureCats = @('gdiplus-covering.cat', 'gdiplus-sha1only.cat')
+        $script:buildYml = Get-Content -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/build.yml') -Raw
+    }
+
+    It 'Get-CleanAuthenticodeHash reproduces the Python oracle on the fixture PE' {
+        $h = Get-CleanAuthenticodeHash -Path (Join-Path $script:fixtures 'gdiplus-fixture.dll')
+        $h.Sha1 | Should -Be $script:fixtureDllSha1
+        $h.Sha256 | Should -Be $script:fixtureDllSha256
+    }
+
+    It 'Get-CleanAuthenticodeHash throws on a non-PE file' {
+        { Get-CleanAuthenticodeHash -Path (Join-Path $script:fixtures 'catfix-aria2.txt') } | Should -Throw '*not a PE file*'
+    }
+
+    It 'Test-CleanCatHasAuthenticodeHash requires both hashes, not just the SHA1' {
+        $covering = Join-Path $script:fixtures 'gdiplus-covering.cat'
+        Test-CleanCatHasAuthenticodeHash -CatPath $covering -Sha1 $script:fixtureDllSha1 -Sha256 $script:fixtureDllSha256 | Should -BeTrue
+        $sha1only = Join-Path $script:fixtures 'gdiplus-sha1only.cat'
+        Test-CleanCatHasAuthenticodeHash -CatPath $sha1only -Sha1 $script:fixtureDllSha1 -Sha256 $script:fixtureDllSha256 | Should -BeFalse
+        $plain = Join-Path $script:fixtures 'catfix-aria2.txt'
+        Test-CleanCatHasAuthenticodeHash -CatPath $plain -Sha1 $script:fixtureDllSha1 -Sha256 $script:fixtureDllSha256 | Should -BeFalse
+    }
+
+    It 'pins the RTM 22621.1 candidate catalogs (same packages as the 22621.1105 ones covering the reference file)' {
+        # The reference (22621.819) GdiPlus.dll is covered by the
+        # 22621.1105 Package0518 and WinPE-SKU-Foundation-merged
+        # catalogs; the RTM file in the image needs their 22621.1
+        # counterparts, from the source install.wim -- never Ramos.
+        $script:CleanScriptText | Should -Match 'Microsoft-Windows-Client-Desktop-Required-Package0518~31bf3856ad364e35~amd64~~10\.0\.22621\.1\.cat'
+        $script:CleanScriptText | Should -Match 'Microsoft-Windows-WinPE-SKU-Foundation-merged-Package~31bf3856ad364e35~amd64~~10\.0\.22621\.1\.cat'
+        $script:CleanScriptText | Should -Match 'Invoke-CleanGdiPlusCatFixStep'
+    }
+
+    It 'Invoke-CleanGdiPlusCatFixStep injects the covering catalog and writes the diagnosis (seam)' {
+        $staging = Join-Path $script:TempRoot ("micpe-gdiplus-staging-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-gdiplus-work-{0}" -f [guid]::NewGuid())
+        $pre = Join-Path $script:TempRoot ("micpe-gdiplus-pre-{0}" -f [guid]::NewGuid())
+        try {
+            $stagingDllDir = Join-Path $staging 'Windows\System32'
+            New-Item -ItemType Directory -Path $stagingDllDir -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-fixture.dll') -Destination (Join-Path $stagingDllDir 'GdiPlus.dll') -Force
+            $preDllDir = Join-Path $pre 'Windows\System32'
+            New-Item -ItemType Directory -Path $preDllDir -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-fixture.dll') -Destination (Join-Path $preDllDir 'GdiPlus.dll') -Force
+            $preCatDir = Join-Path $pre 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}'
+            New-Item -ItemType Directory -Path $preCatDir -Force | Out-Null
+            foreach ($cat in $script:fixtureCats) {
+                Copy-Item -LiteralPath (Join-Path $script:fixtures $cat) -Destination (Join-Path $preCatDir $cat) -Force
+            }
+            $result = Invoke-CleanGdiPlusCatFixStep -StagingDir $staging -InstallWim (Join-Path $pre 'fake-install.wim') -WorkDir $work -CandidateCats $script:fixtureCats -PreExtractedInstallWimDir $pre
+            $result.InjectedCats.Count | Should -Be 1
+            $result.InjectedCats[0].Name | Should -Be 'gdiplus-covering.cat'
+            $result.OfficialMatch | Should -BeTrue
+            $result.GdiPlusAuthSha1 | Should -Be $script:fixtureDllSha1
+            $result.GdiPlusAuthSha256 | Should -Be $script:fixtureDllSha256
+            $staged = Join-Path $staging 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\gdiplus-covering.cat'
+            Test-Path -LiteralPath $staged | Should -BeTrue
+            (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash | Should -Be $result.InjectedCats[0].Sha256
+            # The sha1-only candidate must NOT be injected.
+            Test-Path -LiteralPath (Join-Path $staging 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\gdiplus-sha1only.cat') | Should -BeFalse
+            # The diagnosis records every item: hash, version (empty
+            # for the fixture: it has no version resource), official
+            # comparison, per-candidate verdict, injected list.
+            Test-Path -LiteralPath $result.DiagPath | Should -BeTrue
+            $diag = Get-Content -LiteralPath $result.DiagPath -Raw
+            $diag | Should -Match $script:fixtureDllSha256
+            $diag | Should -Match 'matches official install.wim file: True'
+            $diag | Should -Match 'COVERS the file'
+            $diag | Should -Match 'does NOT cover the file'
+            $diag | Should -Match 'KnownDLLs'
+        }
+        finally {
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $pre -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Invoke-CleanGdiPlusCatFixStep throws loudly when no candidate covers the file' {
+        $staging = Join-Path $script:TempRoot ("micpe-gdiplus-nocover-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-gdiplus-nocoverwork-{0}" -f [guid]::NewGuid())
+        $pre = Join-Path $script:TempRoot ("micpe-gdiplus-nocoverpre-{0}" -f [guid]::NewGuid())
+        try {
+            $stagingDllDir = Join-Path $staging 'Windows\System32'
+            New-Item -ItemType Directory -Path $stagingDllDir -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-fixture.dll') -Destination (Join-Path $stagingDllDir 'GdiPlus.dll') -Force
+            $preDllDir = Join-Path $pre 'Windows\System32'
+            New-Item -ItemType Directory -Path $preDllDir -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-fixture.dll') -Destination (Join-Path $preDllDir 'GdiPlus.dll') -Force
+            $preCatDir = Join-Path $pre 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}'
+            New-Item -ItemType Directory -Path $preCatDir -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-sha1only.cat') -Destination (Join-Path $preCatDir 'gdiplus-sha1only.cat') -Force
+            { Invoke-CleanGdiPlusCatFixStep -StagingDir $staging -InstallWim (Join-Path $pre 'fake-install.wim') -WorkDir $work -CandidateCats @('gdiplus-sha1only.cat') -PreExtractedInstallWimDir $pre } |
+                Should -Throw '*no candidate catalog*'
+            # The diagnosis is still written: the next round needs
+            # the version and hashes to find the covering catalog.
+            $diagPath = Join-Path $work 'micpe-gdiplus-diag.txt'
+            Test-Path -LiteralPath $diagPath | Should -BeTrue
+            (Get-Content -LiteralPath $diagPath -Raw) | Should -Match 'NO catalog covers'
+        }
+        finally {
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $pre -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'runs the GdiPlus step after the cdrom catalog fix and reads both back after capture' {
+        $dispatch = ($script:CleanScriptText -split '# Dispatch')[1]
+        $dispatch.IndexOf('Invoke-CleanGdiPlusCatFixStep') | Should -BeGreaterThan $dispatch.IndexOf('Invoke-CleanCatFixStep')
+        $dispatch.IndexOf('Invoke-CleanGdiPlusCatFixStep') | Should -BeLessThan $dispatch.IndexOf('Invoke-CleanCaptureStep')
+        $dispatch | Should -Match 'gdiPlusFix\.InjectedCats'
+        $dispatch | Should -Match 'micpe-gdiplus-diag\.txt'
+    }
+
+    It 'the Release picks up the GdiPlus diagnosis from the repo root' {
+        $script:buildYml | Should -Match 'micpe-gdiplus-diag\.txt'
+    }
+
+    It 'Assert-CleanCatFilesInBootWim reads a combined cdrom + GdiPlus list back (fake wimlib)' {
+        $bootWim = Join-Path $script:TempRoot ("micpe-gdiplus-boot-{0}.wim" -f [guid]::NewGuid())
+        Set-Content -LiteralPath $bootWim -Value 'FAKE-WIM' -NoNewline
+        $work = Join-Path $script:TempRoot ("micpe-gdiplus-rb-{0}" -f [guid]::NewGuid())
+        try {
+            $covering = Get-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-covering.cat')
+            $combined = @(
+                [pscustomobject]@{ Name = 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat'; Size = (Get-Item -LiteralPath (Join-Path $script:fixtures 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat')).Length; Sha256 = (Get-FileHash -LiteralPath (Join-Path $script:fixtures 'Microsoft-Windows-Client-Desktop-Required-Package0110~31bf3856ad364e35~amd64~~10.0.22621.900.cat') -Algorithm SHA256).Hash }
+                [pscustomobject]@{ Name = 'gdiplus-covering.cat'; Size = $covering.Length; Sha256 = (Get-FileHash -LiteralPath $covering.FullName -Algorithm SHA256).Hash }
+            )
+            $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR = $script:fixtures
+            { Assert-CleanCatFilesInBootWim -BootWim $bootWim -ExpectedCats $combined -WorkDir $work -WimlibPath $script:fakeWimlib } | Should -Not -Throw
+        }
+        finally {
+            $env:MICPE_FAKE_WIMLIB_CAT_SOURCE_DIR = $null
+            Remove-Item -LiteralPath $bootWim -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

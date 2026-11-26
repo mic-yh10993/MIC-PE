@@ -11,6 +11,7 @@
 *.dll
 !tools/**/*.exe
 !tests/fixtures/**/*.exe
+!tests/fixtures/**/*.dll
 # app/ packages are committed by design (user decision 2026-11-17 15:07):
 # the payload archive and the split volumes live in git. *.7z above still
 # ignores build residue staged next to install.bat at build time.

@@ -653,6 +653,13 @@ jobs:
               }
             }
           }
+          # Round 36: the GdiPlus.dll catalog diagnosis (written by
+          # the build step to the repo root so it survives the
+          # runner -- build logs are not uploaded anywhere). Missing
+          # simply means the build step predates round 36 or the
+          # GdiPlus step never ran; the Release still goes out.
+          $gdiPlusDiag = Join-Path $env:GITHUB_WORKSPACE 'micpe-gdiplus-diag.txt'
+          if (Test-Path -LiteralPath $gdiPlusDiag) { $releaseExtras += $gdiPlusDiag }
           $notes = @"
           MICPE $stage $build ($date), run $runNumber.
           ISO: $([math]::Round($isoBytes / 1MB, 1)) MB, SHA256 $isoHash

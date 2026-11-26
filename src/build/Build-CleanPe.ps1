@@ -414,6 +414,110 @@ function Find-ByteSequence {
     }
 }
 
+function Get-CleanAuthenticodeHash {
+    # Round 36: the Authenticode (PE) hash of a file, the way Windows
+    # catalog verification computes it (PE Authenticode spec) -- the
+    # same algorithm as ~/workspace/micpe-catfix/authenticode_hash.py,
+    # ported so the build can compute it in CI without Python:
+    # hash the headers ([0, CheckSum), skip CheckSum, [CheckSum+4,
+    # security-directory entry), skip that entry, [entry+8,
+    # SizeOfHeaders)), then each section's raw data with sections
+    # sorted by PointerToRawData. The certificate table and any
+    # overlay are NOT hashed. A naive "whole file minus CheckSum"
+    # hash is WRONG (it includes inter-section gaps/overlay).
+    # Validated against the Python oracle on three files: the
+    # fixture PE (tests/fixtures/gdiplus-fixture.dll), r111's
+    # GdiPlus.dll (SHA1 0d182a2c..., SHA256 f300acb8...) and the
+    # reference cdrom.sys (SHA1 8f19637e..., SHA256 3ca40d03...).
+    # Returns @{ Sha1; Sha256 } (lowercase hex). Throws on a
+    # non-PE file -- a caller that feeds it one has the wrong path.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $peOff = [System.BitConverter]::ToUInt32($bytes, 0x3c)
+    if ($peOff + 4 -gt $bytes.Length -or $bytes[$peOff] -ne 0x50 -or $bytes[$peOff + 1] -ne 0x45 -or $bytes[$peOff + 2] -ne 0 -or $bytes[$peOff + 3] -ne 0) {
+        throw "Get-CleanAuthenticodeHash: $Path is not a PE file (no PE signature at e_lfanew 0x$($peOff.ToString('x')))"
+    }
+    $numSections = [System.BitConverter]::ToUInt16($bytes, $peOff + 6)
+    $optSize = [System.BitConverter]::ToUInt16($bytes, $peOff + 20)
+    $optOff = $peOff + 24
+    $magic = [System.BitConverter]::ToUInt16($bytes, $optOff)
+    $is64 = ($magic -eq 0x20b)
+    $sizeOfHeaders = [System.BitConverter]::ToUInt32($bytes, $optOff + 60)
+    $checksumOff = $optOff + 64
+    $ddBase = $optOff + ($is64 ? 112 : 96)
+    $secEntryOff = $ddBase + 32
+
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $feed = {
+            param([int] $Offset, [int] $Count)
+            if ($Count -le 0) { return }
+            $end = [Math]::Min($Offset + $Count, $bytes.Length)
+            if ($end -le $Offset) { return }
+            $len = $end - $Offset
+            $null = $sha1.TransformBlock($bytes, $Offset, $len, $null, 0)
+            $null = $sha256.TransformBlock($bytes, $Offset, $len, $null, 0)
+        }
+        & $feed 0 $checksumOff
+        & $feed ($checksumOff + 4) ($secEntryOff - $checksumOff - 4)
+        & $feed ($secEntryOff + 8) ($sizeOfHeaders - $secEntryOff - 8)
+        $secHdr = $optOff + $optSize
+        $sections = [System.Collections.Generic.List[pscustomobject]]::new()
+        for ($i = 0; $i -lt $numSections; $i++) {
+            $o = $secHdr + ($i * 40)
+            $rawSize = [System.BitConverter]::ToUInt32($bytes, $o + 16)
+            $rawPtr = [System.BitConverter]::ToUInt32($bytes, $o + 20)
+            $sections.Add([pscustomobject]@{ Ptr = $rawPtr; Size = $rawSize })
+        }
+        foreach ($s in ($sections | Sort-Object Ptr)) {
+            if ($s.Size -eq 0) { continue }
+            & $feed ([int]$s.Ptr) ([int]$s.Size)
+        }
+        $null = $sha1.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $null = $sha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        return [pscustomobject]@{
+            Sha1   = ([System.BitConverter]::ToString($sha1.Hash).Replace('-', '').ToLowerInvariant())
+            Sha256 = ([System.BitConverter]::ToString($sha256.Hash).Replace('-', '').ToLowerInvariant())
+        }
+    }
+    finally {
+        $sha1.Dispose()
+        $sha256.Dispose()
+    }
+}
+
+function Test-CleanCatHasAuthenticodeHash {
+    # True when the catalog file contains the given Authenticode hash
+    # (both SHA1 and SHA256, as raw bytes). Generic form of
+    # Test-CleanCatHasCdromHash: a catalog lists a file by its
+    # Authenticode hash, so "is this file covered by this catalog" is
+    # a byte search for both digests. Both are required: a catalog
+    # that only carries the SHA1 entry does not cover the file.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CatPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Sha1,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Sha256
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($CatPath)
+    $sha1Bytes = [System.Convert]::FromHexString($Sha1)
+    $sha256Bytes = [System.Convert]::FromHexString($Sha256)
+    return ((Find-ByteSequence -Bytes $bytes -Needle $sha1Bytes) -and
+        (Find-ByteSequence -Bytes $bytes -Needle $sha256Bytes))
+}
+
 function Test-CleanCatHasCdromHash {
     # True when the catalog file contains the cdrom.sys Authenticode hash
     # (both SHA1 and SHA256, as raw bytes). The hashes are pinned: they
@@ -431,11 +535,7 @@ function Test-CleanCatHasCdromHash {
         [string] $Sha256 = '3ca40d030fd515fde7451e685dda10d5c52c20e7898c1b87ea3c86ce329b0d94'
     )
 
-    $bytes = [System.IO.File]::ReadAllBytes($CatPath)
-    $sha1Bytes = [System.Convert]::FromHexString($Sha1)
-    $sha256Bytes = [System.Convert]::FromHexString($Sha256)
-    return ((Find-ByteSequence -Bytes $bytes -Needle $sha1Bytes) -and
-        (Find-ByteSequence -Bytes $bytes -Needle $sha256Bytes))
+    return (Test-CleanCatHasAuthenticodeHash -CatPath $CatPath -Sha1 $Sha1 -Sha256 $Sha256)
 }
 
 function Assert-CleanCatFiles {
@@ -722,6 +822,199 @@ function Invoke-CleanCatFixStep {
         ExpectedCats = $ExpectedCats
         CatRootRel   = $CatRootRel
         Injected     = @($injected.ToArray())
+    }
+}
+
+function Invoke-CleanGdiPlusCatFixStep {
+    # Round 36: GdiPlus.dll is not signed correctly -- the KD round 35
+    # caught smss.exe dying on it (CI break: "This binary is not signed
+    # correctly: \Windows\System32\GdiPlus.dll", Fatal System Error
+    # 0xC000021A, STATUS_INVALID_IMAGE_HASH 0xC0000428). Local
+    # investigation against r111 boot.wim (2026-11-27) found the file
+    # itself is the official RTM file -- version 10.0.22621.1, size
+    # 1,802,240, Authenticode SHA1 0d182a2c... / SHA256 f300acb8... --
+    # but NO catalog in the image covers it: 0 of the 747 .cat files
+    # in boot.wim contain its hashes, and 0 of the 1,895 in the
+    # reference CatRoot do either (the reference file is 22621.819,
+    # covered by the two 22621.1105 catalogs that ARE in the whitelist
+    # but never made it into the image: the image has 731 x 22621.1
+    # .cats + the 2 injected 22621.900 ones, ZERO 22621.1105 ones).
+    # Root cause of the skew: the UUP converter runs with
+    # AddUpdates = '0' (Invoke-CleanBaseStep), so the source
+    # install.wim is the RTM 22621.1 base -- every file the reference
+    # updated is present in RTM form, and its 22621.1105 catalog is
+    # silently skipped by the whitelist copy (warn-only). KnownDLLs
+    # is NOT the problem: `gdiplus` -> `gdiplus.dll` is present in
+    # both the r111 and the reference SYSTEM hives (verified locally
+    # with regipy; the .cat injection does not touch the registry,
+    # so no CI re-check is needed).
+    #
+    # Same class of fix as cdrom.sys (round 13/14): inject the
+    # catalog(s) that cover the file. The covering catalogs for the
+    # RTM file are the RTM (22621.1) versions of the same two
+    # packages that cover the 22621.819 file at 22621.1105, and they
+    # come from the source install.wim's own CatRoot -- official
+    # source, already on disk, no network fetch, nothing from Ramos.
+    # The hash check is the verdict, not the names: a candidate that
+    # does not contain the file's Authenticode hashes is NOT
+    # injected, and if NONE covers the file the step fails loudly
+    # with the file's version and hashes (the next round then knows
+    # the catalog lives elsewhere -- do NOT silently inject a
+    # non-covering catalog, and do NOT guess another package).
+    #
+    # Caveat (whack-a-mole): GdiPlus.dll is only the FIRST uncovered
+    # RTM file the boot hits (smss loads it early). Other files the
+    # reference updated may fail the same way later in boot; each one
+    # gets the same treatment. If that recurs, the structural fix is
+    # flipping AddUpdates to '1' (a real 22621.1105 source) or copying
+    # the whole source CatRoot -- both are bigger decisions for a
+    # later round, not this one.
+    #
+    # The diagnosis is written to micpe-gdiplus-diag.txt (WorkDir)
+    # and to the step log: file hash + version, official comparison
+    # (staging file vs install.wim file), per-candidate .cat verdict,
+    # injected list. -PreExtractedInstallWimDir is a test seam: when
+    # given, the wimlib extraction from install.wim is skipped and
+    # the supplied directory stands in for the extracted content.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $StagingDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $InstallWim,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [string] $CatRootRel = 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}',
+
+        [string] $GdiPlusRel = 'Windows\System32\GdiPlus.dll',
+
+        [string] $WimlibPath = 'wimlib-imagex',
+
+        [string[]] $CandidateCats = @(
+            'Microsoft-Windows-Client-Desktop-Required-Package0518~31bf3856ad364e35~amd64~~10.0.22621.1.cat',
+            'Microsoft-Windows-WinPE-SKU-Foundation-merged-Package~31bf3856ad364e35~amd64~~10.0.22621.1.cat',
+            'Microsoft-Windows-WinPE-SKU-Foundation-merged-Package~31bf3856ad364e35~amd64~zh-CN~10.0.22621.1.cat'
+        ),
+
+        [string] $PreExtractedInstallWimDir
+    )
+
+    Write-Step 'GdiPlus.dll catalog check (round 36: smss died on it in round 35)'
+    if (-not (Test-Path -LiteralPath $WorkDir)) {
+        New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+    }
+    $diagPath = Join-Path $WorkDir 'micpe-gdiplus-diag.txt'
+    $diag = [System.Collections.Generic.List[string]]::new()
+    $diag.Add('MICPE GdiPlus.dll catalog diagnosis (round 36)')
+    $diag.Add('Round 35 KD log: smss.exe loading GdiPlus.dll hit CI "not signed correctly", Fatal System Error 0xC000021A (0xC0000428 STATUS_INVALID_IMAGE_HASH).')
+
+    # 1. The staging file: hash, version, Authenticode hashes.
+    $stagingDll = Join-Path $StagingDir $GdiPlusRel
+    Assert-PathExists -Path $stagingDll -Label "staged $GdiPlusRel"
+    $stagingSha256 = (Get-FileHash -LiteralPath $stagingDll -Algorithm SHA256).Hash.ToLower()
+    $stagingVersion = ([System.Diagnostics.FileVersionInfo]::GetVersionInfo($stagingDll)).FileVersion
+    $stagingAuth = Get-CleanAuthenticodeHash -Path $stagingDll
+    $diag.Add(('staging file: {0} ({1} bytes)' -f $GdiPlusRel, (Get-Item -LiteralPath $stagingDll).Length))
+    $diag.Add(('staging file version: {0}' -f $stagingVersion))
+    $diag.Add(('staging file SHA256: {0}' -f $stagingSha256))
+    $diag.Add(('staging Authenticode SHA1: {0}' -f $stagingAuth.Sha1))
+    $diag.Add(('staging Authenticode SHA256: {0}' -f $stagingAuth.Sha256))
+    Write-SubStep ("GdiPlus.dll in staging: version {0}, SHA256 {1}" -f $stagingVersion, $stagingSha256)
+    Write-SubStep ("GdiPlus.dll Authenticode SHA1 {0} / SHA256 {1}" -f $stagingAuth.Sha1, $stagingAuth.Sha256)
+
+    # 2. The same file from the official source install.wim: the
+    # staging copy must be byte-identical to it (the build must not
+    # have modified the file -- if it did, no catalog from the source
+    # can cover it, and the hash check below fails loudly).
+    $extractDir = $null
+    if ($PreExtractedInstallWimDir) {
+        $extractDir = $PreExtractedInstallWimDir
+    }
+    else {
+        $extractDir = Join-Path $WorkDir 'installwim'
+        if (Test-Path -LiteralPath $extractDir) {
+            Remove-Item -LiteralPath $extractDir -Recurse -Force
+        }
+        $patterns = @($GdiPlusRel) + @($CandidateCats | ForEach-Object { "$CatRootRel\$_" })
+        Export-WimFiles -WimPath $InstallWim -Index 1 -Destination $extractDir -Patterns $patterns -WimlibPath $WimlibPath
+    }
+    $officialDll = Join-Path $extractDir $GdiPlusRel
+    $officialMatch = $false
+    if (Test-Path -LiteralPath $officialDll) {
+        $officialSha256 = (Get-FileHash -LiteralPath $officialDll -Algorithm SHA256).Hash.ToLower()
+        $officialAuth = Get-CleanAuthenticodeHash -Path $officialDll
+        $officialMatch = (($officialSha256 -eq $stagingSha256) -and ($officialAuth.Sha1 -eq $stagingAuth.Sha1) -and ($officialAuth.Sha256 -eq $stagingAuth.Sha256))
+        $diag.Add(('official install.wim file SHA256: {0}' -f $officialSha256))
+        $diag.Add(('official install.wim Authenticode SHA1: {0}' -f $officialAuth.Sha1))
+        $diag.Add(('official install.wim Authenticode SHA256: {0}' -f $officialAuth.Sha256))
+        $diag.Add(('staging file matches official install.wim file: {0}' -f $officialMatch))
+        Write-SubStep ("GdiPlus.dll vs official install.wim: match={0}" -f $officialMatch)
+    }
+    else {
+        $diag.Add('official install.wim file: NOT FOUND in the source install.wim (cannot compare -- the whitelist copy may have come from elsewhere)')
+        Write-SubStep '!!! GdiPlus.dll not found in the source install.wim (cannot compare against official)'
+    }
+
+    # 3. Per-candidate catalog verdict: only a catalog that contains
+    # BOTH Authenticode hashes covers the file. A candidate missing
+    # from the source install.wim is a warning, not a failure --
+    # the RTM source may legitimately lack one variant.
+    $catRootDir = Join-Path $StagingDir $CatRootRel
+    if (-not (Test-Path -LiteralPath $catRootDir)) {
+        New-Item -ItemType Directory -Path $catRootDir -Force | Out-Null
+    }
+    $injected = [System.Collections.Generic.List[pscustomobject]]::new()
+    $checked = [System.Collections.Generic.List[string]]::new()
+    foreach ($catName in $CandidateCats) {
+        $catPath = Join-Path $extractDir "$CatRootRel\$catName"
+        if (-not (Test-Path -LiteralPath $catPath)) {
+            $diag.Add(('candidate {0}: ABSENT from source install.wim (skipped)' -f $catName))
+            Write-SubStep ("candidate catalog absent from install.wim: {0}" -f $catName)
+            continue
+        }
+        $covers = Test-CleanCatHasAuthenticodeHash -CatPath $catPath -Sha1 $stagingAuth.Sha1 -Sha256 $stagingAuth.Sha256
+        $checked.Add($catName)
+        if ($covers) {
+            $size = (Get-Item -LiteralPath $catPath).Length
+            $hash = (Get-FileHash -LiteralPath $catPath -Algorithm SHA256).Hash.ToLower()
+            Copy-Item -LiteralPath $catPath -Destination (Join-Path $catRootDir $catName) -Force
+            Assert-PathExists -Path (Join-Path $catRootDir $catName) -Label "staged $catName"
+            $injected.Add([pscustomobject]@{ Name = $catName; Size = $size; Sha256 = $hash })
+            $diag.Add(('candidate {0}: COVERS the file (both hashes present) -- INJECTED ({1} bytes, SHA256 {2})' -f $catName, $size, $hash))
+            Write-SubStep ("injected {0} ({1} bytes, SHA256 verified, GdiPlus.dll hash present)" -f $catName, $size)
+        }
+        else {
+            $diag.Add(('candidate {0}: does NOT cover the file (hash absent) -- not injected' -f $catName))
+            Write-SubStep ("candidate catalog does not cover GdiPlus.dll: {0}" -f $catName)
+        }
+    }
+    $diag.Add(('candidates checked: {0}' -f ($checked -join ', ')))
+    $diag.Add(('catalogs injected: {0}' -f $injected.Count))
+    $diag.Add('KnownDLLs: `gdiplus` -> `gdiplus.dll` verified present in both the r111 and the reference SYSTEM hives (local regipy check 2026-11-27, against the real r111 boot.wim); the .cat injection does not touch the registry, so no CI re-check is needed.')
+    if ($injected.Count -eq 0) {
+        $diag.Add('VERDICT: NO catalog covers this GdiPlus.dll -- the fix did NOT land. Do not guess another package: report the version and hashes above and find where the covering catalog lives.')
+        $diag | Set-Content -LiteralPath $diagPath -Encoding ASCII
+        throw ("GdiPlus.dll catalog check: no candidate catalog in the source install.wim covers the staged file (version {0}, Authenticode SHA1 {1} / SHA256 {2}; candidates checked: {3}) -- see {4}" -f $stagingVersion, $stagingAuth.Sha1, $stagingAuth.Sha256, ($checked -join ', '), $diagPath)
+    }
+    $diag.Add('VERDICT: covering catalog(s) injected -- the round 35 CI failure (GdiPlus.dll not signed) should be gone; the read-back after capture verifies they are in boot.wim.')
+    $diag | Set-Content -LiteralPath $diagPath -Encoding ASCII
+    Write-SubStep ("GdiPlus.dll diagnosis written to {0}" -f $diagPath)
+
+    if (-not $PreExtractedInstallWimDir) {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    return [pscustomobject]@{
+        DiagPath           = $diagPath
+        GdiPlusVersion     = $stagingVersion
+        GdiPlusSha256      = $stagingSha256
+        GdiPlusAuthSha1    = $stagingAuth.Sha1
+        GdiPlusAuthSha256  = $stagingAuth.Sha256
+        OfficialMatch      = $officialMatch
+        InjectedCats       = @($injected.ToArray())
     }
 }
 
@@ -1389,6 +1682,15 @@ $base = Invoke-CleanBaseStep
 $extract = Invoke-CleanExtractStep -InstallWim $base.InstallWim
 Write-SubStep ("staged {0} file-list paths from install.wim index {1}" -f $extract.FileCount, $extract.ImageIndex)
 $catFix = Invoke-CleanCatFixStep -StagingDir $paths.Staging -WorkDir (Join-Path $paths.Logs 'catfix')
+# Round 36: GdiPlus.dll catalog fix -- the round 35 KD round caught
+# smss.exe dying because no catalog in the image covers the RTM
+# GdiPlus.dll (see Invoke-CleanGdiPlusCatFixStep). Runs right after
+# the cdrom catalog fix, same staging CatRoot, same read-back below.
+$gdiPlusFix = Invoke-CleanGdiPlusCatFixStep -StagingDir $paths.Staging -InstallWim $base.InstallWim -WorkDir (Join-Path $paths.Logs 'gdiplus') -WimlibPath $WimlibPath
+# Round 36: the diagnosis must survive the runner -- build logs are
+# not uploaded anywhere, so a copy rides the Release (build.yml
+# picks it up from the repo root).
+Copy-Item -LiteralPath $gdiPlusFix.DiagPath -Destination (Join-Path $repoRoot 'micpe-gdiplus-diag.txt') -Force
 Invoke-CleanShellStep
 $apps = Invoke-CleanAppStep
 Invoke-CleanRegistryStep -AppRegFiles $apps.RegFiles
@@ -1396,7 +1698,12 @@ Assert-CleanRegistry -AppNames $apps.Names
 Invoke-CleanWimBootStep -StagingDir $paths.Staging -PeDonorWim $base.BootWim -WimlibPath $WimlibPath
 Assert-BootCritical -ImageRoot $paths.Staging
 $capturedBootWim = Invoke-CleanCaptureStep
-Assert-CleanCatFilesInBootWim -BootWim $capturedBootWim -ExpectedCats $catFix.ExpectedCats -WimlibPath $WimlibPath
+# Round 36: the read-back now covers the GdiPlus catalogs too --
+# Assert-CleanCatFilesInBootWim takes the combined list (cdrom cats
+# from round 13/14 + GdiPlus cats injected above, each with its
+# measured size/SHA256), so a catalog that failed to survive capture
+# fails the build here instead of wasting the QEMU run.
+Assert-CleanCatFilesInBootWim -BootWim $capturedBootWim -ExpectedCats (@($catFix.ExpectedCats) + @($gdiPlusFix.InjectedCats)) -WimlibPath $WimlibPath
 $result = Invoke-CleanIsoStep -BootWim $capturedBootWim
 
 Write-Step 'done'

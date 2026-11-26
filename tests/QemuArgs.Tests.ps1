@@ -3417,3 +3417,192 @@ Describe 'Round 35 QEMU argv construction (round 34 CommandNotFoundException)' {
         ($noDisk -join ' ') | Should -Not -Match 'micpe-dumpdisk'
     }
 }
+
+Describe 'Round 36 KD init registers and black-screen verdict exemption' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27-35 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r36Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r36-$(Get-Random)"
+        $script:r36Share = Join-Path $script:r36Dir 'share'
+        New-Item -ItemType Directory -Path $script:r36Share -Force | Out-Null
+        $script:r36Iso = Join-Path $script:r36Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r36Iso -Force | Out-Null
+        $script:r36Work = Join-Path $script:r36Dir 'work'
+        New-Item -ItemType Directory -Path $script:r36Work -Force | Out-Null
+        $script:r36Code = Join-Path $script:r36Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r36Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r36Iso -OvmfPath $script:r36Code -WorkDir $script:r36Work
+        $script:cleanVerify = Get-Content -LiteralPath "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -Raw
+        $script:r36KdInit = Join-Path $script:r36Work 'kd-init.txt'
+        $script:r36KdLog = Join-Path $script:r36Work 'micpe-kd.log'
+
+        # A synthetic cdb -logo transcript in the NEW (round 36)
+        # shape: the breakpoint command prints the five entry
+        # registers with one `?` per register, then the `du` lines
+        # (which are `????` for 0x4C -- Arg2/Arg3 are not strings),
+        # then the banner. Values are the real round 35 ones
+        # (KeBugCheckEx 0x4C / 0xC000021A).
+        $script:r36KdLogNew = @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 21:30:53.647 2026 (UTC + 0:00)), ptr64 TRUE
+Kernel Debugger connection established.
+*** KD-INIT START ***
+*** KD-INIT BU ISSUED ***
+*** KEBUGCHECKEX HIT ***
+rax=ffff9307d5d11200 rbx=0000000000000002 rcx=000000000000004c
+rdx=00000000c000021a rsi=0000000000000002 rdi=fffff986a5fb7440
+Evaluate expression: 76 = 00000000`0000004c
+Evaluate expression: -1073741302 = ffffffff`c000021a
+Evaluate expression: -7118271056679 = fffff986`a605f2d8
+Evaluate expression: -7118271056486 = fffff930`7d5a5b990
+Evaluate expression: -7118271056832 = fffff986`a5fb7440
+ffffffff`c0000428  "????????????????????????????????"
+*** Fatal System Error: 0xc000021a
+                       (0xFFFFC305A4509110,0xFFFFFFFFC0000428,0xFFFFC305A48FFAD0,0x0000000000000000)
+*** KD-INIT G ISSUED ***
+'@
+
+        # Same shape, but the banner never arrived (cdb killed
+        # first): the entry registers are then the only parameters.
+        $script:r36KdLogNoBanner = @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 21:30:53.647 2026 (UTC + 0:00)), ptr64 TRUE
+Kernel Debugger connection established.
+*** KEBUGCHECKEX HIT ***
+rax=ffff9307d5d11200 rbx=0000000000000002 rcx=000000000000004c
+Evaluate expression: 76 = 00000000`0000004c
+Evaluate expression: -1073741302 = ffffffff`c000021a
+Evaluate expression: -7118271056679 = fffff986`a605f2d8
+Evaluate expression: -7118271056486 = fffff930`7d5a5b990
+Evaluate expression: -7118271056832 = fffff986`a5fb7440
+'@
+
+        # Old shape (round 26-35): a single `?` line (Arg4 only).
+        # The parser must NOT map it positionally as the code.
+        $script:r36KdLogOld = @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 12:00:00 2026), ptr64 TRUE
+*** KEBUGCHECKEX HIT ***
+rax=0000000000000000 rbx=ffffba8f4e9f8c50 rcx=000000000000005a rdx=0000000000000001
+r8=ffffba8f4e9f8c50  r9=ffffce06bf0caa90 r10=0000000000000000
+\Registry\Machine\SYSTEM\CurrentControlSet\Services\SomeDriver
+\SystemRoot\System32\drivers\SomeDriver.sys
+Evaluate expression: 18446744073709551640 = ffffffffc0000428
+*** Fatal System Error: 0x0000005a
+      (0x0000000000000001,0xffffba8f4e9f8c50,0xffffce06bf0caa90,0xffffffffc0000428)
+'@
+    }
+
+    It 'writes the init script with the five explicit register prints, in order, and no .if (round 36)' {
+        Write-CleanKdInitScript -InitScriptPath $script:r36KdInit
+        $lines = Get-Content -LiteralPath $script:r36KdInit
+        $lines.Count | Should -Be 6
+        $lines[1] | Should -Match 'bu nt!KeBugCheckEx'
+        $lines[1] | Should -Match '\? @rcx; \? @rdx; \? @r8; \? @r9; \? poi\(@rsp\+0x20\)'
+        # The `du` lines stay (they are the 0x5A strings), but no
+        # verdict may wait on them: a `.if` that failed to parse
+        # would swallow `g` and freeze the guest at KeBugCheckEx.
+        $lines[1] | Should -Match 'du poi\(@r8\+8\); du poi\(@r9\+8\)'
+        $lines[1] | Should -Not -Match '\.if'
+        # Order: the `?` register prints come before the `du` lines.
+        $lines[1].IndexOf('? @rcx') | Should -BeLessThan $lines[1].IndexOf('du poi')
+    }
+
+    It 'keeps the inline-c argv variant on the same new breakpoint command' {
+        $inline = Get-CleanKdArgList -KdPort '50002' -WorkDir $script:r36Work -KdLogPath $script:r36KdLog -InitScriptPath $script:r36KdInit -Variant 'inline-c' -Transport kdnet
+        $inline -join ' ' | Should -Match '\? @rcx; \? @rdx; \? @r8; \? @r9; \? poi\(@rsp\+0x20\)'
+        $inline -join ' ' | Should -Not -Match '\.if'
+    }
+
+    It 'parses the five ? lines into the KeBugCheckEx call arguments (round 35 values)' {
+        $parsed = ConvertFrom-CleanKdLog -Content $script:r36KdLogNew -Transport kdnet
+        $parsed.Connected | Should -BeTrue
+        $parsed.BrokeIn | Should -BeTrue
+        $parsed.KeBugCheckExArgs.Code | Should -Be '0x000000000000004c'
+        $parsed.KeBugCheckExArgs.Arg1 | Should -Be '0xffffffffc000021a'
+        $parsed.KeBugCheckExArgs.Arg2 | Should -Be '0xfffff986a605f2d8'
+        $parsed.KeBugCheckExArgs.Arg3 | Should -Be '0xfffff9307d5a5b990'
+        $parsed.KeBugCheckExArgs.Arg4 | Should -Be '0xfffff986a5fb7440'
+        # The banner is the hard-error arguments, NOT the same
+        # numbers: the two must not be mixed.
+        $parsed.BugCheck.BugCheckCode | Should -Be '0xc000021a'
+        $parsed.BugCheck.Arg2 | Should -Be '0xffffffffc0000428'
+        # The `du` lines are `????` for 0x4C: no strings to report.
+        $parsed.Arg2String | Should -BeNullOrEmpty
+        $parsed.Arg3String | Should -BeNullOrEmpty
+    }
+
+    It 'reports the register arguments when the breakpoint fired but no banner followed' {
+        $parsed = ConvertFrom-CleanKdLog -Content $script:r36KdLogNoBanner -Transport kdnet
+        $parsed.BrokeIn | Should -BeTrue
+        $parsed.BugCheck | Should -BeNullOrEmpty
+        $parsed.KeBugCheckExArgs.Code | Should -Be '0x000000000000004c'
+        $parsed.KeBugCheckExArgs.Arg1 | Should -Be '0xffffffffc000021a'
+        $parsed.Reason | Should -Match '0x000000000000004c'
+        $parsed.Reason | Should -Match 'no bugcheck banner'
+    }
+
+    It 'does not mis-map the single ? line of an old-format log as the code' {
+        $parsed = ConvertFrom-CleanKdLog -Content $script:r36KdLogOld
+        $parsed.KeBugCheckExArgs | Should -BeNullOrEmpty
+        # The old behaviour is unchanged: banner + du strings parse.
+        $parsed.BugCheck.BugCheckCode | Should -Be '0x0000005a'
+        $parsed.Arg2String | Should -Be '\Registry\Machine\SYSTEM\CurrentControlSet\Services\SomeDriver'
+        $parsed.Arg3String | Should -Be '\SystemRoot\System32\drivers\SomeDriver.sys'
+    }
+
+    It 'Test-CleanKdBugcheckCaptured is true for a connected log with a hit or a banner, false otherwise' {
+        Set-Content -LiteralPath $script:r36KdLog -Value $script:r36KdLogNew -NoNewline
+        Test-CleanKdBugcheckCaptured -KdLogPath $script:r36KdLog -KdTransport kdnet | Should -BeTrue
+        # Banner only, no breakpoint hit: still a capture (the
+        # banner proves the guest bugchecked under the debugger).
+        $bannerOnly = @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 21:30:53.647 2026 (UTC + 0:00)), ptr64 TRUE
+*** Fatal System Error: 0xc000021a
+                       (0xFFFFC305A4509110,0xFFFFFFFFC0000428,0xFFFFC305A48FFAD0,0x0000000000000000)
+'@
+        Set-Content -LiteralPath $script:r36KdLog -Value $bannerOnly -NoNewline
+        Test-CleanKdBugcheckCaptured -KdLogPath $script:r36KdLog -KdTransport kdnet | Should -BeTrue
+        # Connected but never bugchecked: not a capture.
+        Set-Content -LiteralPath $script:r36KdLog -Value @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 21:30:53.647 2026 (UTC + 0:00)), ptr64 TRUE
+kd> g
+'@ -NoNewline
+        Test-CleanKdBugcheckCaptured -KdLogPath $script:r36KdLog -KdTransport kdnet | Should -BeFalse
+        # Missing log (control pass) and empty log: not a capture.
+        Test-CleanKdBugcheckCaptured -KdLogPath (Join-Path $script:r36Work 'no-such-log.log') -KdTransport kdnet | Should -BeFalse
+        Test-CleanKdBugcheckCaptured -KdLogPath '' -KdTransport kdnet | Should -BeFalse
+        Set-Content -LiteralPath $script:r36KdLog -Value '' -NoNewline
+        Test-CleanKdBugcheckCaptured -KdLogPath $script:r36KdLog -KdTransport kdnet | Should -BeFalse
+    }
+
+    It 'Get-CleanBlackScreenGateError waives the black-screen verdict when KD captured a bugcheck, and keeps it otherwise' {
+        $allBoot = @(
+            [pscustomobject]@{ Classification = 'Boot' }
+            [pscustomobject]@{ Classification = 'Boot' }
+            [pscustomobject]@{ Classification = 'Boot' }
+        )
+        # Captured: no black-screen failure (the guest bugchecked
+        # under the debugger; the caller fails it on the bugcheck,
+        # not on the screen).
+        Get-CleanBlackScreenGateError -Classifications $allBoot -KdCaptured $true | Should -BeNullOrEmpty
+        # Not captured: the original black-screen failure stands.
+        $err = Get-CleanBlackScreenGateError -Classifications $allBoot -KdCaptured $false
+        $err | Should -Match 'every screenshot is a black screen'
+        # Something rendered: no black-screen failure either way.
+        $mixed = @(
+            [pscustomobject]@{ Classification = 'Boot' }
+            [pscustomobject]@{ Classification = 'LogonUI' }
+        )
+        Get-CleanBlackScreenGateError -Classifications $mixed -KdCaptured $false | Should -BeNullOrEmpty
+        Get-CleanBlackScreenGateError -Classifications $mixed -KdCaptured $true | Should -BeNullOrEmpty
+        Get-CleanBlackScreenGateError -Classifications @() -KdCaptured $false | Should -BeNullOrEmpty
+    }
+
+    It 'the screen gate names the captured bugcheck instead of the black screen (round 36 verdict)' {
+        # The gate code itself: the black-screen throw is reached
+        # only when no bugcheck was captured; a captured bugcheck
+        # throws with the bugcheck code instead.
+        $script:cleanVerify | Should -Match 'Get-CleanBlackScreenGateError'
+        $script:cleanVerify | Should -Match 'live KD captured bugcheck'
+        $script:cleanVerify | Should -Match 'not a black-screen boot stall'
+    }
+}

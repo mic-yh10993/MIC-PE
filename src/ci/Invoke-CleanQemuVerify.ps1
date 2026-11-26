@@ -1857,9 +1857,23 @@ function Write-CleanKdInitScript {
         [Parameter(Mandatory = $true)]
         [string] $InitScriptPath
     )
+    # Round 36: the breakpoint command now prints the KeBugCheckEx
+    # entry registers explicitly (rcx = code, rdx = Arg1, r8 = Arg2,
+    # r9 = Arg3, [rsp+0x20] = Arg4) with one `?` per register, in
+    # that fixed order, so ConvertFrom-CleanKdLog can read the true
+    # parameters positionally. Round 35 proved the old assumption
+    # wrong: for 0x4C (0xC000021A) Arg2/Arg3 are NOT UNICODE_STRING
+    # pointers, so `du poi(@r8+8)` / `du poi(@r9+8)` only print
+    # `????????...` -- noise, not parameters. The `du` lines stay
+    # (they are the 0x5A service/driver strings when the code IS
+    # 0x5A, and the parser already ignores `????` lines), but no
+    # verdict may wait on them anymore. NO `.if` here: a breakpoint
+    # command that fails to parse would swallow `g` and freeze the
+    # guest at KeBugCheckEx -- the unconditional `?` lines cannot
+    # fail that way.
     $initLines = @(
         '.echo *** KD-INIT START ***'
-        'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"'
+        'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; ? @rcx; ? @rdx; ? @r8; ? @r9; ? poi(@rsp+0x20); du poi(@r8+8); du poi(@r9+8); g"'
         'bl'
         '.echo *** KD-INIT BU ISSUED ***'
         'g'
@@ -1938,7 +1952,7 @@ function Get-CleanKdArgList {
     if ($Variant -ne 'noc') {
         $args.Add('-c')
         if ($Variant -eq 'inline-c') {
-            $args.Add('bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"; g')
+            $args.Add('bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; ? @rcx; ? @rdx; ? @r8; ? @r9; ? poi(@rsp+0x20); du poi(@r8+8); du poi(@r9+8); g"; g')
         }
         else {
             $args.Add(('$$><{0}' -f $InitScriptPath))
@@ -2350,18 +2364,23 @@ function Start-CleanKdSession {
     # breakpoint resolves. The round 33 script is only `.echo
     # START`, `g`, `.echo G ISSUED`. Once `g` is proven to get
     # through, round 34 puts the breakpoint back: `bu
-    # nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du
-    # poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"` + `bl` +
-    # `.echo BU ISSUED` before the `g` (the round 27-32 order). `bu`
-    # (not `bp`) is a deferred breakpoint: at the initial break-in
-    # the symbols may not be ready yet, and `bu` resolves via the
-    # export table (KeBugCheckEx is exported by ntoskrnl) and stays
-    # pending until it can bind. `r` prints the registers (rcx =
-    # bugcheck code, rdx = Arg1, r8 = Arg2, r9 = Arg3); the two `du`
-    # print the UNICODE_STRING contents Arg2/Arg3 point at (service
-    # registry path, driver image path); `?` prints the Arg4
-    # NTSTATUS from the stack; the trailing `g` continues into the
-    # bugcheck, where cdb breaks again and logs the bugcheck banner.
+    # nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; ? @rcx;
+    # ? @rdx; ? @r8; ? @r9; ? poi(@rsp+0x20); du poi(@r8+8); du
+    # poi(@r9+8); g"` + `bl` + `.echo BU ISSUED` before the `g`
+    # (the round 27-32 order). `bu` (not `bp`) is a deferred
+    # breakpoint: at the initial break-in the symbols may not be
+    # ready yet, and `bu` resolves via the export table
+    # (KeBugCheckEx is exported by ntoskrnl) and stays pending until
+    # it can bind. `r` prints the registers (rcx = bugcheck code,
+    # rdx = Arg1, r8 = Arg2, r9 = Arg3); the five `?` print the same
+    # entry values one per line, in that fixed order, so the parser
+    # can read the true parameters even when the code is not 0x5A
+    # (round 36: for 0x4C Arg2/Arg3 are not UNICODE_STRING pointers,
+    # so `du` only prints `????`); the two `du` print the
+    # UNICODE_STRING contents Arg2/Arg3 point at (service registry
+    # path, driver image path) when the code IS 0x5A; the trailing
+    # `g` continues into the bugcheck, where cdb breaks again and
+    # logs the bugcheck banner.
     # No `!analyze -v` (needs interactive work at the bugcheck
     # break; a later round can add it). The bp commands use only
     # `r`/`du`/`?`/`.echo`, none of which needs PDBs -- but round 29
@@ -2383,7 +2402,7 @@ function Start-CleanKdSession {
     # -ArgumentList splits arguments on spaces on Linux). The init
     # script this round (see Write-CleanKdInitScript):
     #   .echo *** KD-INIT START ***
-    #   bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"
+    #   bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; ? @rcx; ? @rdx; ? @r8; ? @r9; ? poi(@rsp+0x20); du poi(@r8+8); du poi(@r9+8); g"
     #   bl
     #   .echo *** KD-INIT BU ISSUED ***
     #   g
@@ -2761,6 +2780,21 @@ function ConvertFrom-CleanKdLog {
     # minimal-script branch is gone -- `bu` is back in the script,
     # so a log with G ISSUED but no BU ISSUED means the breakpoint
     # section never echoed, not "no breakpoint this round".
+    # Round 36: the init script now prints the KeBugCheckEx entry
+    # registers explicitly, one `?` per register in fixed order
+    # (rcx = code, rdx = Arg1, r8 = Arg2, r9 = Arg3, [rsp+0x20] =
+    # Arg4) -- see Write-CleanKdInitScript. The parser reads those
+    # five `Evaluate expression:` lines positionally into
+    # KeBugCheckExArgs, the TRUE parameters of the KeBugCheckEx call.
+    # They differ from the banner's parameters on purpose: the
+    # banner (NtRaiseHardError) carries the hard-error arguments
+    # (round 35: bugcheck 0xc000021a with Arg2 0xffffffffc0000428),
+    # while the registers carry the KeBugCheckEx call itself (code
+    # 0x4c, Arg1 0xc000021a). Do NOT mix the two. Only a log with
+    # all five `?` lines yields args -- older logs have just the one
+    # `? poi(@rsp+0x20)` line (Arg4), and mapping that single line
+    # positionally would mislabel it as the code, so they keep the
+    # old behaviour (KeBugCheckExArgs stays $null).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -2772,15 +2806,16 @@ function ConvertFrom-CleanKdLog {
     )
 
     $result = [pscustomobject]@{
-        BugCheck = $null
-        Arg2String = $null
-        Arg3String = $null
-        Connected = $false
-        BrokeIn = $false
-        InitStarted = $false
-        InitBuIssued = $false
-        InitGIssued = $false
-        Reason = 'KD log is empty (cdb produced no output)'
+        BugCheck        = $null
+        KeBugCheckExArgs = $null
+        Arg2String      = $null
+        Arg3String      = $null
+        Connected       = $false
+        BrokeIn         = $false
+        InitStarted     = $false
+        InitBuIssued    = $false
+        InitGIssued     = $false
+        Reason          = 'KD log is empty (cdb produced no output)'
     }
     if ([string]::IsNullOrWhiteSpace($Content)) { return $result }
     $lines = ($Content -split "`r`n|`n")
@@ -2822,11 +2857,37 @@ function ConvertFrom-CleanKdLog {
         }
     }
     if ($markerIdx -ge 0) {
+        # Round 36: the five `?` lines the init script prints right
+        # after the marker, in fixed order (rcx, rdx, r8, r9,
+        # [rsp+0x20]) -- each one is `Evaluate expression: <dec> =
+        # <hex>` (the hex may carry a backtick, e.g.
+        # fffff986`a5fb7440, and the decimal may be negative for
+        # addresses, so the hex side is the value). Only when all
+        # five are present: an older log has just the single Arg4
+        # `?` line, which must not be misread as the code.
+        $evalHex = [System.Collections.Generic.List[string]]::new()
+        for ($i = $markerIdx; $i -lt $lines.Count; $i++) {
+            $m = [regex]::Match($lines[$i], 'Evaluate expression:\s*-?\d+\s*=\s*([0-9a-fA-F`]+)')
+            if ($m.Success) { $evalHex.Add($m.Groups[1].Value.Replace('`', '').ToLowerInvariant()) }
+        }
+        if ($evalHex.Count -ge 5) {
+            $result.KeBugCheckExArgs = [pscustomobject]@{
+                Code = ('0x{0}' -f $evalHex[0])
+                Arg1 = ('0x{0}' -f $evalHex[1])
+                Arg2 = ('0x{0}' -f $evalHex[2])
+                Arg3 = ('0x{0}' -f $evalHex[3])
+                Arg4 = ('0x{0}' -f $evalHex[4])
+            }
+        }
         # Path-like lines after the marker are the two `du` outputs
         # (first = Arg2's string, second = Arg3's): a bare string
         # with no whitespace, starting with a backslash. The `r`
         # output lines contain '=' and the `?` output starts with
-        # 'Evaluate expression:', so neither can match.
+        # 'Evaluate expression:', so neither can match. For a
+        # non-0x5A code the `du` lines are `????????...` (round 35:
+        # 0x4C args are not strings) and match nothing here -- the
+        # parameters then come from KeBugCheckExArgs above, not
+        # from `du`.
         $paths = [System.Collections.Generic.List[string]]::new()
         for ($i = $markerIdx; $i -lt $lines.Count; $i++) {
             $t = $lines[$i].Trim()
@@ -2835,7 +2896,12 @@ function ConvertFrom-CleanKdLog {
         if ($paths.Count -ge 1) { $result.Arg2String = $paths[0] }
         if ($paths.Count -ge 2) { $result.Arg3String = $paths[1] }
         if ($null -eq $result.BugCheck) {
-            $result.Reason = 'the KeBugCheckEx breakpoint fired, but no bugcheck banner followed (cdb was killed before the banner, or the breakpoint fired on a different path)'
+            if ($null -ne $result.KeBugCheckExArgs) {
+                $result.Reason = ('the KeBugCheckEx breakpoint fired (code {0}, Arg1 {1} from the entry registers), but no bugcheck banner followed (cdb was killed before the banner, or the breakpoint fired on a different path)' -f $result.KeBugCheckExArgs.Code, $result.KeBugCheckExArgs.Arg1)
+            }
+            else {
+                $result.Reason = 'the KeBugCheckEx breakpoint fired, but no bugcheck banner followed (cdb was killed before the banner, or the breakpoint fired on a different path)'
+            }
         }
     }
     elseif ($null -eq $result.BugCheck) {
@@ -2882,6 +2948,62 @@ function ConvertFrom-CleanKdLog {
         }
     }
     return $result
+}
+
+function Test-CleanKdBugcheckCaptured {
+    # Round 36: true when the live KD log proves the debugger
+    # captured a bugcheck -- 'Connected to Windows' AND the
+    # KeBugCheckEx breakpoint fired (*** KEBUGCHECKEX HIT ***) or
+    # the bugcheck banner appeared. A merely-connected session
+    # (guest never bugchecked) is NOT a capture, and a missing log
+    # (control pass, or the debugger never started) is not one
+    # either. Pure predicate on the log file; never throws.
+    [CmdletBinding()]
+    param(
+        [string] $KdLogPath,
+
+        [ValidateSet('serial', 'kdnet')]
+        [string] $KdTransport = 'serial'
+    )
+
+    if (-not $KdLogPath -or -not (Test-Path -LiteralPath $KdLogPath)) { return $false }
+    $content = Get-Content -LiteralPath $KdLogPath -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($content)) { return $false }
+    $parsed = ConvertFrom-CleanKdLog -Content $content -Transport $KdTransport
+    return ($parsed.Connected -and ($parsed.BrokeIn -or ($null -ne $parsed.BugCheck)))
+}
+
+function Get-CleanBlackScreenGateError {
+    # Round 36: the black-screen gate's verdict, as a pure
+    # function so the exemption is unit-testable. Returns $null
+    # when there is no black-screen failure to report, otherwise
+    # the error message the caller throws.
+    # - Not every shot 'Boot' (something rendered: LogonUI, a
+    #   desktop, a BSOD handled by the blue-screen gate above):
+    #   no black-screen failure.
+    # - Every shot 'Boot' AND live KD captured a bugcheck
+    #   (-KdCaptured): NO black-screen failure -- the guest did not
+    #   stall at firmware, it bugchecked under the debugger, which
+    #   never draws a BSOD. The caller fails the round on the
+    #   captured bugcheck instead (see the gate below); the black
+    #   screen must not be the verdict, or every future round in
+    #   which KD catches a bugcheck would be mislabelled "boot
+    #   stalled at firmware".
+    # - Every shot 'Boot' and no capture: the original black-screen
+    #   failure (boot stalled at firmware / no display output).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $Classifications,
+
+        [bool] $KdCaptured = $false
+    )
+
+    if ($Classifications.Count -eq 0) { return $null }
+    if (@($Classifications | Where-Object { $_.Classification -ne 'Boot' }).Count -gt 0) { return $null }
+    if ($KdCaptured) { return $null }
+    return 'QEMU screen check failed: every screenshot is a black screen (boot stalled at firmware / no display output); the system never reached LogonUI'
 }
 
 function Invoke-CleanCrashDumpCapture {
@@ -3035,6 +3157,16 @@ function Invoke-CleanCrashDumpCapture {
                 $result.DumpFound = $true
                 if ($kdParsed.Arg2String) { $lines.Add(('Arg2 (service registry path, live KD): {0}' -f $kdParsed.Arg2String)) }
                 if ($kdParsed.Arg3String) { $lines.Add(('Arg3 (driver image path, live KD): {0}' -f $kdParsed.Arg3String)) }
+                # Round 36: the KeBugCheckEx call's own arguments
+                # (from the entry registers) -- NOT the same numbers
+                # as the banner above (the banner is the hard-error
+                # arguments; these are the KeBugCheckEx call). For
+                # round 35: Code 0x4c, Arg1 0xc000021a -- the banner
+                # alone (0xc000021a with Arg2 0xffffffffc0000428)
+                # does not say which KeBugCheckEx code produced it.
+                if ($null -ne $kdParsed.KeBugCheckExArgs) {
+                    $lines.Add(('RESULT (live KD, KeBugCheckEx args): Code={0} Arg1={1} Arg2={2} Arg3={3} Arg4={4}' -f $kdParsed.KeBugCheckExArgs.Code, $kdParsed.KeBugCheckExArgs.Arg1, $kdParsed.KeBugCheckExArgs.Arg2, $kdParsed.KeBugCheckExArgs.Arg3, $kdParsed.KeBugCheckExArgs.Arg4))
+                }
             }
             else {
                 $lines.Add(('live KD produced no bugcheck parameters: {0}' -f $kdParsed.Reason))
@@ -3045,6 +3177,12 @@ function Invoke-CleanCrashDumpCapture {
                 $kdNameText = if ($KdDebuggerName) { $KdDebuggerName } else { 'the debugger' }
                 if ($kdParsed.Connected) { $lines.Add(('live KD: {0} did connect to the guest' -f $kdNameText)) }
                 if ($kdParsed.BrokeIn) { $lines.Add('live KD: the KeBugCheckEx breakpoint did fire') }
+                # Round 36: when the banner never arrived, the entry
+                # registers are the only parameters -- report them
+                # here instead of leaving the round with nothing.
+                if ($null -ne $kdParsed.KeBugCheckExArgs) {
+                    $lines.Add(('RESULT (live KD, KeBugCheckEx args, no banner): Code={0} Arg1={1} Arg2={2} Arg3={3} Arg4={4}' -f $kdParsed.KeBugCheckExArgs.Code, $kdParsed.KeBugCheckExArgs.Arg1, $kdParsed.KeBugCheckExArgs.Arg2, $kdParsed.KeBugCheckExArgs.Arg3, $kdParsed.KeBugCheckExArgs.Arg4))
+                }
                 # Round 30: the init script's own progress markers.
                 # Only when at least one marker is present -- logs
                 # from before round 30 have none, and reporting
@@ -3671,8 +3809,22 @@ try {
         if ($bsodCount -gt 0) { $kinds.Add(("{0} show(s) a bugcheck blue screen (BSOD)" -f $bsodCount)) }
         throw ("QEMU screen check failed: {0} -- the system never reached LogonUI/desktop: {1}" -f ($kinds -join '; '), $names)
     }
-    if ($classifications.Count -gt 0 -and @($classifications | Where-Object { $_.Classification -ne 'Boot' }).Count -eq 0) {
-        throw 'QEMU screen check failed: every screenshot is a black screen (boot stalled at firmware / no display output); the system never reached LogonUI'
+    # Round 36: the black-screen gate is waived when live KD
+    # captured a bugcheck -- the guest did not stall at firmware, it
+    # bugchecked under the debugger (which never draws a BSOD), so
+    # "every screenshot is a black screen" mislabels the round.
+    # The round still fails -- the guest never reached LogonUI --
+    # but on the captured bugcheck, not on the screen. Only the KD
+    # pass can be waived (the control pass has no kd.log, so
+    # Test-CleanKdBugcheckCaptured is false there); a KD pass with
+    # no capture still fails on the black screen as before.
+    $kdCaptured = Test-CleanKdBugcheckCaptured -KdLogPath $kdLog -KdTransport $KdTransport
+    $blackScreenError = Get-CleanBlackScreenGateError -Classifications $classifications -KdCaptured $kdCaptured
+    if ($blackScreenError) { throw $blackScreenError }
+    if ($kdCaptured -and $classifications.Count -gt 0 -and @($classifications | Where-Object { $_.Classification -ne 'Boot' }).Count -eq 0) {
+        $kdParsed = ConvertFrom-CleanKdLog -Content (Get-Content -LiteralPath $kdLog -Raw -ErrorAction SilentlyContinue) -Transport $KdTransport
+        $code = if ($kdParsed.BugCheck) { $kdParsed.BugCheck.BugCheckCode } elseif ($kdParsed.KeBugCheckExArgs) { $kdParsed.KeBugCheckExArgs.Code } else { 'unknown' }
+        throw ("QEMU screen check: live KD captured bugcheck {0} (parameters in micpe-bugcheck.txt); the guest never reached LogonUI -- not a black-screen boot stall" -f $code)
     }
     $logonShot = @($classifications | Where-Object { (Split-Path -Leaf $_.Path) -eq 'shot-03.ppm' })
     if ($logonShot.Count -gt 0 -and $logonShot[0].Classification -eq 'Boot') {
