@@ -1731,6 +1731,182 @@ function Get-CleanCdbPath {
     return $null
 }
 
+function Write-CleanKdInitScript {
+    # Round 27: writes the two-line kd-init.txt the -c "$$>..." token
+    # runs at the initial break-in: a deferred breakpoint on
+    # KeBugCheckEx that prints the registers and the two
+    # UNICODE_STRING arguments, then `g` to continue into the
+    # bugcheck. Idempotent: the probe and the real session share it.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $InitScriptPath
+    )
+    $initLines = @(
+        'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"'
+        'g'
+    )
+    $initLines | Set-Content -LiteralPath $InitScriptPath -Encoding ASCII
+}
+
+function Get-CleanKdArgList {
+    # Round 27: builds the exact cdb/kd argv for one launch variant.
+    # Pure function (no process, no network): the probe and the real
+    # session share it, so a variant that survives the probe is
+    # launched verbatim against QEMU. Every variant is a single
+    # variable change from 'baseline' (the round 26 command line), so
+    # the first surviving variant identifies the trigger. Variants:
+    # baseline | baud | nosymbols | nologo | inline-c | noc. ('kd' is
+    # not an argv variant: it is the same argv with kd.exe as the
+    # binary, selected by the caller.) 'noc' drops -c entirely and is
+    # probe-only: without -c nothing issues `g`, so the guest would
+    # halt at the initial breakpoint.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $KdPort,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $KdLogPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $InitScriptPath,
+
+        [ValidateSet('baseline', 'baud', 'nosymbols', 'nologo', 'inline-c', 'noc')]
+        [string] $Variant = 'baseline'
+    )
+    $symPath = ('SRV*{0}\kd-symbols*https://msdl.microsoft.com/download/symbols' -f $WorkDir)
+    $args = [System.Collections.Generic.List[string]]::new()
+    $args.Add('-k')
+    $com = ('com:ipport={0},port=127.0.0.1' -f $KdPort)
+    if ($Variant -eq 'baud') { $com += ',baud=115200' }
+    $args.Add($com)
+    if ($Variant -ne 'nosymbols') {
+        $args.Add('-y')
+        $args.Add($symPath)
+    }
+    if ($Variant -ne 'nologo') {
+        $args.Add('-logo')
+        $args.Add($KdLogPath)
+    }
+    if ($Variant -ne 'noc') {
+        $args.Add('-c')
+        if ($Variant -eq 'inline-c') {
+            $args.Add('bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"; g')
+        }
+        else {
+            $args.Add(('$$><{0}' -f $InitScriptPath))
+        }
+    }
+    return $args.ToArray()
+}
+
+function Get-CleanKdPath {
+    # Round 27: kd.exe lives next to cdb.exe in the SDK Debuggers
+    # directory. Returns $null when it is not there (the 'kd'
+    # probe variant is then skipped, not failed).
+    [CmdletBinding()]
+    param(
+        [string] $CdbPath
+    )
+    if (-not $CdbPath) { return $null }
+    $dir = [System.IO.Path]::GetDirectoryName($CdbPath)
+    if (-not $dir) { return $null }
+    $kd = [System.IO.Path]::Combine($dir, 'kd.exe')
+    if (Test-Path -LiteralPath $kd) { return $kd }
+    return $null
+}
+
+function Get-CleanDebuggerVersion {
+    # Round 27: file version of the debugger binary, for the log.
+    # Round 26 never recorded WHICH cdb ran. Returns $null when the
+    # file is missing or carries no version resource (never throws).
+    [CmdletBinding()]
+    param(
+        [string] $Path
+    )
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+        if ($null -ne $info -and $info.FileVersion) { return $info.FileVersion }
+    }
+    catch {}
+    return $null
+}
+
+function Test-CleanTcpPort {
+    # Round 27: is anything listening on 127.0.0.1:$Port? A short
+    # TCP connect with a timeout; returns $false on refusal, timeout
+    # or any error. Used before the real KD session to prove (or
+    # disprove) that QEMU's serial listener is up when cdb starts --
+    # round 26 never proved it. Never throws.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Port,
+
+        [int] $TimeoutSec = 5
+    )
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $task = $client.ConnectAsync('127.0.0.1', [int]$Port)
+        if (-not $task.Wait([timespan]::FromSeconds($TimeoutSec))) { return $false }
+        if ($task.IsFaulted -or $task.IsCanceled) { return $false }
+        return $client.Connected
+    }
+    catch { return $false }
+    finally {
+        if ($null -ne $client) { try { $client.Dispose() } catch {} }
+    }
+}
+
+function Save-CleanKdConsoleOutput {
+    # Round 27: drains the ReadToEndAsync tasks a background cdb
+    # session leaves on its Process object (KdOutTask/KdErrTask note
+    # properties, attached by Start-CleanKdSession) and writes them
+    # to the console files. Never throws and never waits long: a task
+    # that does not complete within the bound is skipped (the -logo
+    # transcript is the primary evidence; the console files are the
+    # backstop for a session that died before the log file was opened).
+    [CmdletBinding()]
+    param(
+        $Process,
+
+        [string] $OutFile,
+
+        [string] $ErrFile,
+
+        [int] $WaitSec = 10
+    )
+    if ($null -eq $Process) { return }
+    $outTask = $null
+    $errTask = $null
+    $outProp = $Process.PSObject.Properties['KdOutTask']
+    if ($null -ne $outProp) { $outTask = $outProp.Value }
+    $errProp = $Process.PSObject.Properties['KdErrTask']
+    if ($null -ne $errProp) { $errTask = $errProp.Value }
+    if ($null -ne $outTask -and $OutFile) {
+        try {
+            if ($outTask.Wait([timespan]::FromSeconds($WaitSec)) -and $outTask.IsCompleted -and -not $outTask.IsFaulted -and -not $outTask.IsCanceled) {
+                [System.IO.File]::WriteAllText($OutFile, ($outTask.Result -as [string]))
+            }
+        }
+        catch {}
+    }
+    if ($null -ne $errTask -and $ErrFile) {
+        try {
+            if ($errTask.Wait([timespan]::FromSeconds($WaitSec)) -and $errTask.IsCompleted -and -not $errTask.IsFaulted -and -not $errTask.IsCanceled) {
+                [System.IO.File]::WriteAllText($ErrFile, ($errTask.Result -as [string]))
+            }
+        }
+        catch {}
+    }
+}
+
 function Start-CleanKdSession {
     # Round 26: start cdb.exe as a background process attached to
     # the guest's KD serial port (QEMU -serial tcp:127.0.0.1:$KdPort,
@@ -1765,6 +1941,17 @@ function Start-CleanKdSession {
     # only `r`/`du`/`?`/`.echo`, none of which needs PDBs, so a slow
     # symbol download cannot break the breakpoint -- it can only
     # delay the `g` that resumes the boot.
+    #
+    # Round 27: the argv comes from Get-CleanKdArgList (shared with
+    # the probe, so a variant that survives the probe is launched
+    # verbatim here); -DebuggerPath/-Variant select it (defaults
+    # keep the round 26 behaviour). stdout/stderr are redirected and
+    # drained asynchronously (the Invoke-CleanProcessToFile pattern):
+    # round 26 inherited the console and the failing cdb printed
+    # nothing anywhere, so the exit code was the only evidence. The
+    # drain tasks ride on the returned Process object (KdOutTask /
+    # KdErrTask) and are written to the console files by the caller
+    # (finally block) or here on immediate exit.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -1777,34 +1964,41 @@ function Start-CleanKdSession {
         [string] $KdLogPath,
 
         [Parameter(Mandatory = $true)]
-        [string] $InitScriptPath
+        [string] $InitScriptPath,
+
+        [string] $DebuggerPath,
+
+        [ValidateSet('baseline', 'baud', 'nosymbols', 'nologo', 'inline-c', 'noc')]
+        [string] $Variant = 'baseline',
+
+        [string] $ConsoleOutPath,
+
+        [string] $ConsoleErrPath,
+
+        [int] $StartupWaitSec = 5
     )
 
-    $cdbPath = Get-CleanCdbPath
-    if ($null -eq $cdbPath) {
+    $debugger = $DebuggerPath
+    if (-not $debugger) { $debugger = Get-CleanCdbPath }
+    if ($null -eq $debugger) {
         Write-Host 'live KD session skipped: cdb.exe not found (no Windows SDK Debuggers on this host); continuing without live KD'
         return $null
     }
-    $initLines = @(
-        'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"'
-        'g'
-    )
-    $initLines | Set-Content -LiteralPath $InitScriptPath -Encoding ASCII
-    $symPath = ('SRV*{0}\kd-symbols*https://msdl.microsoft.com/download/symbols' -f $WorkDir)
+    $version = Get-CleanDebuggerVersion -Path $debugger
+    $verText = if ($version) { $version } else { 'unknown' }
+    Write-Host ('live KD session: debugger {0} (version {1}), variant {2}' -f $debugger, $verText, $Variant)
+    if ($Variant -eq 'noc') {
+        Write-Host 'live KD session refused: the noc variant is probe-only (without -c nothing issues `g`, so the guest would halt at the initial breakpoint)'
+        return $null
+    }
+    Write-CleanKdInitScript -InitScriptPath $InitScriptPath
+    $argv = Get-CleanKdArgList -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $KdLogPath -InitScriptPath $InitScriptPath -Variant $Variant
+    Write-Host ('live KD session argv: {0} {1}' -f $debugger, ($argv -join ' '))
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $cdbPath
-    $psi.ArgumentList.Add('-k')
-    $psi.ArgumentList.Add(('com:ipport={0},port=127.0.0.1' -f $KdPort))
-    $psi.ArgumentList.Add('-y')
-    $psi.ArgumentList.Add($symPath)
-    $psi.ArgumentList.Add('-logo')
-    $psi.ArgumentList.Add($KdLogPath)
-    $psi.ArgumentList.Add('-c')
-    $psi.ArgumentList.Add(('$$><{0}' -f $InitScriptPath))
-    # No stdout/stderr redirect: cdb's transcript goes to the -logo
-    # file, and inheriting the step's console means the transcript is
-    # also visible in the step log; redirecting without a reader
-    # could deadlock on a full pipe buffer.
+    $psi.FileName = $debugger
+    foreach ($a in $argv) { $psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $proc = [System.Diagnostics.Process]::new()
@@ -1813,18 +2007,221 @@ function Start-CleanKdSession {
         $null = $proc.Start()
     }
     catch {
-        Write-Host "live KD session failed to start cdb.exe ($cdbPath): $($_.Exception.Message)"
+        Write-Host "live KD session failed to start $debugger ($($_.Exception.Message))"
         return $null
     }
-    # Give cdb a moment to connect or fail fast on bad arguments; a
-    # process that already exited here never attached to anything.
-    Start-Sleep -Seconds 5
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $proc | Add-Member -NotePropertyName 'KdOutTask' -NotePropertyValue $outTask -Force
+    $proc | Add-Member -NotePropertyName 'KdErrTask' -NotePropertyValue $errTask -Force
+    # Give the debugger a moment to connect or fail fast on bad
+    # arguments; a process that already exited here never attached
+    # to anything.
+    Start-Sleep -Seconds $StartupWaitSec
     if ($proc.HasExited) {
-        Write-Host ('live KD session: cdb.exe exited immediately (exit {0}); see {1} for the reason' -f $proc.ExitCode, $KdLogPath)
+        Save-CleanKdConsoleOutput -Process $proc -OutFile $ConsoleOutPath -ErrFile $ConsoleErrPath
+        $consoleHint = ''
+        if ($ConsoleOutPath -or $ConsoleErrPath) {
+            $consoleHint = ('; console output in {0} / {1}' -f $ConsoleOutPath, $ConsoleErrPath)
+        }
+        Write-Host ('live KD session: {0} exited immediately (exit {1}){2}' -f [System.IO.Path]::GetFileName($debugger), $proc.ExitCode, $consoleHint)
         return $null
     }
-    Write-Host ('live KD session started: cdb.exe (pid {0}) attached to 127.0.0.1:{1}, log {2}' -f $proc.Id, $KdPort, $KdLogPath)
+    Write-Host ('live KD session started: {0} (pid {1}) attached to 127.0.0.1:{2}, log {3}' -f [System.IO.Path]::GetFileName($debugger), $proc.Id, $KdPort, $KdLogPath)
     return $proc
+}
+
+function Invoke-CleanKdProbeAttempt {
+    # Round 27: one probe variant against the fake KD listener.
+    # Starts an async accept so the debugger's TCP connect succeeds,
+    # runs the debugger with the exact argv via
+    # Invoke-CleanProcessToFile (stdout/stderr to files, killed at
+    # the timeout), and reports whether it was still alive at the end
+    # of the observation window. A timeout means ALIVE (the process
+    # had to be killed); a return means it exited, with the exit code
+    # and the console files as evidence. Never throws for a debugger
+    # failure; only a broken listener setup throws.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $DebuggerPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]] $ArgumentList,
+
+        [Parameter(Mandatory = $true)]
+        [System.Net.Sockets.TcpListener] $Listener,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Label,
+
+        [int] $ObserveSeconds = 10
+    )
+    $outFile = Join-Path $WorkDir ('micpe-kd-probe-{0}.out' -f $Label)
+    $errFile = Join-Path $WorkDir ('micpe-kd-probe-{0}.err' -f $Label)
+    $acceptTask = $null
+    $accepted = $null
+    try { $acceptTask = $Listener.AcceptTcpClientAsync() } catch {}
+    $alive = $false
+    $exitCode = $null
+    $errorText = ''
+    try {
+        $run = Invoke-CleanProcessToFile -FilePath $DebuggerPath `
+            -ArgumentList $ArgumentList -OutFile $outFile -ErrFile $errFile `
+            -TimeoutSec $ObserveSeconds
+        $exitCode = $run.ExitCode
+    }
+    catch {
+        if ($_.Exception.Message -match 'timed out') { $alive = $true }
+        else { $errorText = $_.Exception.Message }
+    }
+    # Consume the accepted connection (if the debugger connected) so
+    # the next attempt starts clean; a still-pending accept is left
+    # alone (the listener stays up for the next variant; the probe's
+    # finally block observes every accept task when it stops).
+    if ($null -ne $acceptTask) {
+        try {
+            if ($acceptTask.Wait(500)) {
+                if (-not $acceptTask.IsFaulted -and -not $acceptTask.IsCanceled) {
+                    $accepted = $acceptTask.Result
+                }
+            }
+        }
+        catch {}
+    }
+    if ($null -ne $accepted) { try { $accepted.Close() } catch {} }
+    return [pscustomobject]@{
+        Label = $Label; Alive = $alive; ExitCode = $exitCode
+        OutFile = $outFile; ErrFile = $errFile; Error = $errorText
+        AcceptTask = $acceptTask
+    }
+}
+
+function Invoke-CleanKdProbe {
+    # Round 27: pre-flight probe (see round27-design.md). Runs the
+    # cdb variants against a fake TCP listener (a silent peer: the
+    # debugger must sit waiting for the target's initial breakpoint)
+    # and returns the first variant that stays alive, or a result
+    # with Variant $null when none does. Writes micpe-kd-probe.txt
+    # (per-variant outcomes) and micpe-kd-probe-<variant>.out/.err
+    # (each attempt's console). Returns $null when cdb is missing or
+    # the listener cannot start (probe inconclusive: the caller falls
+    # back to the round 26 behaviour). Never throws for a debugger
+    # failure; only a broken listener setup returns $null.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $KdLogPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $InitScriptPath,
+
+        [int] $ProbePort = 50099,
+
+        [int] $ObserveSeconds = 10,
+
+        [string] $CdbPath
+    )
+    $cdb = $CdbPath
+    if (-not $cdb) { $cdb = Get-CleanCdbPath }
+    if ($null -eq $cdb) {
+        Write-Host 'KD probe skipped: cdb.exe not found (no Windows SDK Debuggers on this host); continuing without live KD'
+        return $null
+    }
+    $version = Get-CleanDebuggerVersion -Path $cdb
+    $verText = if ($version) { $version } else { 'unknown' }
+    Write-Host ('KD probe: debugger {0} (version {1}), fake listener on 127.0.0.1:{2}' -f $cdb, $verText, $ProbePort)
+    Write-CleanKdInitScript -InitScriptPath $InitScriptPath
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $ProbePort)
+        $listener.Start()
+    }
+    catch {
+        Write-Host ('KD probe inconclusive: cannot listen on 127.0.0.1:{0} ({1})' -f $ProbePort, $_.Exception.Message)
+        return $null
+    }
+    $attempts = @()
+    $winner = $null
+    $winnerDebugger = $null
+    try {
+        $kdExe = Get-CleanKdPath -CdbPath $cdb
+        $variants = @(
+            @{ Label = 'baseline'; Debugger = $cdb; Variant = 'baseline' }
+            @{ Label = 'baud'; Debugger = $cdb; Variant = 'baud' }
+            @{ Label = 'kd'; Debugger = $kdExe; Variant = 'baseline' }
+            @{ Label = 'nosymbols'; Debugger = $cdb; Variant = 'nosymbols' }
+            @{ Label = 'nologo'; Debugger = $cdb; Variant = 'nologo' }
+            @{ Label = 'inline-c'; Debugger = $cdb; Variant = 'inline-c' }
+            @{ Label = 'noc'; Debugger = $cdb; Variant = 'noc' }
+        )
+        foreach ($v in $variants) {
+            if ($null -eq $v.Debugger) {
+                Write-Host ('KD probe: variant {0} skipped (debugger binary not found)' -f $v.Label)
+                continue
+            }
+            $probeLog = Join-Path $WorkDir ('micpe-kd-probe-{0}.log' -f $v.Label)
+            $argv = Get-CleanKdArgList -KdPort ([string]$ProbePort) -WorkDir $WorkDir -KdLogPath $probeLog -InitScriptPath $InitScriptPath -Variant $v.Variant
+            $attempt = Invoke-CleanKdProbeAttempt -DebuggerPath $v.Debugger -ArgumentList $argv -Listener $listener -WorkDir $WorkDir -Label $v.Label -ObserveSeconds $ObserveSeconds
+            $attempts += $attempt
+            if ($attempt.Alive) {
+                if ($v.Label -eq 'noc') {
+                    Write-Host 'KD probe: only the no--c variant stays alive -- the -c token is the trigger (probe-only, never used for the real session)'
+                }
+                else {
+                    $winner = $v.Label
+                    $winnerDebugger = $v.Debugger
+                    Write-Host ('KD probe: variant {0} stays alive ({1} s); using it for the real session' -f $v.Label, $ObserveSeconds)
+                }
+                break
+            }
+            $outTail = @()
+            $errTail = @()
+            if (Test-Path -LiteralPath $attempt.OutFile) { $outTail = @(Get-Content -LiteralPath $attempt.OutFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 5) }
+            if (Test-Path -LiteralPath $attempt.ErrFile) { $errTail = @(Get-Content -LiteralPath $attempt.ErrFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 5) }
+            $detail = ''
+            if ($attempt.Error) { $detail = ('launch error: {0}' -f $attempt.Error) }
+            elseif ($null -ne $attempt.ExitCode) { $detail = ('exit {0}' -f $attempt.ExitCode) }
+            $consoleBits = @()
+            if ($outTail.Count -gt 0) { $consoleBits += ('stdout: {0}' -f ($outTail -join ' | ')) }
+            if ($errTail.Count -gt 0) { $consoleBits += ('stderr: {0}' -f ($errTail -join ' | ')) }
+            if ($consoleBits.Count -eq 0) { $consoleBits += 'no console output at all' }
+            Write-Host ('KD probe: variant {0} failed ({1}); {2}' -f $v.Label, $detail, ($consoleBits -join '; '))
+        }
+    }
+    finally {
+        try { $listener.Stop() } catch {}
+        foreach ($a in $attempts) {
+            if ($null -ne $a.AcceptTask) {
+                try { $null = $a.AcceptTask.Wait(1000) } catch {}
+            }
+        }
+    }
+    $summaryPath = Join-Path $WorkDir 'micpe-kd-probe.txt'
+    $summary = [System.Collections.Generic.List[string]]::new()
+    $summary.Add('KD launch probe (round 27, fake TCP listener -- the debugger must sit waiting for the target initial breakpoint)')
+    $summary.Add(('debugger: {0} (version {1})' -f $cdb, $verText))
+    $summary.Add(('fake listener: 127.0.0.1:{0}; observation window: {1} s per variant' -f $ProbePort, $ObserveSeconds))
+    foreach ($a in $attempts) {
+        if ($a.Alive) { $summary.Add(('variant {0}: ALIVE at {1} s (still running when killed)' -f $a.Label, $ObserveSeconds)) }
+        elseif ($a.Error) { $summary.Add(('variant {0}: FAILED to launch ({1})' -f $a.Label, $a.Error)) }
+        else { $summary.Add(('variant {0}: EXITED fast (exit {1}); console: {2} / {3}' -f $a.Label, $a.ExitCode, $a.OutFile, $a.ErrFile)) }
+    }
+    if ($winner) { $summary.Add(('result: variant {0} ({1}) selected for the real session' -f $winner, $winnerDebugger)) }
+    elseif (@($attempts | Where-Object { $_.Alive }).Count -gt 0) { $summary.Add('result: only the no--c variant stays alive -- the -c token is the trigger; the real KD session is disabled this run') }
+    else { $summary.Add('result: no variant stays alive; the real KD session is disabled this run') }
+    $summary | Set-Content -LiteralPath $summaryPath -Encoding ASCII
+    Write-Host ('KD probe summary: {0}' -f $summaryPath)
+    return [pscustomobject]@{
+        Variant = $winner; DebuggerPath = $winnerDebugger
+        Attempts = $attempts; SummaryPath = $summaryPath
+    }
 }
 
 function ConvertFrom-CleanKdLog {
@@ -1988,7 +2385,17 @@ function Invoke-CleanCrashDumpCapture {
         # first, before the disk path: it is the most direct evidence
         # (the kernel's own bugcheck banner), and when it yields a
         # BugCheck the ELF scan is skipped like a good disk dump.
-        [string] $KdLogPath
+        [string] $KdLogPath,
+
+        # Round 27: the pre-flight probe summary (micpe-kd-probe.txt)
+        # and the real session's console files. They are the evidence
+        # when cdb died before the -logo file was opened (round 26:
+        # no log, no output, only the exit code).
+        [string] $KdProbePath,
+
+        [string] $KdConsoleOutPath,
+
+        [string] $KdConsoleErrPath
     )
 
     $reportPath = Join-Path $WorkDir 'micpe-bugcheck.txt'
@@ -2035,6 +2442,32 @@ function Invoke-CleanCrashDumpCapture {
         }
         else {
             $lines.Add(('live KD session: no log file at {0} (cdb never started, or -NoKdSession)' -f $KdLogPath))
+        }
+    }
+    # Round 27: the pre-flight probe summary and the real session's
+    # console files. These are the evidence when cdb died before the
+    # -logo file was opened (round 26: no log, no output, only the
+    # exit code). Appended only when the -logo parse yielded no
+    # parameters (a working session's banner already says it all).
+    if ($null -eq $result.BugCheck) {
+        if ($KdProbePath -and (Test-Path -LiteralPath $KdProbePath)) {
+            $probeContent = Get-Content -LiteralPath $KdProbePath -Raw -ErrorAction SilentlyContinue
+            if ($probeContent) {
+                $lines.Add('--- KD launch probe (round 27, fake TCP listener) ---')
+                foreach ($pl in ($probeContent -split "`r`n|`n")) {
+                    if ($pl.Trim() -ne '') { $lines.Add(('  {0}' -f $pl)) }
+                }
+            }
+        }
+        foreach ($consoleFile in @($KdConsoleOutPath, $KdConsoleErrPath)) {
+            if ($consoleFile -and (Test-Path -LiteralPath $consoleFile)) {
+                $consoleContent = Get-Content -LiteralPath $consoleFile -Raw -ErrorAction SilentlyContinue
+                $consoleTail = @(($consoleContent -split "`r`n|`n") | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 20)
+                if ($consoleTail.Count -gt 0) {
+                    $lines.Add(('KD console tail ({0}, last 20 non-empty lines; the full file is in the Release):' -f [System.IO.Path]::GetFileName($consoleFile)))
+                    foreach ($cl in $consoleTail) { $lines.Add(('  {0}' -f $cl)) }
+                }
+            }
         }
     }
     $vhdx = Join-Path $WorkDir 'micpe-dumpdisk-read.vhdx'
@@ -2100,7 +2533,7 @@ function Invoke-CleanCrashDumpCapture {
         if (-not (Test-Path -LiteralPath $dumpFile)) {
             $lines.Add('RESULT: NO DUMP FILE -- the blue screen did not write a dedicated dump file to the second disk.')
             $lines.Add('This is expected when the system booted cleanly (no bugcheck, nothing to write). It is a problem only when the screenshots show a blue screen; then the causes are: (1) the crash-dump stack was not initialised yet when the 0x5A fired at IopLoadDriver time; (2) the second disk was not C: in WinPE, so DedicatedDumpFile pointed at the wrong letter; (3) the disk was not enumerated in time. The disk was attached and readable, so the file really is absent.')
-            $lines.Add('Next step if the screenshots show a blue screen and this repeats: read micpe-kd.log (live KD session, round 26) -- if it has no parameters, the session itself failed and its log says why. Re-checking the drive letter with a WinPE command-line probe is the remaining fallback.')
+            $lines.Add('Next step if the screenshots show a blue screen and this repeats: read micpe-kd.log (live KD session) and micpe-kd-probe.txt (round 27 pre-flight probe) -- if the probe found no working argv, its console files say why cdb would not start. Re-checking the drive letter with a WinPE command-line probe is the remaining fallback.')
         }
         else {
             $size = (Get-Item -LiteralPath $dumpFile).Length
@@ -2210,6 +2643,13 @@ Copy-Item -LiteralPath $varsTemplate -Destination $varsPath -Force
 # log (micpe-kd.log) is the replacement, uploaded by the workflow.
 $kdLog = Join-Path $WorkDir 'micpe-kd.log'
 $kdInit = Join-Path $WorkDir 'kd-init.txt'
+# Round 27: the real session's stdout/stderr (drained by the finally
+# block) and the pre-flight probe summary. All three ride the
+# artifact + Release uploads with micpe-kd.log.
+$kdConsoleOut = Join-Path $WorkDir 'micpe-kd-console.out'
+$kdConsoleErr = Join-Path $WorkDir 'micpe-kd-console.err'
+$kdProbeSummary = Join-Path $WorkDir 'micpe-kd-probe.txt'
+$script:kdProbeResult = $null
 $qemuLog = Join-Path $WorkDir 'micpe-qemu.log'
 
 # Round 21: the crash-dump disk. Diagnostic only: a failure here must
@@ -2254,6 +2694,28 @@ if ($dumpDiskQcow2) {
     # (secondary master), so WinPE gives this fixed disk C:.
     $qemuArgs += @('-drive', "file=$dumpDiskQcow2,format=qcow2,if=ide,index=0")
 }
+
+# Round 27: pre-flight KD probe -- reproduce the round 26 cdb launch
+# against a fake TCP listener BEFORE QEMU starts, so a failing argv
+# is diagnosed without touching the guest. Runs only when the KD
+# session is enabled; never throws, never changes the verdict. The
+# result decides which argv (if any) the real session uses below.
+if (-not $NoKdSession) {
+    try {
+        $script:kdProbeResult = Invoke-CleanKdProbe -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit
+        if ($null -ne $script:kdProbeResult -and $null -ne $script:kdProbeResult.Variant) {
+            Write-Host ('KD probe: using variant {0} ({1}) for the real session' -f $script:kdProbeResult.Variant, $script:kdProbeResult.DebuggerPath)
+        }
+        elseif ($null -ne $script:kdProbeResult) {
+            Write-Host 'KD probe: no variant stays alive; the real KD session is disabled this run (see micpe-kd-probe.txt)'
+        }
+    }
+    catch {
+        Write-Host "!!! KD probe failed (diagnostic only, continuing with the round 26 baseline): $($_.Exception.Message)"
+        $script:kdProbeResult = $null
+    }
+}
+
 $argString = ($qemuArgs | ForEach-Object {
     if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ }
 }) -join ' '
@@ -2296,10 +2758,36 @@ try {
     # so the debugger must be attached from the start. Best-effort
     # only: a KD failure is logged, never throws, never changes the
     # run's verdict.
+    # Round 27: the argv comes from the pre-flight probe (a variant
+    # that survived it is launched verbatim); when the probe ran and
+    # every variant failed, the real session is not launched with a
+    # known-bad argv. When the probe was inconclusive (no cdb, or the
+    # fake listener could not start), fall back to the round 26
+    # baseline -- the new console redirect captures any failure.
     if (-not $NoKdSession) {
         try {
-            $script:kdProc = Start-CleanKdSession -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit
-            if ($null -eq $script:kdProc) { Write-Host '!!! live KD session not started; continuing without live KD (disk/ELF paths remain)' }
+            if ($null -ne $script:kdProbeResult -and $null -eq $script:kdProbeResult.Variant) {
+                Write-Host '!!! live KD session not started: the probe found no working argv (see micpe-kd-probe.txt); continuing without live KD (disk/ELF paths remain)'
+                $script:kdProc = $null
+            }
+            else {
+                $probeVariant = 'baseline'
+                $probeDebugger = $null
+                if ($null -ne $script:kdProbeResult) {
+                    $probeVariant = $script:kdProbeResult.Variant
+                    $probeDebugger = $script:kdProbeResult.DebuggerPath
+                }
+                # Round 27: confirm the QEMU serial listener is up
+                # before launching the debugger (round 26 never
+                # proved it was). A negative answer only warns: cdb
+                # retries the connect, and the console files will
+                # show what happens.
+                $kdPortListening = Test-CleanTcpPort -Port $KdPort -TimeoutSec 5
+                Write-Host ('KD TCP port 127.0.0.1:{0} listening: {1}' -f $KdPort, $kdPortListening)
+                if (-not $kdPortListening) { Write-Host '!!! KD TCP port is not listening yet; starting the debugger anyway (it retries the connect)' }
+                $script:kdProc = Start-CleanKdSession -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit -DebuggerPath $probeDebugger -Variant $probeVariant -ConsoleOutPath $kdConsoleOut -ConsoleErrPath $kdConsoleErr
+                if ($null -eq $script:kdProc) { Write-Host '!!! live KD session not started; continuing without live KD (disk/ELF paths remain)' }
+            }
         }
         catch {
             Write-Host "!!! live KD session failed to start (diagnostic only): $($_.Exception.Message)"
@@ -2437,6 +2925,13 @@ finally {
             try { $script:kdProc.Kill() } catch {}
         }
     }
+    # Round 27: drain the KD session's stdout/stderr into the console
+    # files now that cdb has exited (or been killed): the pipes are
+    # closed, so the drain tasks complete with the full transcript.
+    # Must run before Dispose().
+    if ($script:kdProc) {
+        Save-CleanKdConsoleOutput -Process $script:kdProc -OutFile $kdConsoleOut -ErrFile $kdConsoleErr
+    }
     if ($script:kdProc) { try { $script:kdProc.Dispose() } catch {} }
     # Round 21: crash-dump capture. Runs even when the screen gate threw
     # (a blue screen is exactly when the dump matters); never changes the
@@ -2446,11 +2941,15 @@ finally {
     # so the ELF-only case still gets parsed).
     # Round 26: also run it when a KD log exists -- the log is parsed
     # even when the disk and the ELF are both gone.
+    # Round 27: also run it when the probe summary exists -- the
+    # probe outcomes belong in the report even when the real session
+    # never started.
     if (($dumpDiskQcow2 -and (Test-Path -LiteralPath $dumpDiskQcow2)) -or
         ($script:guestMemoryElf -and (Test-Path -LiteralPath $script:guestMemoryElf)) -or
-        (Test-Path -LiteralPath $kdLog)) {
+        (Test-Path -LiteralPath $kdLog) -or
+        (Test-Path -LiteralPath $kdProbeSummary)) {
         try {
-            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog
+            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog -KdProbePath $kdProbeSummary -KdConsoleOutPath $kdConsoleOut -KdConsoleErrPath $kdConsoleErr
         }
         catch {
             Write-Host "!!! crash-dump capture failed (diagnostic only, run verdict unchanged): $($_.Exception.Message)"

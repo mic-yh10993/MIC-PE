@@ -456,6 +456,10 @@ jobs:
           path: |
             verify-clean-out/screenshots/*.ppm
             verify-clean-out/micpe-kd.log
+            verify-clean-out/micpe-kd-console.out
+            verify-clean-out/micpe-kd-console.err
+            verify-clean-out/micpe-kd-probe.txt
+            verify-clean-out/micpe-kd-probe-*
             verify-clean-out/micpe-qemu.log
             verify-clean-out/micpe-bugcheck.txt
             verify-clean-out/micpe-dumpdisk-read.vhdx
@@ -516,9 +520,15 @@ jobs:
             $pngDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out\screenshots-png'
             . ./src/ci/Export-CleanScreenshots.ps1
             $releaseExtras = @(Export-CleanScreenshots -ScreenshotDir $shotDir -OutputDir $pngDir)
-            foreach ($logName in 'micpe-kd.log', 'micpe-qemu.log', 'micpe-bugcheck.txt') {
+            foreach ($logName in 'micpe-kd.log', 'micpe-qemu.log', 'micpe-bugcheck.txt', 'micpe-kd-probe.txt', 'micpe-kd-console.out', 'micpe-kd-console.err') {
               $logPath = Join-Path $env:GITHUB_WORKSPACE "verify-clean-out\$logName"
               if (Test-Path -LiteralPath $logPath) { $releaseExtras += $logPath }
+            }
+            # Round 27: per-variant probe console files
+            # (micpe-kd-probe-<variant>.out/.err/.log).
+            $cleanOutDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out'
+            foreach ($probeFile in (Get-ChildItem -LiteralPath $cleanOutDir -Filter 'micpe-kd-probe-*' -File -ErrorAction SilentlyContinue)) {
+              $releaseExtras += $probeFile.FullName
             }
             # Round 22: the crash-dump disk itself, preserved by the
             # verify script so the dump survives the runner. GitHub
