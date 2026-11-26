@@ -2066,24 +2066,29 @@ rax=0000000000000000 rcx=000000000000005a
         }
         $kdLog = Join-Path $script:r26Work 'micpe-kd.log'
         $kdInit = Join-Path $script:r26Work 'kd-init.txt'
-        $proc = Start-CleanKdSession -KdPort '50001' -WorkDir $script:r26Work -KdLogPath $kdLog -InitScriptPath $kdInit
+        $proc = Start-CleanKdSession -KdPipeName 'micpe-kd' -WorkDir $script:r26Work -KdLogPath $kdLog -InitScriptPath $kdInit
         $proc | Should -BeNullOrEmpty
         # The init script is only written once cdb is found.
         (Test-Path -LiteralPath $kdInit) | Should -BeFalse
     }
 
-    It 'wires the serial port to the KD TCP server instead of a file' {
+    It 'wires the serial port to the KD named pipe instead of a file' {
+        # Round 31: the TCP chardev (round 26) is gone -- three
+        # rounds of kd.exe connecting and dropping immediately point
+        # at it. The serial port is now a named pipe; the monitor
+        # stays on TCP (a different -monitor line, untouched here).
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.Contains("'-serial', `"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
+        $verify.Contains("'-serial', `"pipe:\\.\pipe\`$KdPipeName`"") | Should -BeTrue
+        $verify.Contains("'-serial', `"tcp:") | Should -BeFalse
         $verify.Contains("'file:`$serialLog'") | Should -BeFalse
-        $verify | Should -Match "\[string\] \`$KdPort = '50001'"
+        $verify | Should -Match "\[string\] \`$KdPipeName = 'micpe-kd'"
         $verify | Should -Match '\[switch\] \$NoKdSession'
     }
 
     It 'starts the KD session after the monitor is up and kills it before the capture parses its log' {
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.IndexOf("'QEMU monitor is up; booting'") | Should -BeLessThan $verify.IndexOf('Start-CleanKdSession -KdPort')
-        $verify.IndexOf('Start-CleanKdSession -KdPort') | Should -BeLessThan $verify.IndexOf('Start-Sleep -Seconds $BootWaitSec')
+        $verify.IndexOf("'QEMU monitor is up; booting'") | Should -BeLessThan $verify.IndexOf('Start-CleanKdSession -KdPipeName')
+        $verify.IndexOf('Start-CleanKdSession -KdPipeName') | Should -BeLessThan $verify.IndexOf('Start-Sleep -Seconds $BootWaitSec')
         # The kill sits in the finally block, after QEMU exits and
         # before the capture call (so the -logo file is flushed when
         # it is parsed).
@@ -2175,11 +2180,11 @@ Describe 'Round 27 KD launch probe' {
         $script:r27KdInit = Join-Path $script:r27Work 'kd-init.txt'
     }
 
-    It 'builds the exact round 26 argv for the baseline variant' {
-        $argv = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'baseline'
+    It 'builds the exact argv for the baseline variant (round 31: named pipe connect string)' {
+        $argv = Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'baseline'
         $argv.Count | Should -Be 8
         $argv[0] | Should -Be '-k'
-        $argv[1] | Should -Be 'com:ipport=50001,port=127.0.0.1'
+        $argv[1] | Should -Be 'com:pipe,port=\\.\pipe\micpe-kd'
         $argv[2] | Should -Be '-y'
         $argv[3] | Should -Be ('SRV*{0}\kd-symbols*https://msdl.microsoft.com/download/symbols' -f $script:r27Work)
         $argv[4] | Should -Be '-logo'
@@ -2188,34 +2193,33 @@ Describe 'Round 27 KD launch probe' {
         $argv[7] | Should -Be ('$$><{0}' -f $script:r27KdInit)
     }
 
-    It 'adds baud=115200 only for the baud variant' {
-        $base = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'baseline'
-        $baud = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'baud'
-        $base[1] | Should -Be 'com:ipport=50001,port=127.0.0.1'
-        $baud[1] | Should -Be 'com:ipport=50001,port=127.0.0.1,baud=115200'
-        ($baud.Count - $base.Count) | Should -Be 0
+    It 'rejects baud as an argv variant (a baud rate is meaningless on a named pipe)' {
+        # Round 31: the baud variant died with the TCP chardev.
+        # The ValidateSet must refuse it, not silently build a
+        # connect string with a baud the pipe ignores.
+        { Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'baud' } | Should -Throw
     }
 
     It 'drops the symbol path for the nosymbols variant and the log for nologo' {
-        $nosym = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'nosymbols'
+        $nosym = Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'nosymbols'
         $nosym | Should -Not -Contain '-y'
         $nosym | Should -Contain '-c'
-        $nolog = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'nologo'
+        $nolog = Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'nologo'
         $nolog | Should -Not -Contain '-logo'
         $nolog | Should -Contain '-c'
     }
 
     It 'uses the inline breakpoint command (no script file) for inline-c and drops -c for noc' {
-        $inline = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'inline-c'
+        $inline = Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'inline-c'
         $inline | Should -Contain '-c'
         ($inline -join ' ') | Should -Match 'bu nt!KeBugCheckEx'
         ($inline -join ' ') | Should -Not -Match '\$\$>'
-        $noc = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'noc'
+        $noc = Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'noc'
         $noc | Should -Not -Contain '-c'
     }
 
     It 'rejects kd as an argv variant (kd is a binary choice, not an argv shape)' {
-        { Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'kd' } | Should -Throw
+        { Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'kd' } | Should -Throw
     }
 
     It 'writes the init script (breakpoint + go, with round 30 echo markers)' {
@@ -2245,32 +2249,24 @@ Describe 'Round 27 KD launch probe' {
         (Get-CleanDebuggerVersion -Path (Join-Path $script:r27Work 'no-such-debugger.exe')) | Should -BeNullOrEmpty
     }
 
-    It 'reports a listening TCP port as up' {
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-        try {
-            $listener.Start()
-            $port = ([string]$listener.LocalEndpoint.Port)
-            (Test-CleanTcpPort -Port $port -TimeoutSec 3) | Should -BeTrue
+    It 'reports an existing named pipe as present (Windows only: the pipe directory does not exist on Linux)' {
+        # Round 31: the pre-check enumerates \\.\pipe\ instead of
+        # connecting to a TCP port (a pipe accepts one client only,
+        # so a probe connect would steal the debugger's slot). The
+        # positive branch needs a real pipe server, which only
+        # exists on Windows; the negative branch runs everywhere.
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because 'the \\.\pipe\ directory does not exist on Linux; the positive branch runs on the CI Windows runner'
         }
-        finally { $listener.Stop() }
+        $pipe = [System.IO.Pipes.NamedPipeServerStream]::new('micpe-kd-probe-r27-present', [System.IO.Pipes.PipeDirection]::InOut, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        try {
+            (Test-CleanKdPipe -PipeName 'micpe-kd-probe-r27-present') | Should -BeTrue
+        }
+        finally { $pipe.Dispose() }
     }
 
-    It 'returns false when nothing listens (unless the sandbox fakes TCP connects)' {
-        # Probe first: this sandbox fakes .NET TcpClient.Connect as
-        # success even with no listener (round 23 lesson); if it lies
-        # here, the negative branch cannot be observed locally and
-        # the test skips instead of asserting on the lie.
-        $probeClient = [System.Net.Sockets.TcpClient]::new()
-        try {
-            $probeTask = $probeClient.ConnectAsync('127.0.0.1', 59998)
-            $probeDone = $probeTask.Wait(3000)
-            $lies = $probeDone -and -not $probeTask.IsFaulted -and -not $probeTask.IsCanceled -and $probeClient.Connected
-        }
-        finally { $probeClient.Dispose() }
-        if ($lies) {
-            Set-ItResult -Skipped -Because 'this sandbox fakes .NET TCP connects as success; the negative branch runs for real on the CI Windows runner'
-        }
-        (Test-CleanTcpPort -Port '59998' -TimeoutSec 3) | Should -BeFalse
+    It 'returns false for a named pipe that does not exist' {
+        (Test-CleanKdPipe -PipeName 'micpe-kd-definitely-not-there-xyz') | Should -BeFalse
     }
 
     It 'writes the drained console tasks to the console files' {
@@ -2297,31 +2293,23 @@ Describe 'Round 27 KD launch probe' {
     }
 
     It 'reports a probe attempt alive when the debugger is still running at the timeout (fake pwsh sleep)' {
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-        try {
-            $listener.Start()
-            $attempt = Invoke-CleanKdProbeAttempt -DebuggerPath $script:r27Pwsh `
-                -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 30') `
-                -Listener $listener -WorkDir $script:r27Work -Label 'alive' -ObserveSeconds 2
-            $attempt.Alive | Should -BeTrue
-            $attempt.ExitCode | Should -BeNullOrEmpty
-        }
-        finally { $listener.Stop() }
+        # Round 31: the attempt creates its own pipe server; no
+        # listener is passed in any more.
+        $attempt = Invoke-CleanKdProbeAttempt -DebuggerPath $script:r27Pwsh `
+            -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 30') `
+            -PipeName 'micpe-kd-probe-r27-alive' -WorkDir $script:r27Work -Label 'alive' -ObserveSeconds 2
+        $attempt.Alive | Should -BeTrue
+        $attempt.ExitCode | Should -BeNullOrEmpty
     }
 
     It 'reports a probe attempt dead with its exit code when the debugger exits fast (fake pwsh exit 57)' {
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-        try {
-            $listener.Start()
-            $attempt = Invoke-CleanKdProbeAttempt -DebuggerPath $script:r27Pwsh `
-                -ArgumentList @('-NoProfile', '-Command', 'exit 57') `
-                -Listener $listener -WorkDir $script:r27Work -Label 'dead' -ObserveSeconds 5
-            $attempt.Alive | Should -BeFalse
-            $attempt.ExitCode | Should -Be 57
-            (Test-Path -LiteralPath $attempt.OutFile) | Should -BeTrue
-            (Test-Path -LiteralPath $attempt.ErrFile) | Should -BeTrue
-        }
-        finally { $listener.Stop() }
+        $attempt = Invoke-CleanKdProbeAttempt -DebuggerPath $script:r27Pwsh `
+            -ArgumentList @('-NoProfile', '-Command', 'exit 57') `
+            -PipeName 'micpe-kd-probe-r27-dead' -WorkDir $script:r27Work -Label 'dead' -ObserveSeconds 5
+        $attempt.Alive | Should -BeFalse
+        $attempt.ExitCode | Should -Be 57
+        (Test-Path -LiteralPath $attempt.OutFile) | Should -BeTrue
+        (Test-Path -LiteralPath $attempt.ErrFile) | Should -BeTrue
     }
 
     It 'writes the console files when the debugger exits immediately (fake pwsh debugger)' {
@@ -2331,7 +2319,7 @@ Describe 'Round 27 KD launch probe' {
         # dependent -- at least one must be non-empty).
         $outFile = Join-Path $script:r27Work 'micpe-kd-console.out'
         $errFile = Join-Path $script:r27Work 'micpe-kd-console.err'
-        $proc = Start-CleanKdSession -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit `
+        $proc = Start-CleanKdSession -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit `
             -DebuggerPath $script:r27Pwsh -Variant 'baseline' -ConsoleOutPath $outFile -ConsoleErrPath $errFile -StartupWaitSec 3
         try {
             $proc | Should -BeNullOrEmpty
@@ -2346,19 +2334,20 @@ Describe 'Round 27 KD launch probe' {
     }
 
     It 'refuses the noc variant for the real session (probe-only)' {
-        $proc = Start-CleanKdSession -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit `
+        $proc = Start-CleanKdSession -KdPipeName 'micpe-kd' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit `
             -DebuggerPath $script:r27Pwsh -Variant 'noc' -StartupWaitSec 1
         $proc | Should -BeNullOrEmpty
     }
 
     It 'runs every variant and reports none alive when the debugger always exits (fake pwsh cdb)' {
         # pwsh as the "cdb": every KD argv dies on the unknown -k
-        # switch in ~0.3 s, so all six binary-present variants fail
+        # switch in ~0.3 s, so all five binary-present variants fail
         # fast (kd.exe is absent next to pwsh, so 'kd' is skipped).
+        # Round 31: the baud variant is gone with the TCP chardev.
         $result = Invoke-CleanKdProbe -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit `
-            -ProbePort 50199 -ObserveSeconds 2 -CdbPath $script:r27Pwsh
+            -ProbePipeName 'micpe-kd-probe-r27' -ObserveSeconds 2 -CdbPath $script:r27Pwsh
         $result.Variant | Should -BeNullOrEmpty
-        ($result.Attempts | ForEach-Object { $_.Label }) -join ',' | Should -Be 'baseline,baud,nosymbols,nologo,inline-c,noc'
+        ($result.Attempts | ForEach-Object { $_.Label }) -join ',' | Should -Be 'baseline,nosymbols,nologo,inline-c,noc'
         foreach ($a in $result.Attempts) { $a.Alive | Should -BeFalse }
         (Test-Path -LiteralPath $result.SummaryPath) | Should -BeTrue
         $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
@@ -2372,14 +2361,14 @@ Describe 'Round 27 KD launch probe' {
     It 'returns null from the probe when cdb is missing' {
         # No -CdbPath and no real cdb on this Linux host: the probe
         # is inconclusive, not a failure.
-        $result = Invoke-CleanKdProbe -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -ProbePort 50198 -ObserveSeconds 1
+        $result = Invoke-CleanKdProbe -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -ProbePipeName 'micpe-kd-probe-r27b' -ObserveSeconds 1
         $result | Should -BeNullOrEmpty
     }
 
     It 'runs the probe before QEMU starts and uses the winning variant for the real session' {
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
         $verify.IndexOf('Invoke-CleanKdProbe -WorkDir') | Should -BeLessThan $verify.IndexOf('starting QEMU:')
-        $verify.IndexOf('Test-CleanTcpPort -Port $KdPort') | Should -BeLessThan $verify.IndexOf('Start-CleanKdSession -KdPort')
+        $verify.IndexOf('Test-CleanKdPipe -PipeName $KdPipeName') | Should -BeLessThan $verify.IndexOf('Start-CleanKdSession -KdPipeName')
         $verify.Contains('-Variant $probeVariant') | Should -BeTrue
         $verify.Contains('-DebuggerPath $probeDebugger') | Should -BeTrue
         $verify.Contains('Save-CleanKdConsoleOutput -Process $script:kdProc -OutFile $kdConsoleOut -ErrFile $kdConsoleErr') | Should -BeTrue
@@ -2397,7 +2386,7 @@ Describe 'Round 27 KD launch probe' {
 
     It 'writes the probe summary and console tails into micpe-bugcheck.txt when the KD log is missing' {
         $probe = Join-Path $script:r27Work 'micpe-kd-probe.txt'
-        Set-Content -LiteralPath $probe -Value @('KD launch probe (round 27, fake TCP listener)', 'variant baseline: EXITED fast (exit -2147024809)') -Encoding ASCII
+        Set-Content -LiteralPath $probe -Value @('KD launch probe (round 27, fake pipe server)', 'variant baseline: EXITED fast (exit -2147024809)') -Encoding ASCII
         $cout = Join-Path $script:r27Work 'micpe-kd-console.out'
         Set-Content -LiteralPath $cout -Value @('Microsoft (R) Windows Debugger Version 10.0.26100.1 AMD64', 'Waiting to reconnect...') -Encoding utf8
         $cerr = Join-Path $script:r27Work 'micpe-kd-console.err'
@@ -2407,7 +2396,7 @@ Describe 'Round 27 KD launch probe' {
             -KdLogPath $missingLog -KdProbePath $probe -KdConsoleOutPath $cout -KdConsoleErrPath $cerr
         $result.BugCheck | Should -BeNullOrEmpty
         $report = Get-Content -LiteralPath (Join-Path $script:r27Work 'micpe-bugcheck.txt') -Raw
-        $report | Should -Match 'KD launch probe \(round 27, fake TCP listener\)'
+        $report | Should -Match 'KD launch probe \(round 27, fake pipe server\)'
         $report | Should -Match 'variant baseline: EXITED fast \(exit -2147024809\)'
         $report | Should -Match 'KD console tail \(micpe-kd-console\.out'
         $report | Should -Match 'Waiting to reconnect'
@@ -2456,7 +2445,7 @@ Describe 'Round 28 KD probe winner wiring' {
         Set-Content -LiteralPath $fakeKd -Value @('#!/usr/bin/env python3', 'import time', 'time.sleep(30)') -Encoding ascii
         chmod +x $fakeKd
         $result = Invoke-CleanKdProbe -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit `
-            -ProbePort 50197 -ObserveSeconds 2 -CdbPath $fakeCdb
+            -ProbePipeName 'micpe-kd-probe-r28' -ObserveSeconds 2 -CdbPath $fakeCdb
         $result.Label | Should -Be 'kd'
         $result.Variant | Should -Be 'baseline'
         $result.DebuggerPath | Should -Be $fakeKd
@@ -2465,7 +2454,7 @@ Describe 'Round 28 KD probe winner wiring' {
         # The returned Variant must be accepted downstream: this is
         # the exact value Start-CleanKdSession hands to
         # Get-CleanKdArgList, so it must not throw here.
-        { Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit -Variant $result.Variant } | Should -Not -Throw
+        { Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit -Variant $result.Variant } | Should -Not -Throw
     }
 
     It 'rejects the kd label as a session variant (the probe translates it first)' {
@@ -2473,7 +2462,7 @@ Describe 'Round 28 KD probe winner wiring' {
         # (binary choice), not an argv shape. If the probe ever
         # handed 'kd' to the session again, this must fail loudly
         # instead of dying silently in CI.
-        { Start-CleanKdSession -KdPort '50001' -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit `
+        { Start-CleanKdSession -KdPipeName 'micpe-kd' -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit `
             -DebuggerPath $script:r28Pwsh -Variant 'kd' -StartupWaitSec 1 } | Should -Throw
     }
 
@@ -2885,5 +2874,115 @@ The transport connection between host kernel debugger and target Windows seems l
     It 'uploads the pre-stage summary with the clean verify artifacts' {
         $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
         $buildYml | Should -Match 'verify-clean-out/micpe-symbol-prestage\.txt'
+    }
+}
+
+Describe 'Round 31 KD named-pipe transport' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27-30 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r31Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r31-$(Get-Random)"
+        $script:r31Share = Join-Path $script:r31Dir 'share'
+        New-Item -ItemType Directory -Path $script:r31Share -Force | Out-Null
+        $script:r31Iso = Join-Path $script:r31Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r31Iso -Force | Out-Null
+        $script:r31Work = Join-Path $script:r31Dir 'work'
+        New-Item -ItemType Directory -Path $script:r31Work -Force | Out-Null
+        $script:r31Code = Join-Path $script:r31Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r31Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r31Iso -OvmfPath $script:r31Code -WorkDir $script:r31Work
+        $script:r31Pwsh = (Get-Process -Id $PID).Path
+        $script:r31KdLog = Join-Path $script:r31Work 'micpe-kd.log'
+        $script:r31KdInit = Join-Path $script:r31Work 'kd-init.txt'
+    }
+
+    It 'builds a named-pipe connect string for the baseline variant' {
+        $argv = Get-CleanKdArgList -KdPipeName 'micpe-kd' -WorkDir $script:r31Work -KdLogPath $script:r31KdLog -InitScriptPath $script:r31KdInit -Variant 'baseline'
+        $argv[1] | Should -Be 'com:pipe,port=\\.\pipe\micpe-kd'
+        ($argv -join ' ') | Should -Not -Match 'ipport|127\.0\.0\.1|baud'
+    }
+
+    It 'rejects baud as a session variant too' {
+        { Start-CleanKdSession -KdPipeName 'micpe-kd' -WorkDir $script:r31Work -KdLogPath $script:r31KdLog -InitScriptPath $script:r31KdInit -DebuggerPath $script:r31Pwsh -Variant 'baud' -StartupWaitSec 1 } | Should -Throw
+    }
+
+    It 'wires the QEMU serial port to the named pipe, not TCP, while the monitor stays on TCP' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains("'-serial', `"pipe:\\.\pipe\`$KdPipeName`"") | Should -BeTrue
+        $verify.Contains("'-serial', `"tcp:") | Should -BeFalse
+        $verify.Contains("'-monitor', `"tcp:127.0.0.1:`$MonitorPort,server,nowait`"") | Should -BeTrue
+    }
+
+    It 'names the fake pipe server in the probe summary (fake pwsh cdb)' {
+        # pwsh as the "cdb": every variant dies on the unknown -k
+        # switch, so the probe reports none alive -- but the summary
+        # must say the peer was a pipe, not a TCP listener.
+        $result = Invoke-CleanKdProbe -WorkDir $script:r31Work -KdLogPath $script:r31KdLog -InitScriptPath $script:r31KdInit `
+            -ProbePipeName 'micpe-kd-probe-r31' -ObserveSeconds 2 -CdbPath $script:r31Pwsh
+        $result.Variant | Should -BeNullOrEmpty
+        $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
+        $summary.Contains('KD launch probe (round 27, fake pipe server') | Should -BeTrue
+        $summary.Contains('fake pipe server: \\.\pipe\micpe-kd-probe-r31') | Should -BeTrue
+        $summary.Contains('fake TCP listener') | Should -BeFalse
+    }
+
+    It 'records symchk diagnostics in the summary when symchk exits 0 without planting a PDB' {
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'the fake wimlib/symchk are Python scripts with shebangs; they only execute directly on Linux'
+        }
+        $fakeWim = Join-Path $script:r31Work 'fake-boot.wim'
+        New-Item -ItemType File -Path $fakeWim -Force | Out-Null
+        $bin = Join-Path $script:r31Work 'fake-bin'
+        New-Item -ItemType Directory -Path $bin -Force | Out-Null
+        # Fake wimlib-imagex: drops a dummy ntoskrnl.exe (13 bytes)
+        # in the dest dir.
+        $fakeWimlib = Join-Path $bin 'wimlib-imagex'
+        Set-Content -LiteralPath $fakeWimlib -Value @(
+            '#!/usr/bin/env python3'
+            'import sys, os'
+            'dest = [a for a in sys.argv if a.startswith("--dest-dir=")][0][len("--dest-dir="):]'
+            'os.makedirs(dest, exist_ok=True)'
+            'open(os.path.join(dest, "ntoskrnl.exe"), "wb").write(b"FAKE-NTOSKRNL")'
+        ) -Encoding ascii
+        chmod +x $fakeWimlib
+        # Fake symchk: prints known lines to both streams, exits 0,
+        # plants NO pdb -- the round 30 failure shape. Round 30
+        # reported only 'exited 0 but no PDB'; the summary must now
+        # carry the command line, exit code, input size and both
+        # output tails so the next check round can tell a wrong path
+        # from a wrong cache directory from a silent no-op.
+        $fakeSymchk = Join-Path $bin 'symchk'
+        Set-Content -LiteralPath $fakeSymchk -Value @(
+            '#!/usr/bin/env python3'
+            'import sys'
+            'print("SYMCHK-FAKE-OUT")'
+            'print("SYMCHK-FAKE-ERR", file=sys.stderr)'
+        ) -Encoding ascii
+        chmod +x $fakeSymchk
+        $work = Join-Path $script:r31Work 'prestage-work-diag'
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $result = Invoke-CleanSymbolPrestage -BootWimPath $fakeWim -WorkDir $work -SymchkPath $fakeSymchk -WimlibPath $fakeWimlib -TimeoutSec 30
+        $result.Success | Should -BeFalse
+        $result.Reason | Should -Match 'symchk exited 0 but no ntoskrnl.pdb'
+        $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
+        $summary | Should -Match 'outcome: not cached'
+        $summary | Should -Match '--- symchk diagnostics \(round 31\) ---'
+        $summary | Should -Match 'symchk command:'
+        $summary | Should -Match 'symchk exit code: 0'
+        $summary | Should -Match 'ntoskrnl.exe bytes: 13'
+        $summary | Should -Match 'SYMCHK-FAKE-OUT'
+        $summary | Should -Match 'SYMCHK-FAKE-ERR'
+    }
+
+    It 'uploads the pre-stage summary with the Release extras, not only the artifacts' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        # Scope to the Release extras foreach: the artifact list
+        # already has the file (round 30), but the Release list did
+        # not, so it never reached the Release. The bare quoted
+        # name appears only in that foreach.
+        $extrasLine = @($buildYml -split "`r`n|`n" | Where-Object { $_ -match 'foreach \(\$logName in' })[0]
+        $extrasLine | Should -Not -BeNullOrEmpty
+        $extrasLine.Contains('micpe-symbol-prestage.txt') | Should -BeTrue
     }
 }

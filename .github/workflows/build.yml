@@ -569,7 +569,7 @@ jobs:
             $pngDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out\screenshots-png'
             . ./src/ci/Export-CleanScreenshots.ps1
             $releaseExtras = @(Export-CleanScreenshots -ScreenshotDir $shotDir -OutputDir $pngDir)
-            foreach ($logName in 'micpe-kd.log', 'micpe-qemu.log', 'micpe-bugcheck.txt', 'micpe-kd-probe.txt', 'micpe-kd-console.out', 'micpe-kd-console.err') {
+            foreach ($logName in 'micpe-kd.log', 'micpe-qemu.log', 'micpe-bugcheck.txt', 'micpe-kd-probe.txt', 'micpe-kd-console.out', 'micpe-kd-console.err', 'micpe-symbol-prestage.txt') {
               $logPath = Join-Path $env:GITHUB_WORKSPACE "verify-clean-out\$logName"
               if (Test-Path -LiteralPath $logPath) { $releaseExtras += $logPath }
             }
