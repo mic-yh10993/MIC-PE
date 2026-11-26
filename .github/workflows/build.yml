@@ -505,11 +505,15 @@ jobs:
             verify-clean-out/micpe-kd-probe-*
             verify-clean-out/micpe-symbol-prestage.txt
             verify-clean-out/micpe-qemu.log
+            verify-clean-out/micpe-qemu-stdout.log
+            verify-clean-out/micpe-qemu-stderr.log
             verify-clean-out/micpe-bugcheck.txt
             verify-clean-out/micpe-dumpdisk-read.vhdx
             verify-clean-out/micpe-dumpdisk-read.vhd
             verify-clean-out-control/screenshots/*.ppm
             verify-clean-out-control/micpe-qemu.log
+            verify-clean-out-control/micpe-qemu-stdout.log
+            verify-clean-out-control/micpe-qemu-stderr.log
             verify-clean-out-control/micpe-bugcheck.txt
             verify-clean-out-control/micpe-dumpdisk-read.vhdx
             verify-clean-out-control/micpe-dumpdisk-read.vhd
@@ -569,7 +573,7 @@ jobs:
             $pngDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out\screenshots-png'
             . ./src/ci/Export-CleanScreenshots.ps1
             $releaseExtras = @(Export-CleanScreenshots -ScreenshotDir $shotDir -OutputDir $pngDir)
-            foreach ($logName in 'micpe-kd.log', 'micpe-qemu.log', 'micpe-bugcheck.txt', 'micpe-kd-probe.txt', 'micpe-kd-console.out', 'micpe-kd-console.err', 'micpe-symbol-prestage.txt') {
+            foreach ($logName in 'micpe-kd.log', 'micpe-qemu.log', 'micpe-qemu-stdout.log', 'micpe-qemu-stderr.log', 'micpe-bugcheck.txt', 'micpe-kd-probe.txt', 'micpe-kd-console.out', 'micpe-kd-console.err', 'micpe-symbol-prestage.txt') {
               $logPath = Join-Path $env:GITHUB_WORKSPACE "verify-clean-out\$logName"
               if (Test-Path -LiteralPath $logPath) { $releaseExtras += $logPath }
             }
@@ -629,6 +633,16 @@ jobs:
             if (Test-Path -LiteralPath $controlQemuLog) {
               $releaseExtras += $controlQemuLog
               $controlExtrasAdded = $true
+            }
+            # Round 32: the control pass's QEMU stdout/stderr (same
+            # redirect as the KD pass) -- round 31's control QEMU also
+            # died ~100 s in with no reason recorded.
+            foreach ($controlStream in 'micpe-qemu-stdout.log', 'micpe-qemu-stderr.log') {
+              $controlStreamPath = Join-Path $env:GITHUB_WORKSPACE "verify-clean-out-control\$controlStream"
+              if (Test-Path -LiteralPath $controlStreamPath) {
+                $releaseExtras += $controlStreamPath
+                $controlExtrasAdded = $true
+              }
             }
           }
           $notes = @"

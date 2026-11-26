@@ -2077,8 +2077,10 @@ rax=0000000000000000 rcx=000000000000005a
         # rounds of kd.exe connecting and dropping immediately point
         # at it. The serial port is now a named pipe; the monitor
         # stays on TCP (a different -monitor line, untouched here).
+        # Round 32: the -serial argument is the BARE pipe name
+        # (QEMU creates \\.\pipe\<name> itself).
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.Contains("'-serial', `"pipe:\\.\pipe\`$KdPipeName`"") | Should -BeTrue
+        $verify.Contains("'-serial', `"pipe:`$KdPipeName`"") | Should -BeTrue
         $verify.Contains("'-serial', `"tcp:") | Should -BeFalse
         $verify.Contains("'file:`$serialLog'") | Should -BeFalse
         $verify | Should -Match "\[string\] \`$KdPipeName = 'micpe-kd'"
@@ -2700,15 +2702,26 @@ DBGHELP: Timeout to store: d:\a\mic-pe\mic-pe\verify-clean-out\kd-symbols*https:
         Get-CleanSymchkPath -CdbPath '' | Should -BeNullOrEmpty
     }
 
-    It 'detects a cached ntoskrnl.pdb in a GUID subfolder and reports an empty cache as cold' {
+    It 'detects a cached kernel PDB in a GUID subfolder and reports an empty cache as cold' {
+        # Round 32: the cached file is ntkrnlmp.pdb, not ntoskrnl.pdb
+        # (round 31: symchk exit 0, PDB Matched TRUE, PdbFilename
+        # ...\ntkrnlmp.pdb -- the round 30 check looked for
+        # ntoskrnl.pdb and reported a false 'not cached').
         $cache = Join-Path $script:r30Work 'kd-symbols-test'
         Test-CleanSymbolCache -CacheDir $cache | Should -BeFalse
         New-Item -ItemType Directory -Path $cache -Force | Out-Null
         Test-CleanSymbolCache -CacheDir $cache | Should -BeFalse
-        $guidDir = Join-Path $cache 'ntoskrnl.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1'
+        $guidDir = Join-Path $cache 'ntkrnlmp.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1'
         New-Item -ItemType Directory -Path $guidDir -Force | Out-Null
-        New-Item -ItemType File -Path (Join-Path $guidDir 'ntoskrnl.pdb') -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $guidDir 'ntkrnlmp.pdb') -Force | Out-Null
         Test-CleanSymbolCache -CacheDir $cache | Should -BeTrue
+        # A uniprocessor kernel still records ntoskrnl.pdb; the
+        # fallback must keep working.
+        $cache2 = Join-Path $script:r30Work 'kd-symbols-test-nt'
+        $guidDir2 = Join-Path $cache2 'ntoskrnl.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1'
+        New-Item -ItemType Directory -Path $guidDir2 -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $guidDir2 'ntoskrnl.pdb') -Force | Out-Null
+        Test-CleanSymbolCache -CacheDir $cache2 | Should -BeTrue
     }
 
     It 'reads the init echo markers from a connected-but-dropped KD log' {
@@ -2738,7 +2751,7 @@ The transport connection between host kernel debugger and target Windows seems l
         $parsed.Reason | Should -Match 'breakpoint never fired'
     }
 
-    It 'pre-stages ntoskrnl.pdb with fake wimlib and symchk and writes the summary' {
+    It 'pre-stages ntkrnlmp.pdb with fake wimlib and symchk and writes the summary' {
         if ($IsWindows) {
             Set-ItResult -Skipped -Because 'the fake wimlib/symchk are Python scripts with shebangs; they only execute directly on Linux'
         }
@@ -2758,28 +2771,29 @@ The transport connection between host kernel debugger and target Windows seems l
         ) -Encoding ascii
         chmod +x $fakeWimlib
         # Fake symchk: `/v <ntoskrnl.exe> /s SRV*<cache>*https://msdl...`
-        # plants ntoskrnl.pdb in the cache the way the real symchk does
-        # (a GUID-named subfolder under ntoskrnl.pdb).
+        # plants ntkrnlmp.pdb in the cache the way the real symchk does
+        # (a GUID-named subfolder under ntkrnlmp.pdb -- round 32: the
+        # multiprocessor kernel records ntkrnlmp.pdb, not ntoskrnl.pdb).
         $fakeSymchk = Join-Path $bin 'symchk'
         Set-Content -LiteralPath $fakeSymchk -Value @(
             '#!/usr/bin/env python3'
             'import sys, os'
             'sym = sys.argv[sys.argv.index("/s") + 1]'
             'cache = sym.split("*")[1]'
-            'd = os.path.join(cache, "ntoskrnl.pdb", "A1B2C3D4E5F60718293A4B5C6D7E8F90A1")'
+            'd = os.path.join(cache, "ntkrnlmp.pdb", "A1B2C3D4E5F60718293A4B5C6D7E8F90A1")'
             'os.makedirs(d, exist_ok=True)'
-            'open(os.path.join(d, "ntoskrnl.pdb"), "wb").write(b"FAKE-PDB")'
+            'open(os.path.join(d, "ntkrnlmp.pdb"), "wb").write(b"FAKE-PDB")'
         ) -Encoding ascii
         chmod +x $fakeSymchk
         $work = Join-Path $script:r30Work 'prestage-work'
         New-Item -ItemType Directory -Path $work -Force | Out-Null
         $result = Invoke-CleanSymbolPrestage -BootWimPath $fakeWim -WorkDir $work -SymchkPath $fakeSymchk -WimlibPath $fakeWimlib -TimeoutSec 30
         $result.Success | Should -BeTrue
-        $result.PdbPath | Should -Match 'ntoskrnl\.pdb'
+        $result.PdbPath | Should -Match 'ntkrnlmp\.pdb'
         Test-Path -LiteralPath $result.SummaryPath | Should -BeTrue
         $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
         $summary | Should -Match 'outcome: cached'
-        $summary | Should -Match 'ntoskrnl\.pdb: .*ntoskrnl\.pdb'
+        $summary | Should -Match 'kernel pdb: .*ntkrnlmp\.pdb'
         # Second call: already cached, no download needed.
         $again = Invoke-CleanSymbolPrestage -BootWimPath $fakeWim -WorkDir $work -SymchkPath $fakeSymchk -WimlibPath $fakeWimlib -TimeoutSec 30
         $again.Success | Should -BeTrue
@@ -2839,11 +2853,11 @@ The transport connection between host kernel debugger and target Windows seems l
         $kdLog = Join-Path $script:r30Work 'micpe-kd-drop.log'
         Set-Content -LiteralPath $kdLog -Value $script:r30KdLogDrop -Encoding utf8
         $summary = Join-Path $script:r30Work 'micpe-symbol-prestage.txt'
-        Set-Content -LiteralPath $summary -Value @('symbol pre-stage (round 30: ntoskrnl.pdb into the local KD symbol cache)', 'outcome: cached', 'reason: symchk fetched ntoskrnl.pdb into the local cache (the KD session will not download it live)', 'cache: C:\fake\kd-symbols', 'ntoskrnl.pdb: C:\fake\kd-symbols\ntoskrnl.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1\ntoskrnl.pdb') -Encoding utf8
+        Set-Content -LiteralPath $summary -Value @('symbol pre-stage (round 32: ntkrnlmp.pdb into the local KD symbol cache)', 'outcome: cached', 'reason: symchk fetched the kernel PDB (ntkrnlmp.pdb) into the local cache (the KD session will not download it live)', 'cache: C:\fake\kd-symbols', 'kernel pdb: C:\fake\kd-symbols\ntkrnlmp.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1\ntkrnlmp.pdb') -Encoding utf8
         $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r30Work -KdLogPath $kdLog -KdDebuggerName 'kd.exe' -SymbolPrestagePath $summary
         $result.BugCheck | Should -BeNullOrEmpty
         $report = Get-Content -LiteralPath (Join-Path $script:r30Work 'micpe-bugcheck.txt') -Raw
-        $report | Should -Match '--- symbol pre-stage \(round 30, ntoskrnl\.pdb\) ---'
+        $report | Should -Match '--- symbol pre-stage \(round 32, ntkrnlmp\.pdb\) ---'
         $report | Should -Match 'outcome: cached'
         $report | Should -Match 'live KD init script: started=True, bu-issued=True, g-issued=False'
         $report | Should -Match 'init script started, but g was never issued'
@@ -2908,8 +2922,13 @@ Describe 'Round 31 KD named-pipe transport' {
     }
 
     It 'wires the QEMU serial port to the named pipe, not TCP, while the monitor stays on TCP' {
+        # Round 32: the -serial argument is the BARE pipe name --
+        # QEMU creates \\.\pipe\<name> itself (qemu-options.hx,
+        # -chardev pipe). Round 31 passed the full \\.\pipe\micpe-kd
+        # and the pipe never appeared under the checked name.
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.Contains("'-serial', `"pipe:\\.\pipe\`$KdPipeName`"") | Should -BeTrue
+        $verify.Contains("'-serial', `"pipe:`$KdPipeName`"") | Should -BeTrue
+        $verify.Contains("'-serial', `"pipe:\\.\pipe\`$KdPipeName`"") | Should -BeFalse
         $verify.Contains("'-serial', `"tcp:") | Should -BeFalse
         $verify.Contains("'-monitor', `"tcp:127.0.0.1:`$MonitorPort,server,nowait`"") | Should -BeTrue
     }
@@ -2964,7 +2983,7 @@ Describe 'Round 31 KD named-pipe transport' {
         New-Item -ItemType Directory -Path $work -Force | Out-Null
         $result = Invoke-CleanSymbolPrestage -BootWimPath $fakeWim -WorkDir $work -SymchkPath $fakeSymchk -WimlibPath $fakeWimlib -TimeoutSec 30
         $result.Success | Should -BeFalse
-        $result.Reason | Should -Match 'symchk exited 0 but no ntoskrnl.pdb'
+        $result.Reason | Should -Match 'symchk exited 0 but no ntkrnlmp\.pdb'
         $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
         $summary | Should -Match 'outcome: not cached'
         $summary | Should -Match '--- symchk diagnostics \(round 31\) ---'
@@ -2984,5 +3003,78 @@ Describe 'Round 31 KD named-pipe transport' {
         $extrasLine = @($buildYml -split "`r`n|`n" | Where-Object { $_ -match 'foreach \(\$logName in' })[0]
         $extrasLine | Should -Not -BeNullOrEmpty
         $extrasLine.Contains('micpe-symbol-prestage.txt') | Should -BeTrue
+    }
+}
+
+Describe 'Round 32 bare-name pipe, QEMU stderr capture, KD pipe wait' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27-31 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r32Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r32-$(Get-Random)"
+        $script:r32Share = Join-Path $script:r32Dir 'share'
+        New-Item -ItemType Directory -Path $script:r32Share -Force | Out-Null
+        $script:r32Iso = Join-Path $script:r32Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r32Iso -Force | Out-Null
+        $script:r32Work = Join-Path $script:r32Dir 'work'
+        New-Item -ItemType Directory -Path $script:r32Work -Force | Out-Null
+        $script:r32Code = Join-Path $script:r32Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r32Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r32Iso -OvmfPath $script:r32Code -WorkDir $script:r32Work
+    }
+
+    It 'prefers ntkrnlmp.pdb over ntoskrnl.pdb when both are cached' {
+        $cache = Join-Path $script:r32Work 'kd-symbols-both'
+        foreach ($name in @('ntkrnlmp.pdb', 'ntoskrnl.pdb')) {
+            $guidDir = Join-Path $cache "$name\A1B2C3D4E5F60718293A4B5C6D7E8F90A1"
+            New-Item -ItemType Directory -Path $guidDir -Force | Out-Null
+            New-Item -ItemType File -Path (Join-Path $guidDir $name) -Force | Out-Null
+        }
+        $found = Get-CleanCachedKernelPdb -CacheDir $cache
+        $found.Name | Should -Be 'ntkrnlmp.pdb'
+        Test-CleanSymbolCache -CacheDir $cache | Should -BeTrue
+        Get-CleanCachedKernelPdb -CacheDir (Join-Path $script:r32Work 'no-such-cache') | Should -BeNullOrEmpty
+    }
+
+    It 'redirects QEMU stdout/stderr to files and records its exit code' {
+        # Round 31: QEMU died ~100 s in and nothing recorded why --
+        # the -D micpe-qemu.log only holds -d debug logging (empty
+        # without -d flags) and Start-Process never redirected the
+        # process streams.
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains('-RedirectStandardOutput $qemuStdoutLog') | Should -BeTrue
+        $verify.Contains('-RedirectStandardError $qemuStderrLog') | Should -BeTrue
+        $verify.Contains("Join-Path `$WorkDir 'micpe-qemu-stderr.log'") | Should -BeTrue
+        # The boot-wait check throws loud with the exit code and the
+        # stderr path instead of hammering a dead monitor.
+        $verify | Should -Match 'QEMU exited during boot \(exit \{0\}\); see \{1\}'
+        # The finally block logs the exit code whenever QEMU died.
+        $verify | Should -Match 'QEMU exit code: \{0\} \(stderr: \{1\}\)'
+    }
+
+    It 'waits for the KD pipe and skips the session when it never appears' {
+        # Round 31 proved kd.exe does NOT retry the connect (exit
+        # -2147024894 the moment the pipe was absent); the old
+        # "start it anyway" line is gone (the new comment quotes the
+        # phrase only to record that it was wrong).
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains('never appeared; skipping the live KD session') | Should -BeTrue
+        $verify.Contains('starting the debugger anyway (it retries the connect)') | Should -BeFalse
+        $verify | Should -Match 'for \(\$waitSec = 0; \$waitSec -le 30'
+        $verify | Should -Match 'Test-CleanKdPipe -PipeName \$KdPipeName'
+    }
+
+    It 'uploads the QEMU stderr log with the artifacts and the Release extras (both passes)' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $buildYml | Should -Match 'verify-clean-out/micpe-qemu-stderr\.log'
+        $buildYml | Should -Match 'verify-clean-out-control/micpe-qemu-stderr\.log'
+        $buildYml | Should -Match 'verify-clean-out/micpe-qemu-stdout\.log'
+        $extrasLine = @($buildYml -split "`r`n|`n" | Where-Object { $_ -match 'foreach \(\$logName in' })[0]
+        $extrasLine | Should -Not -BeNullOrEmpty
+        $extrasLine.Contains('micpe-qemu-stderr.log') | Should -BeTrue
+        $extrasLine.Contains('micpe-qemu-stdout.log') | Should -BeTrue
+        # The control pass's streams ride the Release through the
+        # $controlStream loop (a $ in a -Match pattern would anchor).
+        $buildYml.Contains('foreach ($controlStream in') | Should -BeTrue
     }
 }

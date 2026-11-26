@@ -74,6 +74,16 @@ param(
     # fix the handshake. A named pipe is the standard VM kernel-debug
     # transport (no TCP stack, no listen backlog, one peer only).
     # The default name is arbitrary; the probe uses 'micpe-kd-probe'.
+    # Round 32: the -serial argument below must be this BARE name --
+    # QEMU creates the pipe at \\.\pipe\<name> itself
+    # (qemu-options.hx, -chardev pipe: "On Windows, a single duplex
+    # pipe will be created at \\.\pipe\path"). Round 31 passed the
+    # full \\.\pipe\micpe-kd, so QEMU tried \\.\pipe\\.\pipe\micpe-kd:
+    # the pipe never appeared under the checked name, kd.exe died
+    # with "file not found" (exit -2147024894), and QEMU itself was
+    # gone ~100 s in. kd.exe takes the full path (com:pipe,
+    # port=\\.\pipe\micpe-kd in Get-CleanKdArgList); only the QEMU
+    # side is bare.
     [string] $KdPipeName = 'micpe-kd',
 
     # Round 26: skip the live KD session (escape hatch for a re-run
@@ -1942,18 +1952,41 @@ function Get-CleanWimlibPath {
     return $null
 }
 
-function Test-CleanSymbolCache {
-    # Round 30: $true when the local symbol cache already holds an
-    # ntoskrnl.pdb (symchk stores it under a GUID-named subfolder, so
-    # the check is recursive). Pure predicate, never throws.
+function Get-CleanCachedKernelPdb {
+    # Round 32: returns the kernel PDB already in the local symbol
+    # cache, or $null. The file is ntkrnlmp.pdb, NOT ntoskrnl.pdb:
+    # symchk stores the PDB under the name recorded in the binary's
+    # debug directory, and ntoskrnl.exe (multiprocessor kernel)
+    # records ntkrnlmp.pdb (round 31: symchk exit 0, PDB Matched
+    # TRUE, PdbFilename ...\kd-symbols\ntkrnlmp.pdb\...\ntkrnlmp.pdb
+    # -- while the round 30 check looked for ntoskrnl.pdb and
+    # reported a false 'not cached'). ntoskrnl.pdb stays as a
+    # fallback for a uniprocessor kernel image. Pure lookup, never
+    # throws.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string] $CacheDir
     )
-    if (-not (Test-Path -LiteralPath $CacheDir -PathType Container)) { return $false }
-    $pdb = Get-ChildItem -LiteralPath $CacheDir -Filter 'ntoskrnl.pdb' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    return ($null -ne $pdb)
+    if (-not (Test-Path -LiteralPath $CacheDir -PathType Container)) { return $null }
+    foreach ($name in @('ntkrnlmp.pdb', 'ntoskrnl.pdb')) {
+        $pdb = Get-ChildItem -LiteralPath $CacheDir -Filter $name -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $pdb) { return $pdb }
+    }
+    return $null
+}
+
+function Test-CleanSymbolCache {
+    # Round 30: $true when the local symbol cache already holds the
+    # kernel PDB (symchk stores it under a GUID-named subfolder, so
+    # the check is recursive). Round 32: the file is ntkrnlmp.pdb
+    # (see Get-CleanCachedKernelPdb). Pure predicate, never throws.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CacheDir
+    )
+    return ($null -ne (Get-CleanCachedKernelPdb -CacheDir $CacheDir))
 }
 
 function Expand-CleanNtoskrnlFromWim {
@@ -2043,11 +2076,11 @@ function Invoke-CleanSymbolPrestage {
     $finish = {
         param($success, $reason, $pdbPath, $details)
         $summary = [System.Collections.Generic.List[string]]::new()
-        $summary.Add('symbol pre-stage (round 30: ntoskrnl.pdb into the local KD symbol cache)')
+        $summary.Add('symbol pre-stage (round 32: ntkrnlmp.pdb into the local KD symbol cache)')
         $summary.Add(('outcome: {0}' -f $(if ($success) { 'cached' } else { 'not cached' })))
         $summary.Add(('reason: {0}' -f $reason))
         $summary.Add(('cache: {0}' -f $cacheDir))
-        $summary.Add(('ntoskrnl.pdb: {0}' -f $(if ($pdbPath) { $pdbPath } else { 'none' })))
+        $summary.Add(('kernel pdb: {0}' -f $(if ($pdbPath) { $pdbPath } else { 'none' })))
         # Round 31: the symchk diagnostics (command line, exit
         # code, input size, output tails). Round 30 reported only
         # 'exited 0 but no PDB' with no evidence of what symchk
@@ -2066,9 +2099,9 @@ function Invoke-CleanSymbolPrestage {
     }
     try {
         if (Test-CleanSymbolCache -CacheDir $cacheDir) {
-            $pdb = Get-ChildItem -LiteralPath $cacheDir -Filter 'ntoskrnl.pdb' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $pdb = Get-CleanCachedKernelPdb -CacheDir $cacheDir
             $pdbPath = if ($pdb) { $pdb.FullName } else { $null }
-            return (& $finish $true 'ntoskrnl.pdb already in the local cache (no download needed)' $pdbPath)
+            return (& $finish $true 'kernel PDB already in the local cache (no download needed)' $pdbPath)
         }
         if (-not $BootWimPath -or -not (Test-Path -LiteralPath $BootWimPath -PathType Leaf)) {
             return (& $finish $false 'no boot.wim path (pre-stage skipped; the session keeps the SRV* symbol path)' $null)
@@ -2128,11 +2161,11 @@ function Invoke-CleanSymbolPrestage {
             return (& $finish $false ('symchk exited {0} (see micpe-symbol-prestage-symchk.err)' -f $proc.ExitCode) $null $symchkDetails)
         }
         if (Test-CleanSymbolCache -CacheDir $cacheDir) {
-            $pdb = Get-ChildItem -LiteralPath $cacheDir -Filter 'ntoskrnl.pdb' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $pdb = Get-CleanCachedKernelPdb -CacheDir $cacheDir
             $pdbPath = if ($pdb) { $pdb.FullName } else { $null }
-            return (& $finish $true 'symchk fetched ntoskrnl.pdb into the local cache (the KD session will not download it live)' $pdbPath $symchkDetails)
+            return (& $finish $true 'symchk fetched the kernel PDB (ntkrnlmp.pdb) into the local cache (the KD session will not download it live)' $pdbPath $symchkDetails)
         }
-        return (& $finish $false 'symchk exited 0 but no ntoskrnl.pdb appeared in the cache' $null $symchkDetails)
+        return (& $finish $false 'symchk exited 0 but no ntkrnlmp.pdb/ntoskrnl.pdb appeared in the cache' $null $symchkDetails)
     }
     catch {
         try { return (& $finish $false ('pre-stage aborted: {0}' -f $_.Exception.Message) $null) } catch {}
@@ -2825,7 +2858,7 @@ function Invoke-CleanCrashDumpCapture {
         [string[]] $MonitorStatus,
 
         # Round 30: the symbol pre-stage summary
-        # (micpe-symbol-prestage.txt) -- whether ntoskrnl.pdb was
+        # (micpe-symbol-prestage.txt) -- whether the kernel PDB was
         # already in the local cache when the KD session started.
         # Empty when the pre-stage was skipped (no-KD control pass).
         [string] $SymbolPrestagePath
@@ -2852,7 +2885,7 @@ function Invoke-CleanCrashDumpCapture {
         $lines.Add('--- QEMU monitor status (queried before quit) ---')
         foreach ($ml in $MonitorStatus) { $lines.Add($ml) }
     }
-    # Round 30: the symbol pre-stage outcome (was ntoskrnl.pdb
+    # Round 30: the symbol pre-stage outcome (was the kernel PDB
     # already in the local cache when the KD session started?). The
     # summary file is written by Invoke-CleanSymbolPrestage even when
     # the pre-stage failed, so a missing file here means the
@@ -2860,7 +2893,7 @@ function Invoke-CleanCrashDumpCapture {
     if ($SymbolPrestagePath -and (Test-Path -LiteralPath $SymbolPrestagePath)) {
         $preContent = Get-Content -LiteralPath $SymbolPrestagePath -Raw -ErrorAction SilentlyContinue
         if ($preContent) {
-            $lines.Add('--- symbol pre-stage (round 30, ntoskrnl.pdb) ---')
+            $lines.Add('--- symbol pre-stage (round 32, ntkrnlmp.pdb) ---')
             foreach ($pl in ($preContent -split "`r`n|`n")) {
                 if ($pl.Trim() -ne '') { $lines.Add(('  {0}' -f $pl)) }
             }
@@ -3107,9 +3140,10 @@ $varsTemplate = Find-CleanOvmfVars -CodePath $OvmfPath
 $varsPath = Join-Path $WorkDir 'OVMF_VARS.fd'
 Copy-Item -LiteralPath $varsTemplate -Destination $varsPath -Force
 
-# Round 26: the serial port now goes to cdb over TCP (see -serial
-# below), so there is no micpe-serial.log any more; the KD session
-# log (micpe-kd.log) is the replacement, uploaded by the workflow.
+# Round 26: the serial port now goes to the KD named pipe (see
+# -serial below), so there is no micpe-serial.log any more; the KD
+# session log (micpe-kd.log) is the replacement, uploaded by the
+# workflow.
 $kdLog = Join-Path $WorkDir 'micpe-kd.log'
 $kdInit = Join-Path $WorkDir 'kd-init.txt'
 # Round 27: the real session's stdout/stderr (drained by the finally
@@ -3120,6 +3154,15 @@ $kdConsoleErr = Join-Path $WorkDir 'micpe-kd-console.err'
 $kdProbeSummary = Join-Path $WorkDir 'micpe-kd-probe.txt'
 $script:kdProbeResult = $null
 $qemuLog = Join-Path $WorkDir 'micpe-qemu.log'
+# Round 32: QEMU's own stdout/stderr. Round 31 proved the -D log
+# (micpe-qemu.log) stays 0 bytes when QEMU dies: -D only records
+# -d debug logging, which is empty without -d flags, and the
+# Start-Process below never redirected the process streams, so
+# QEMU's exit reason went nowhere. stderr is where QEMU prints
+# chardev/startup errors; the finally block logs the exit code
+# next to this file. Both ride the artifact + Release uploads.
+$qemuStdoutLog = Join-Path $WorkDir 'micpe-qemu-stdout.log'
+$qemuStderrLog = Join-Path $WorkDir 'micpe-qemu-stderr.log'
 
 # Round 21: the crash-dump disk. Diagnostic only: a failure here must
 # not fail the verify (the screenshots are the evidence), so it is
@@ -3146,12 +3189,20 @@ $qemuArgs = @(
     '-no-shutdown'
     '-rtc', 'base=localtime'
     '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
-    # Round 26: the guest COM1 (kernel debug) goes to a TCP server
+    # Round 31: the guest COM1 (kernel debug) goes to a named pipe
     # for the live KD session instead of a file; without a debugger
     # the output is discarded (the old micpe-serial.log is gone --
-    # see micpe-kd.log). `server,nowait` means QEMU never blocks
-    # waiting for cdb to connect.
-    '-serial', "pipe:\\.\pipe\$KdPipeName"
+    # see micpe-kd.log). Round 32: the argument MUST be the bare
+    # pipe name -- QEMU creates the pipe at \\.\pipe\<name> itself
+    # (qemu-options.hx, -chardev pipe: "On Windows, a single duplex
+    # pipe will be created at \\.\pipe\path"). Round 31 passed the
+    # full \\.\pipe\micpe-kd, so QEMU tried \\.\pipe\\.\pipe\micpe-kd:
+    # the pipe never appeared under the checked name, kd.exe died
+    # with "file not found" (exit -2147024894), and QEMU itself was
+    # gone ~100 s in. kd.exe takes the full path (com:pipe,
+    # port=\\.\pipe\micpe-kd in Get-CleanKdArgList); only the QEMU
+    # side is bare.
+    '-serial', "pipe:$KdPipeName"
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$OvmfPath"
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath"
     '-cdrom', $IsoPath
@@ -3220,7 +3271,11 @@ $argString = ($qemuArgs | ForEach-Object {
 }) -join ' '
 
 Write-Host "starting QEMU: $QemuPath $argString"
-$qemu = Start-Process -FilePath $QemuPath -ArgumentList $argString -PassThru -NoNewWindow
+# Round 32: redirect QEMU's stdout/stderr to files. Round 31
+# launched it without redirection, so when QEMU died ~100 s in
+# its exit reason went nowhere (the -D micpe-qemu.log only records
+# -d debug logging and stayed 0 bytes).
+$qemu = Start-Process -FilePath $QemuPath -ArgumentList $argString -PassThru -NoNewWindow -RedirectStandardOutput $qemuStdoutLog -RedirectStandardError $qemuStderrLog
 if ($null -eq $qemu) { throw 'failed to start QEMU' }
 
 $shotsTaken = 0
@@ -3278,17 +3333,32 @@ try {
                 }
                 # Round 27: confirm the QEMU serial endpoint is up
                 # before launching the debugger (round 26 never
-                # proved it was). A negative answer only warns: the
-                # debugger retries the connect, and the console
-                # files will show what happens. Round 31: the check
-                # enumerates the pipe directory only -- it never
-                # opens the pipe (one client only; a probe
-                # connection would steal the debugger's slot).
-                $kdPipePresent = Test-CleanKdPipe -PipeName $KdPipeName
+                # proved it was). Round 31: the check enumerates the
+                # pipe directory only -- it never opens the pipe (one
+                # client only; a probe connection would steal the
+                # debugger's slot). Round 32: WAIT for the pipe
+                # (up to 30 s) instead of starting kd.exe anyway --
+                # round 31 proved kd.exe does NOT retry the connect:
+                # it died instantly with exit -2147024894 (0x80070002,
+                # file not found) the moment the pipe was absent, and
+                # the "it retries the connect" comment was wrong. If
+                # the pipe never appears, skip the session (the disk
+                # and ELF paths remain) instead of launching kd.exe
+                # into a certain immediate failure.
+                $kdPipePresent = $false
+                for ($waitSec = 0; $waitSec -le 30 -and -not $kdPipePresent; $waitSec += 2) {
+                    $kdPipePresent = Test-CleanKdPipe -PipeName $KdPipeName
+                    if (-not $kdPipePresent) { Start-Sleep -Seconds 2 }
+                }
                 Write-Host ('KD named pipe \\.\pipe\{0} present: {1}' -f $KdPipeName, $kdPipePresent)
-                if (-not $kdPipePresent) { Write-Host '!!! KD named pipe is not present yet; starting the debugger anyway (it retries the connect)' }
-                $script:kdProc = Start-CleanKdSession -KdPipeName $KdPipeName -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit -DebuggerPath $probeDebugger -Variant $probeVariant -ConsoleOutPath $kdConsoleOut -ConsoleErrPath $kdConsoleErr
-                if ($null -eq $script:kdProc) { Write-Host '!!! live KD session not started; continuing without live KD (disk/ELF paths remain)' }
+                if (-not $kdPipePresent) {
+                    Write-Host '!!! KD named pipe never appeared; skipping the live KD session (kd.exe does not retry the connect -- round 31) and continuing without live KD (disk/ELF paths remain)'
+                    $script:kdProc = $null
+                }
+                else {
+                    $script:kdProc = Start-CleanKdSession -KdPipeName $KdPipeName -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit -DebuggerPath $probeDebugger -Variant $probeVariant -ConsoleOutPath $kdConsoleOut -ConsoleErrPath $kdConsoleErr
+                    if ($null -eq $script:kdProc) { Write-Host '!!! live KD session not started; continuing without live KD (disk/ELF paths remain)' }
+                }
             }
         }
         catch {
@@ -3302,6 +3372,14 @@ try {
 
     # Boot progress -> LogonUI.
     Start-Sleep -Seconds $BootWaitSec
+    # Round 32: if QEMU died during the boot wait, say so now with
+    # its exit code instead of hammering a dead monitor with seven
+    # refused screenshots (round 31: QEMU died ~100 s in, the monitor
+    # refused from the first screenshot on, and nothing recorded the
+    # exit code or the reason -- stderr is in $qemuStderrLog).
+    if ($qemu.HasExited) {
+        throw ('QEMU exited during boot (exit {0}); see {1}' -f $qemu.ExitCode, $qemuStderrLog)
+    }
     $shotIndex++
     if (Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $shotIndex -Label 'boot') { $shotsTaken++ }
     Start-Sleep -Seconds $BootGapSec
@@ -3450,6 +3528,14 @@ finally {
         if (-not $qemu.HasExited) {
             $qemu.Kill()
         }
+    }
+    # Round 32: record QEMU's exit code (and where its stderr went)
+    # whenever it died -- round 31's QEMU died ~100 s in and the run
+    # log never said why. A code here plus micpe-qemu-stderr.log is
+    # the first witness for the next round; the boot-wait check above
+    # throws on the same fact while QEMU is still the story.
+    if ($qemu.HasExited) {
+        Write-Host ('QEMU exit code: {0} (stderr: {1})' -f $qemu.ExitCode, $qemuStderrLog)
     }
     # Round 26: stop the live KD session now that QEMU has exited, so
     # the -logo file is flushed before the capture parses it. cdb
