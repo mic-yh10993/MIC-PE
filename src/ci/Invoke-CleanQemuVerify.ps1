@@ -3250,6 +3250,93 @@ function Invoke-CleanCrashDumpCapture {
     return $result
 }
 
+function Get-CleanQemuArgList {
+    # Round 35: builds the exact QEMU argv for one verify pass. Pure
+    # function (no process, no files): the main flow launches QEMU
+    # with the array it returns, so a construction that throws here
+    # is the same construction that would have killed the run.
+    # Round 34 proved it: the -serial line used a bare `(if ...)`
+    # inside the array literal, which PowerShell reads as a call to
+    # a command named `if` (CommandNotFoundException), and the KD
+    # and control passes both died ~0.2 s after 'crash-dump disk
+    # ready' with QEMU never started. The literal used to live in
+    # the main flow, so no local test ever executed it -- the round
+    # 34 QemuArgs tests only asserted the source text Contains the
+    # line. Extracting the construction here makes it callable
+    # from a test without QEMU, so the same failure is caught
+    # locally before dispatch.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $IsoPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $OvmfPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $VarsPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $QemuLogPath,
+
+        [int] $MemoryMb = 4096,
+
+        [int] $CpuCount = 4,
+
+        [string] $MonitorPort = '4444',
+
+        [ValidateSet('serial', 'kdnet')]
+        [string] $KdTransport = 'serial',
+
+        [string] $KdPort = '50001',
+
+        [string] $DumpDiskQcow2 = $null
+    )
+    $args = @(
+        '-m', "$MemoryMb"
+        '-smp', "$CpuCount"
+        '-cpu', 'max'
+        '-display', 'none'
+        '-no-reboot'
+        '-no-shutdown'
+        '-rtc', 'base=localtime'
+        '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
+        # Round 34: the guest NIC is pinned explicitly: kdnet debugs
+        # through it, so the NIC model must not depend on a QEMU
+        # default (the BCD busparams 0.3.0 names this NIC's PCI slot).
+        # QEMU's default network is the same device (user + e1000),
+        # so pinning it changes nothing for the control pass.
+        '-nic', 'user,model=e1000'
+        # Round 26: the guest COM1 (kernel debug) goes to a TCP server
+        # for the live KD session instead of a file; without a debugger
+        # the output is discarded (the old micpe-serial.log is gone --
+        # see micpe-kd.log). Round 33: back to TCP after the round 31-32
+        # pipe experiment (round 32: the bare pipe connected but the
+        # transport dropped the same way, and the control QEMU died
+        # again ~92 s in with exit -1). TCP is the known-good QEMU
+        # state: rounds 28/29/30 ran three full passes with QEMU alive
+        # throughout and the control pass reaching the blue screen.
+        # Round 34: kdnet replaces the serial transport, so the KD pass
+        # has no serial chardev at all ('-serial none': COM1 exists but
+        # its output is discarded and the guest can never block on it);
+        # the serial TCP chardev stays for the serial transport (and
+        # for the control pass, which runs the serial default with no
+        # debugger attached).
+        '-serial', $(if ($KdTransport -eq 'kdnet') { 'none' } else { "tcp:127.0.0.1:$KdPort,server,nowait" })
+        '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$OvmfPath"
+        '-drive', "if=pflash,format=raw,unit=1,file=$VarsPath"
+        '-cdrom', $IsoPath
+        '-boot', 'd'
+        '-D', $QemuLogPath
+    )
+    if ($DumpDiskQcow2) {
+        # ide index 0 (primary master): enumerated before the CD-ROM
+        # (secondary master), so WinPE gives this fixed disk C:.
+        $args += @('-drive', "file=$DumpDiskQcow2,format=qcow2,if=ide,index=0")
+    }
+    return ,$args
+}
+
 # --- launch ---------------------------------------------------------------
 
 if (-not $ParseOnly) {
@@ -3302,48 +3389,11 @@ if (-not $NoCrashDumpDisk) {
     }
 }
 
-$qemuArgs = @(
-    '-m', "$MemoryMb"
-    '-smp', "$CpuCount"
-    '-cpu', 'max'
-    '-display', 'none'
-    '-no-reboot'
-    '-no-shutdown'
-    '-rtc', 'base=localtime'
-    '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
-    # Round 34: the guest NIC is pinned explicitly: kdnet debugs
-    # through it, so the NIC model must not depend on a QEMU
-    # default (the BCD busparams 0.3.0 names this NIC's PCI slot).
-    # QEMU's default network is the same device (user + e1000),
-    # so pinning it changes nothing for the control pass.
-    '-nic', 'user,model=e1000'
-    # Round 26: the guest COM1 (kernel debug) goes to a TCP server
-    # for the live KD session instead of a file; without a debugger
-    # the output is discarded (the old micpe-serial.log is gone --
-    # see micpe-kd.log). Round 33: back to TCP after the round 31-32
-    # pipe experiment (round 32: the bare pipe connected but the
-    # transport dropped the same way, and the control QEMU died
-    # again ~92 s in with exit -1). TCP is the known-good QEMU
-    # state: rounds 28/29/30 ran three full passes with QEMU alive
-    # throughout and the control pass reaching the blue screen.
-    # Round 34: kdnet replaces the serial transport, so the KD pass
-    # has no serial chardev at all ('-serial none': COM1 exists but
-    # its output is discarded and the guest can never block on it);
-    # the serial TCP chardev stays for the serial transport (and
-    # for the control pass, which runs the serial default with no
-    # debugger attached).
-    '-serial', (if ($KdTransport -eq 'kdnet') { 'none' } else { "tcp:127.0.0.1:$KdPort,server,nowait" })
-    '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$OvmfPath"
-    '-drive', "if=pflash,format=raw,unit=1,file=$varsPath"
-    '-cdrom', $IsoPath
-    '-boot', 'd'
-    '-D', $qemuLog
-)
-if ($dumpDiskQcow2) {
-    # ide index 0 (primary master): enumerated before the CD-ROM
-    # (secondary master), so WinPE gives this fixed disk C:.
-    $qemuArgs += @('-drive', "file=$dumpDiskQcow2,format=qcow2,if=ide,index=0")
-}
+# Round 35: the argv construction lives in Get-CleanQemuArgList
+# (round 34: the bare `(if ...)` in the -serial line threw
+# CommandNotFoundException here and killed both passes before
+# QEMU started -- the function is unit-tested without QEMU).
+$qemuArgs = Get-CleanQemuArgList -IsoPath $IsoPath -OvmfPath $OvmfPath -VarsPath $varsPath -QemuLogPath $qemuLog -MemoryMb $MemoryMb -CpuCount $CpuCount -MonitorPort $MonitorPort -KdTransport $KdTransport -KdPort $KdPort -DumpDiskQcow2 $dumpDiskQcow2
 
 # Round 30: symbol pre-stage -- warm the local KD symbol cache
 # with the ntoskrnl PDB BEFORE the probe and the real session run,

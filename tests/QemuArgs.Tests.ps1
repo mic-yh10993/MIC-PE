@@ -3346,3 +3346,74 @@ Describe 'Round 34 kdnet transport (serial KD drop bypassed)' {
         $bcdFn | Should -Not -Match 'dbgsettings serial'
     }
 }
+
+Describe 'Round 35 QEMU argv construction (round 34 CommandNotFoundException)' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27-34 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r35Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r35-$(Get-Random)"
+        $script:r35Share = Join-Path $script:r35Dir 'share'
+        New-Item -ItemType Directory -Path $script:r35Share -Force | Out-Null
+        $script:r35Iso = Join-Path $script:r35Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r35Iso -Force | Out-Null
+        $script:r35Work = Join-Path $script:r35Dir 'work'
+        New-Item -ItemType Directory -Path $script:r35Work -Force | Out-Null
+        $script:r35Code = Join-Path $script:r35Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r35Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r35Iso -OvmfPath $script:r35Code -WorkDir $script:r35Work
+        $script:r35Vars = Join-Path $script:r35Work 'OVMF_VARS.fd'
+        $script:r35QemuLog = Join-Path $script:r35Work 'micpe-qemu.log'
+    }
+
+    It 'returns none as the -serial value for kdnet (the round 34 line, executed)' {
+        # Round 34: run 45884865461 died here -- the -serial line
+        # used a bare `(if ...)` inside the array literal, which
+        # PowerShell reads as a call to a command named `if`
+        # (CommandNotFoundException), and both passes died ~0.2 s
+        # after 'crash-dump disk ready' with QEMU never started.
+        # This test EXECUTES the construction (Get-CleanQemuArgList)
+        # instead of asserting the source text Contains the line, so
+        # the same failure is caught locally: it fails on the
+        # round 34 code and passes after the `$(if ...)` fix.
+        $args = Get-CleanQemuArgList -IsoPath $script:r35Iso -OvmfPath $script:r35Code -VarsPath $script:r35Vars -QemuLogPath $script:r35QemuLog -KdTransport kdnet -KdPort '50002'
+        $serialIdx = [Array]::IndexOf($args, '-serial')
+        $serialIdx | Should -BeGreaterThan -1
+        $args[$serialIdx + 1] | Should -Be 'none'
+    }
+
+    It 'returns the TCP chardev as the -serial value for serial' {
+        $args = Get-CleanQemuArgList -IsoPath $script:r35Iso -OvmfPath $script:r35Code -VarsPath $script:r35Vars -QemuLogPath $script:r35QemuLog -KdTransport serial -KdPort '50001'
+        $serialIdx = [Array]::IndexOf($args, '-serial')
+        $serialIdx | Should -BeGreaterThan -1
+        $args[$serialIdx + 1] | Should -Be 'tcp:127.0.0.1:50001,server,nowait'
+    }
+
+    It 'keeps every other argument identical across transports' {
+        # The -serial value is the only transport-dependent element:
+        # a drift anywhere else would change the QEMU launch for one
+        # pass only, and the two passes must stay comparable.
+        $kdnet = Get-CleanQemuArgList -IsoPath $script:r35Iso -OvmfPath $script:r35Code -VarsPath $script:r35Vars -QemuLogPath $script:r35QemuLog -KdTransport kdnet -KdPort '50002'
+        $serial = Get-CleanQemuArgList -IsoPath $script:r35Iso -OvmfPath $script:r35Code -VarsPath $script:r35Vars -QemuLogPath $script:r35QemuLog -KdTransport serial -KdPort '50001'
+        $kdnet.Count | Should -Be $serial.Count
+        $serialIdx = [Array]::IndexOf($kdnet, '-serial')
+        $serialIdx | Should -BeGreaterThan -1
+        for ($i = 0; $i -lt $kdnet.Count; $i++) {
+            if ($i -eq ($serialIdx + 1)) { continue }
+            $kdnet[$i] | Should -Be $serial[$i]
+        }
+        ($kdnet -join ' ') | Should -Match 'user,model=e1000'
+        $kdnet | Should -Contain '-m'
+        $kdnet | Should -Contain '4096'
+        $kdnet | Should -Contain '-cdrom'
+        $kdnet | Should -Contain $script:r35Iso
+        $kdnet[$kdnet.Count - 1] | Should -Be $script:r35QemuLog
+    }
+
+    It 'appends the crash-dump disk drive when given, and omits it otherwise' {
+        $withDisk = Get-CleanQemuArgList -IsoPath $script:r35Iso -OvmfPath $script:r35Code -VarsPath $script:r35Vars -QemuLogPath $script:r35QemuLog -DumpDiskQcow2 'C:\x\micpe-dumpdisk.qcow2'
+        $withDisk | Should -Contain 'file=C:\x\micpe-dumpdisk.qcow2,format=qcow2,if=ide,index=0'
+        $noDisk = Get-CleanQemuArgList -IsoPath $script:r35Iso -OvmfPath $script:r35Code -VarsPath $script:r35Vars -QemuLogPath $script:r35QemuLog
+        ($noDisk -join ' ') | Should -Not -Match 'micpe-dumpdisk'
+    }
+}
