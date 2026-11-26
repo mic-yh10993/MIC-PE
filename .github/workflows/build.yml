@@ -372,11 +372,19 @@ jobs:
           # the pre-stage with a warning, it never fails the pass.
           # The control pass is unchanged (no BootWimPath, no
           # pre-stage): it must stay identical to round 29.
+          # Round 34: the KD pass debugs over kdnet, not the serial
+          # port (rounds 32-33: the serial transport drops the same
+          # way on the pipe and on TCP). -KdPort 50002 is the UDP
+          # port kd.exe listens on; it must match the BCD net
+          # settings (hostip 10.0.2.2 is the QEMU slirp gateway, i.e.
+          # the host as the guest sees it; the key is the script
+          # default 1.2.3.4, same as the BCD). The control
+          # pass is unchanged: serial chardev, no debugger.
           $bootWim = if ($env:BOOT_WIM_PATH) { $env:BOOT_WIM_PATH } else { '' }
           $kdFailed = $false
           $kdError = ''
           try {
-            $result = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir $kdWorkDir -BootWimPath $bootWim
+            $result = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir $kdWorkDir -BootWimPath $bootWim -KdTransport kdnet -KdPort 50002
             Write-Host ("clean QEMU verify (KD pass): {0} of {1} screenshots in {2}" -f $result.ShotsTaken, $result.ShotsExpected, $result.ScreenshotDir)
           }
           catch {

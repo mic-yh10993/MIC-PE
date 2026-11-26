@@ -82,7 +82,33 @@ param(
     # shape on TCP and on the pipe), so the fallback restores QEMU
     # survival and isolates the drop as the one remaining variable.
     # The probe uses port 50099.
+    # Round 34: the KD transport switches to kdnet (see
+    # $KdTransport): the serial drop is identical on the pipe and
+    # on TCP, so the fault is in the serial transport itself, not
+    # in either wiring. With kdnet, $KdPort is the UDP port kd.exe
+    # listens on (50002, inside the kd.exe recommended range
+    # 50000-50039) and the guest's -serial is 'none'; the control
+    # pass keeps the serial chardev on the default 50001.
     [string] $KdPort = '50001',
+
+    # Round 34: KD transport. 'serial' (rounds 26-33: kd.exe over
+    # the QEMU -serial TCP chardev) or 'kdnet' (kd.exe over the
+    # network through the guest NIC, bypassing the serial backend
+    # entirely). The BCD carries the matching settings
+    # (Set-CleanBcdKernelDebug): serial dbgsettings for 'serial',
+    # net dbgsettings for 'kdnet'. The control pass (-NoKdSession)
+    # always runs with the serial chardev and no debugger, whatever
+    # the transport -- its serial output is discarded, as before.
+    [ValidateSet('serial', 'kdnet')]
+    [string] $KdTransport = 'serial',
+
+    # Round 34: kdnet session key. Must match the key
+    # Set-CleanBcdKernelDebug writes into the BCD (fixed, not
+    # generated: the build step and the verify step share no state,
+    # and the session is runner-local). The key format is four
+    # dot-separated groups of [a-z0-9] (Microsoft's kdnet key
+    # format); 1.2.3.4 is the documented example shape.
+    [string] $KdNetKey = '1.2.3.4',
 
     # Round 26: skip the live KD session (escape hatch for a re-run
     # if the debugger misbehaves in CI; the serial output is then
@@ -256,19 +282,26 @@ function Format-CleanMonitorStatus {
     # The trailing '(qemu)' prompt and blank lines are dropped.
     # Round 30: 'info vcpus' is an unknown command on this QEMU
     # (both round 29 passes), so the third query is 'info cpus'.
+    # Round 34: a fourth query, 'info pci' -- the kdnet busparams
+    # (0.3.0) names the NIC's PCI slot, and this is the record that
+    # proves the NIC was where the BCD says it is (or shows where
+    # it actually is, if kdnet never connects).
     [CmdletBinding()]
     param(
         [string] $InfoStatus,
 
         [string] $InfoRegisters,
 
-        [string] $InfoCpus
+        [string] $InfoCpus,
+
+        [string] $InfoPci
     )
     $lines = [System.Collections.Generic.List[string]]::new()
     foreach ($pair in @(
         @{ Query = 'info status'; Response = $InfoStatus },
         @{ Query = 'info registers'; Response = $InfoRegisters },
-        @{ Query = 'info cpus'; Response = $InfoCpus }
+        @{ Query = 'info cpus'; Response = $InfoCpus },
+        @{ Query = 'info pci'; Response = $InfoPci }
     )) {
         $lines.Add(('monitor {0}:' -f $pair.Query))
         $text = $pair.Response
@@ -1809,35 +1842,16 @@ function Write-CleanKdInitScript {
     # ISSUED present means `g` never got through. The markers are
     # plain .echo lines, so ConvertFrom-CleanKdLog can read them
     # without parsing debugger output.
-    # Round 33: MINIMAL script -- only `.echo START`, `g`, `.echo
-    # G ISSUED`. The `bu` breakpoint, `bl` and BU ISSUED are out
-    # for this round only (not deleted: they come back in round 34
-    # once `g` is proven to get through). Why: rounds 28-32 prove
-    # the script NEVER ran at all -- START is absent from
-    # micpe-kd.log, micpe-kd-console.out and the full run log in
-    # all five rounds -- so the first question is not "does the
-    # breakpoint resolve" but "does ANY debugger command get
-    # through the transport". The -c timing is now verified
-    # (Microsoft Learn, WinDbg Command-Line Options: `-c` executes
-    # "after the debugger is attached"; Corelan: the -c commands run
-    # when WinDbg hits the initial break): the script runs at the
-    # initial break-in, and the retry storm starts at exactly that
-    # moment, so the script and the drop are the same event -- the
-    # minimal script is the only way to tell them apart. If START
-    # appears, the script mechanism works and the problem was in
-    # the `bu` line; if START still never appears, the drop is in
-    # the break-in handshake itself, not in any script content.
-    # Note what G ISSUED means here: `g` pauses the script until
-    # the next break-in, and this round the next break-in IS the
-    # 0x5A bugcheck itself (a bugcheck always breaks into an
-    # attached kernel debugger), where the debugger prints the
-    # `*** Fatal System Error: 0x0000005a` banner -- which
-    # ConvertFrom-CleanKdLog already parses -- so the minimal round
-    # may capture the parameters for free, without the `bu`
-    # breakpoint. `-b` needs nothing here: it is no longer
-    # supported (same Microsoft page), and the initial breakpoint
-    # is hit automatically because the kernel boots with debugging
-    # on.
+    # Round 34: the breakpoint is BACK (round 27-32 order). The
+    # round 33 minimal script never ran at all -- START is absent
+    # from the round 33 micpe-kd.log, so the minimal round proved
+    # nothing about `bu`; it proved the drop is in the transport,
+    # before any script content. Round 34 changes the transport
+    # (kdnet), so once the script runs, the breakpoint must be there
+    # in the same round to catch the parameters -- no extra round
+    # spent re-adding it. The `bu` design is unchanged from the
+    # Start-CleanKdSession header comment (deferred breakpoint via
+    # the export table, `du` on Arg2/Arg3, `?` on Arg4).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -1845,6 +1859,9 @@ function Write-CleanKdInitScript {
     )
     $initLines = @(
         '.echo *** KD-INIT START ***'
+        'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"'
+        'bl'
+        '.echo *** KD-INIT BU ISSUED ***'
         'g'
         '.echo *** KD-INIT G ISSUED ***'
     )
@@ -1868,6 +1885,15 @@ function Get-CleanKdArgList {
     # connected but the transport dropped the same way, and the
     # control QEMU died again). The 'baud' variant is back with it:
     # a baud rate is meaningless on a pipe but real on TCP.
+    # Round 34: a second transport, kdnet. -Transport 'kdnet'
+    # builds '-k net:port=<KdPort>,key=<KdNetKey>' instead of the
+    # com: string: kd.exe listens on that UDP port and the guest's
+    # kdnet sends OFFER packets to it (hostip is a BCD-side setting,
+    # not part of the host connect string -- the target sends the
+    # OFFER every 3 s once hostip is set, so no target= is needed).
+    # 'baud' is ignored for kdnet (a baud rate is meaningless on
+    # UDP). The probe never calls this with kdnet (no fake kdnet
+    # peer exists); only the real session does.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -1883,13 +1909,23 @@ function Get-CleanKdArgList {
         [string] $InitScriptPath,
 
         [ValidateSet('baseline', 'baud', 'nosymbols', 'nologo', 'inline-c', 'noc')]
-        [string] $Variant = 'baseline'
+        [string] $Variant = 'baseline',
+
+        [ValidateSet('serial', 'kdnet')]
+        [string] $Transport = 'serial',
+
+        [string] $KdNetKey = '1.2.3.4'
     )
     $symPath = ('SRV*{0}\kd-symbols*https://msdl.microsoft.com/download/symbols' -f $WorkDir)
     $args = [System.Collections.Generic.List[string]]::new()
     $args.Add('-k')
-    $com = ('com:ipport={0},port=127.0.0.1' -f $KdPort)
-    if ($Variant -eq 'baud') { $com += ',baud=115200' }
+    if ($Transport -eq 'kdnet') {
+        $com = ('net:port={0},key={1}' -f $KdPort, $KdNetKey)
+    }
+    else {
+        $com = ('com:ipport={0},port=127.0.0.1' -f $KdPort)
+        if ($Variant -eq 'baud') { $com += ',baud=115200' }
+    }
     $args.Add($com)
     if ($Variant -ne 'nosymbols') {
         $args.Add('-y')
@@ -2098,7 +2134,7 @@ function Invoke-CleanSymbolPrestage {
     $finish = {
         param($success, $reason, $pdbPath, $details)
         $summary = [System.Collections.Generic.List[string]]::new()
-        $summary.Add('symbol pre-stage (round 33: ntkrnlmp.pdb into the local KD symbol cache)')
+        $summary.Add('symbol pre-stage (round 34: ntkrnlmp.pdb into the local KD symbol cache)')
         $summary.Add(('outcome: {0}' -f $(if ($success) { 'cached' } else { 'not cached' })))
         $summary.Add(('reason: {0}' -f $reason))
         $summary.Add(('cache: {0}' -f $cacheDir))
@@ -2110,7 +2146,7 @@ function Invoke-CleanSymbolPrestage {
         # tell a wrong path from a wrong cache directory from a
         # silent no-op. Only the symchk branches pass $details.
         if ($null -ne $details -and $details.Count -gt 0) {
-            $summary.Add('--- symchk diagnostics (round 33) ---')
+            $summary.Add('--- symchk diagnostics (round 34) ---')
             foreach ($d in $details) { $summary.Add($d) }
         }
         $summary | Set-Content -LiteralPath $summaryPath -Encoding ASCII
@@ -2347,8 +2383,24 @@ function Start-CleanKdSession {
     # -ArgumentList splits arguments on spaces on Linux). The init
     # script this round (see Write-CleanKdInitScript):
     #   .echo *** KD-INIT START ***
+    #   bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"
+    #   bl
+    #   .echo *** KD-INIT BU ISSUED ***
     #   g
     #   .echo *** KD-INIT G ISSUED ***
+    #
+    # Round 34 note (kdnet): the transport changes, the session
+    # shape does not. -Transport 'kdnet' builds the '-k
+    # net:port=<KdPort>,key=<KdNetKey>' argv (Get-CleanKdArgList);
+    # kd.exe then binds that UDP port and waits for the guest's
+    # OFFER packets -- there is no TCP endpoint to poll first, so
+    # the caller skips the round 31-33 port wait for kdnet. The
+    # probe does not run for kdnet (no fake kdnet peer exists), so
+    # the caller passes kd.exe + 'baseline' directly (cdb.exe
+    # rejects -k outright, round 27). The breakpoint is back in the
+    # init script this round (see Write-CleanKdInitScript), so the
+    # round 33 minimal-script note above is history, not the
+    # current script.
     #
     # Round 27: the argv comes from Get-CleanKdArgList (shared with
     # the probe, so a variant that survives the probe is launched
@@ -2379,6 +2431,13 @@ function Start-CleanKdSession {
         [ValidateSet('baseline', 'baud', 'nosymbols', 'nologo', 'inline-c', 'noc')]
         [string] $Variant = 'baseline',
 
+        # Round 34: kdnet transport (see Get-CleanKdArgList). The
+        # key must match the BCD key (Set-CleanBcdKernelDebug).
+        [ValidateSet('serial', 'kdnet')]
+        [string] $Transport = 'serial',
+
+        [string] $KdNetKey = '1.2.3.4',
+
         [string] $ConsoleOutPath,
 
         [string] $ConsoleErrPath,
@@ -2400,7 +2459,7 @@ function Start-CleanKdSession {
         return $null
     }
     Write-CleanKdInitScript -InitScriptPath $InitScriptPath
-    $argv = Get-CleanKdArgList -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $KdLogPath -InitScriptPath $InitScriptPath -Variant $Variant
+    $argv = Get-CleanKdArgList -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $KdLogPath -InitScriptPath $InitScriptPath -Variant $Variant -Transport $Transport -KdNetKey $KdNetKey
     Write-Host ('live KD session argv: {0} {1}' -f $debugger, ($argv -join ' '))
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $debugger
@@ -2439,7 +2498,12 @@ function Start-CleanKdSession {
         Write-Host ('live KD session: {0} exited immediately (exit {1}){2}' -f [System.IO.Path]::GetFileName($debugger), $proc.ExitCode, $consoleHint)
         return $null
     }
-    Write-Host ('live KD session started: {0} (pid {1}) attached to 127.0.0.1:{2}, log {3}' -f [System.IO.Path]::GetFileName($debugger), $proc.Id, $KdPort, $KdLogPath)
+    if ($Transport -eq 'kdnet') {
+        Write-Host ('live KD session started: {0} (pid {1}) listening for kdnet OFFER on UDP port {2}, log {3}' -f [System.IO.Path]::GetFileName($debugger), $proc.Id, $KdPort, $KdLogPath)
+    }
+    else {
+        Write-Host ('live KD session started: {0} (pid {1}) attached to 127.0.0.1:{2}, log {3}' -f [System.IO.Path]::GetFileName($debugger), $proc.Id, $KdPort, $KdLogPath)
+    }
     return $proc
 }
 
@@ -2692,11 +2756,19 @@ function ConvertFrom-CleanKdLog {
     # -c script ran at all and whether `g` got through. Logs from
     # before round 30 have no markers, so all three stay $false and
     # the Reason falls back to the round 26 wording.
+    # Round 34: -Transport tells the Reason strings which side
+    # failed (serial TCP port vs kdnet UDP OFFER), and the round 33
+    # minimal-script branch is gone -- `bu` is back in the script,
+    # so a log with G ISSUED but no BU ISSUED means the breakpoint
+    # section never echoed, not "no breakpoint this round".
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [AllowEmptyString()]
-        [string] $Content
+        [string] $Content,
+
+        [ValidateSet('serial', 'kdnet')]
+        [string] $Transport = 'serial'
     )
 
     $result = [pscustomobject]@{
@@ -2769,7 +2841,12 @@ function ConvertFrom-CleanKdLog {
     elseif ($null -eq $result.BugCheck) {
         if (-not $result.Connected) {
             if ($Content -match 'Waiting to reconnect|Waiting for reconnect|could not connect|Connection refused') {
-                $result.Reason = 'KD never connected to the guest (cdb could not reach the QEMU serial TCP port)'
+                if ($Transport -eq 'kdnet') {
+                    $result.Reason = 'KD never connected to the guest (kdnet: kd.exe got no OFFER on its UDP port -- check the BCD net settings and the QEMU NIC)'
+                }
+                else {
+                    $result.Reason = 'KD never connected to the guest (cdb could not reach the QEMU serial TCP port)'
+                }
             }
             else {
                 $result.Reason = 'KD never connected to the guest (no "Connected to Windows" in the log)'
@@ -2786,13 +2863,13 @@ function ConvertFrom-CleanKdLog {
                         $result.Reason = 'KD connected and the init script ran (g issued), but the KeBugCheckEx breakpoint never fired (the guest never bugchecked, or the breakpoint did not resolve)'
                     }
                     else {
-                        # Round 33: the minimal init script has no
-                        # breakpoint, so "breakpoint never fired" is
-                        # the wrong diagnosis -- g was issued and the
-                        # guest ran, but no bugcheck banner appeared
-                        # within the session (kd was killed first, or
-                        # the transport dropped after g).
-                        $result.Reason = 'KD connected and the init script ran (g issued, no breakpoint this round), but no bugcheck banner appeared (the guest never bugchecked within the session, or kd was killed first)'
+                        # Round 34: the script has the `bu` line
+                        # again, so G ISSUED with no BU ISSUED is
+                        # not a minimal script -- the breakpoint
+                        # section never echoed (the transport dropped
+                        # mid-script, or this is an older log from
+                        # the round 33 minimal script).
+                        $result.Reason = 'KD connected and the init script ran (g issued), but the KeBugCheckEx breakpoint was never armed (no BU ISSUED in the log -- the script was interrupted, or this is an older log without the breakpoint)'
                     }
                 }
                 else {
@@ -2897,7 +2974,12 @@ function Invoke-CleanCrashDumpCapture {
         # (micpe-symbol-prestage.txt) -- whether the kernel PDB was
         # already in the local cache when the KD session started.
         # Empty when the pre-stage was skipped (no-KD control pass).
-        [string] $SymbolPrestagePath
+        [string] $SymbolPrestagePath,
+
+        # Round 34: KD transport, so the KD log parser names the
+        # right failure side (serial TCP port vs kdnet UDP OFFER).
+        [ValidateSet('serial', 'kdnet')]
+        [string] $KdTransport = 'serial'
     )
 
     $reportPath = Join-Path $WorkDir 'micpe-bugcheck.txt'
@@ -2929,7 +3011,7 @@ function Invoke-CleanCrashDumpCapture {
     if ($SymbolPrestagePath -and (Test-Path -LiteralPath $SymbolPrestagePath)) {
         $preContent = Get-Content -LiteralPath $SymbolPrestagePath -Raw -ErrorAction SilentlyContinue
         if ($preContent) {
-            $lines.Add('--- symbol pre-stage (round 33, ntkrnlmp.pdb) ---')
+            $lines.Add('--- symbol pre-stage (round 34, ntkrnlmp.pdb) ---')
             foreach ($pl in ($preContent -split "`r`n|`n")) {
                 if ($pl.Trim() -ne '') { $lines.Add(('  {0}' -f $pl)) }
             }
@@ -2944,7 +3026,7 @@ function Invoke-CleanCrashDumpCapture {
     if ($KdLogPath) {
         if (Test-Path -LiteralPath $KdLogPath) {
             $kdContent = Get-Content -LiteralPath $KdLogPath -Raw -ErrorAction SilentlyContinue
-            $kdParsed = ConvertFrom-CleanKdLog -Content ($kdContent -as [string])
+            $kdParsed = ConvertFrom-CleanKdLog -Content ($kdContent -as [string]) -Transport $KdTransport
             $kdHeader = if ($KdDebuggerName) { ('--- live KD session ({0}) ---' -f $KdDebuggerName) } else { '--- live KD session ---' }
             $lines.Add($kdHeader)
             if ($null -ne $kdParsed.BugCheck) {
@@ -3176,11 +3258,14 @@ $varsTemplate = Find-CleanOvmfVars -CodePath $OvmfPath
 $varsPath = Join-Path $WorkDir 'OVMF_VARS.fd'
 Copy-Item -LiteralPath $varsTemplate -Destination $varsPath -Force
 
-# Round 26: the serial port now goes to the KD TCP chardev (see
+# Round 26: the serial port went to the KD TCP chardev (see
 # -serial below; round 33 rolled back from the round 31-32 named
 # pipe), so there is no micpe-serial.log any more; the KD
 # session log (micpe-kd.log) is the replacement, uploaded by the
-# workflow.
+# workflow. Round 34: the KD pass debugs over kdnet instead, so
+# its -serial is 'none' and the KD log is the kdnet session
+# transcript; the control pass keeps the serial chardev (and its
+# output is discarded, as before).
 $kdLog = Join-Path $WorkDir 'micpe-kd.log'
 $kdInit = Join-Path $WorkDir 'kd-init.txt'
 # Round 27: the real session's stdout/stderr (drained by the finally
@@ -3226,6 +3311,12 @@ $qemuArgs = @(
     '-no-shutdown'
     '-rtc', 'base=localtime'
     '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
+    # Round 34: the guest NIC is pinned explicitly: kdnet debugs
+    # through it, so the NIC model must not depend on a QEMU
+    # default (the BCD busparams 0.3.0 names this NIC's PCI slot).
+    # QEMU's default network is the same device (user + e1000),
+    # so pinning it changes nothing for the control pass.
+    '-nic', 'user,model=e1000'
     # Round 26: the guest COM1 (kernel debug) goes to a TCP server
     # for the live KD session instead of a file; without a debugger
     # the output is discarded (the old micpe-serial.log is gone --
@@ -3235,7 +3326,13 @@ $qemuArgs = @(
     # again ~92 s in with exit -1). TCP is the known-good QEMU
     # state: rounds 28/29/30 ran three full passes with QEMU alive
     # throughout and the control pass reaching the blue screen.
-    '-serial', "tcp:127.0.0.1:$KdPort,server,nowait"
+    # Round 34: kdnet replaces the serial transport, so the KD pass
+    # has no serial chardev at all ('-serial none': COM1 exists but
+    # its output is discarded and the guest can never block on it);
+    # the serial TCP chardev stays for the serial transport (and
+    # for the control pass, which runs the serial default with no
+    # debugger attached).
+    '-serial', (if ($KdTransport -eq 'kdnet') { 'none' } else { "tcp:127.0.0.1:$KdPort,server,nowait" })
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$OvmfPath"
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath"
     '-cdrom', $IsoPath
@@ -3278,7 +3375,16 @@ if (-not $NoKdSession) {
 # is diagnosed without touching the guest. Runs only when the KD
 # session is enabled; never throws, never changes the verdict. The
 # result decides which argv (if any) the real session uses below.
-if (-not $NoKdSession) {
+# Round 34: the probe only runs for the serial transport. A fake
+# kdnet peer does not exist (the protocol is UDP + encrypted), and
+# the debugger choice is settled anyway (kd.exe, round 27), so the
+# kdnet session is launched directly with kd.exe + baseline below.
+# Skipping the probe is not a fallback: $script:kdProbeResult stays
+# $null and the kdnet branch picks the debugger itself.
+if ($KdTransport -eq 'kdnet' -and -not $NoKdSession) {
+    Write-Host 'KD probe skipped: kdnet has no fake peer (the debugger choice is settled: kd.exe + baseline, round 27)'
+}
+if (-not $NoKdSession -and $KdTransport -eq 'serial') {
     try {
         $script:kdProbeResult = Invoke-CleanKdProbe -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit
         if ($null -ne $script:kdProbeResult -and $null -ne $script:kdProbeResult.Variant) {
@@ -3364,38 +3470,59 @@ try {
                     $probeVariant = $script:kdProbeResult.Variant
                     $probeDebugger = $script:kdProbeResult.DebuggerPath
                 }
-                # Round 27: confirm the QEMU serial endpoint is up
-                # before launching the debugger (round 26 never
-                # proved it was). Round 33: WAIT for the TCP port
-                # (up to 30 s) instead of starting kd.exe anyway --
-                # round 31 proved kd.exe does NOT retry the connect
-                # on a missing endpoint (it died instantly with exit
-                # -2147024894 the moment the pipe was absent), and
-                # the round 30 "it retries the connect" comment was
-                # wrong. If the port never listens, skip the session
-                # (the disk and ELF paths remain) instead of
-                # launching kd.exe into a certain immediate failure.
-                # The wait CONNECTS to the port, which is safe here
-                # for the same reason the round 27-30 check was
-                # safe: it runs right after the monitor comes up,
-                # while the guest is still in firmware, so no KD
-                # packet can be stolen (the kernel's first packet is
-                # ~100 s away), and QEMU's TCP chardev re-listens
-                # after the pre-check disconnects (rounds 27-30
-                # proved it). The loop stops at the first success.
-                $kdPortListening = $false
-                for ($waitSec = 0; $waitSec -le 30 -and -not $kdPortListening; $waitSec += 2) {
-                    $kdPortListening = Test-CleanTcpPort -Port $KdPort -TimeoutSec 5
-                    if (-not $kdPortListening) { Start-Sleep -Seconds 2 }
-                }
-                Write-Host ('KD TCP port 127.0.0.1:{0} listening: {1}' -f $KdPort, $kdPortListening)
-                if (-not $kdPortListening) {
-                    Write-Host '!!! KD TCP port never came up; skipping the live KD session (kd.exe does not retry the connect -- round 31) and continuing without live KD (disk/ELF paths remain)'
-                    $script:kdProc = $null
+                $startSession = $true
+                # Round 34: kdnet -- the probe never ran (no fake
+                # kdnet peer), so the debugger is kd.exe by
+                # construction: cdb.exe rejects -k outright (round
+                # 27), and kd.exe is the only binary that can do
+                # -k net:. No serial-port wait either: kd.exe binds
+                # UDP $KdPort and waits for the guest's OFFER
+                # packets, so there is no endpoint to poll.
+                if ($KdTransport -eq 'kdnet') {
+                    $probeVariant = 'baseline'
+                    $probeDebugger = Get-CleanKdPath -CdbPath (Get-CleanCdbPath)
+                    if ($null -eq $probeDebugger) {
+                        Write-Host '!!! live KD session not started: kd.exe not found next to cdb.exe (cdb.exe cannot do -k net:); continuing without live KD (disk/ELF paths remain)'
+                        $startSession = $false
+                    }
                 }
                 else {
-                    $script:kdProc = Start-CleanKdSession -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit -DebuggerPath $probeDebugger -Variant $probeVariant -ConsoleOutPath $kdConsoleOut -ConsoleErrPath $kdConsoleErr
+                    # Round 27: confirm the QEMU serial endpoint is up
+                    # before launching the debugger (round 26 never
+                    # proved it was). Round 33: WAIT for the TCP port
+                    # (up to 30 s) instead of starting kd.exe anyway --
+                    # round 31 proved kd.exe does NOT retry the connect
+                    # on a missing endpoint (it died instantly with exit
+                    # -2147024894 the moment the pipe was absent), and
+                    # the round 30 "it retries the connect" comment was
+                    # wrong. If the port never listens, skip the session
+                    # (the disk and ELF paths remain) instead of
+                    # launching kd.exe into a certain immediate failure.
+                    # The wait CONNECTS to the port, which is safe here
+                    # for the same reason the round 27-30 check was
+                    # safe: it runs right after the monitor comes up,
+                    # while the guest is still in firmware, so no KD
+                    # packet can be stolen (the kernel's first packet is
+                    # ~100 s away), and QEMU's TCP chardev re-listens
+                    # after the pre-check disconnects (rounds 27-30
+                    # proved it). The loop stops at the first success.
+                    $kdPortListening = $false
+                    for ($waitSec = 0; $waitSec -le 30 -and -not $kdPortListening; $waitSec += 2) {
+                        $kdPortListening = Test-CleanTcpPort -Port $KdPort -TimeoutSec 5
+                        if (-not $kdPortListening) { Start-Sleep -Seconds 2 }
+                    }
+                    Write-Host ('KD TCP port 127.0.0.1:{0} listening: {1}' -f $KdPort, $kdPortListening)
+                    if (-not $kdPortListening) {
+                        Write-Host '!!! KD TCP port never came up; skipping the live KD session (kd.exe does not retry the connect -- round 31) and continuing without live KD (disk/ELF paths remain)'
+                        $startSession = $false
+                    }
+                }
+                if ($startSession) {
+                    $script:kdProc = Start-CleanKdSession -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit -DebuggerPath $probeDebugger -Variant $probeVariant -Transport $KdTransport -KdNetKey $KdNetKey -ConsoleOutPath $kdConsoleOut -ConsoleErrPath $kdConsoleErr
                     if ($null -eq $script:kdProc) { Write-Host '!!! live KD session not started; continuing without live KD (disk/ELF paths remain)' }
+                }
+                else {
+                    $script:kdProc = $null
                 }
             }
         }
@@ -3517,7 +3644,7 @@ finally {
         # Round 30: info vcpus is an unknown command on this QEMU
         # (both round 29 passes said so); info cpus is the one that
         # answers.
-        foreach ($monitorQuery in @('info status', 'info registers', 'info cpus')) {
+        foreach ($monitorQuery in @('info status', 'info registers', 'info cpus', 'info pci')) {
             try {
                 # WaitForPromptSec (not -ReadResponse): the banner is
                 # drained first and the read runs until the command's
@@ -3530,7 +3657,7 @@ finally {
                 $monitorResponses[$monitorQuery] = ('query failed: {0}' -f $_.Exception.Message)
             }
         }
-        $monitorStatusLines = Format-CleanMonitorStatus -InfoStatus $monitorResponses['info status'] -InfoRegisters $monitorResponses['info registers'] -InfoCpus $monitorResponses['info cpus']
+        $monitorStatusLines = Format-CleanMonitorStatus -InfoStatus $monitorResponses['info status'] -InfoRegisters $monitorResponses['info registers'] -InfoCpus $monitorResponses['info cpus'] -InfoPci $monitorResponses['info pci']
         Write-Host ($monitorStatusLines -join "`n")
     }
     catch {
@@ -3615,7 +3742,7 @@ finally {
             $kdDebuggerName = [string]$script:kdProc.KdDebuggerName
         }
         try {
-            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog -KdProbePath $kdProbeSummary -KdConsoleOutPath $kdConsoleOut -KdConsoleErrPath $kdConsoleErr -KdDebuggerName $kdDebuggerName -MonitorStatus @($monitorStatusLines) -SymbolPrestagePath $symbolPrestageSummary
+            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog -KdProbePath $kdProbeSummary -KdConsoleOutPath $kdConsoleOut -KdConsoleErrPath $kdConsoleErr -KdDebuggerName $kdDebuggerName -MonitorStatus @($monitorStatusLines) -SymbolPrestagePath $symbolPrestageSummary -KdTransport $KdTransport
         }
         catch {
             Write-Host "!!! crash-dump capture failed (diagnostic only, run verdict unchanged): $($_.Exception.Message)"

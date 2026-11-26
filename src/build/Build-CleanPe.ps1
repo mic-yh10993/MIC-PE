@@ -1212,16 +1212,48 @@ function Invoke-CleanCaptureStep {
 }
 
 function Set-CleanBcdKernelDebug {
-    # Round 16 evidence (CRITICAL_SERVICE_FAILED 0x5A, run 45594660145):
-    # the QEMU serial log only ever showed the two UEFI BdsDxe lines --
-    # no Windows output at all -- because kernel debugging was never
-    # enabled, and micpe-qemu.log is 0 bytes (QEMU's -D log file gets
-    # nothing without -d flags) so the Release step skips it as an empty
-    # asset. Enabling kernel debugging on the default boot entry makes
-    # the kernel send its debug output to COM1 at 115200, which QEMU
-    # already captures to micpe-serial.log and the Release step already
-    # attaches -- so the next blue screen leaves a KD trace in the
-    # Release instead of nothing. Round 26 adds a bootlog
+    # Round 34: kernel debugging over KDNET (network), not the serial
+    # port. Rounds 28-33 proved the serial transport drops the moment
+    # kd.exe hits the initial breakpoint: the drop is byte-identical
+    # on the named pipe (round 32) and on TCP (round 33) -- 64->320
+    # retries, init script never runs, guest frozen at the initial
+    # breakpoint -- so the fault is in the serial transport itself
+    # (or in QEMU's serial KD backend after the break-in handshake),
+    # not in either wiring. KDNET bypasses the serial backend
+    # entirely: the kernel talks to kd.exe over UDP through the
+    # guest NIC.
+    #
+    # The NIC side is verified, not assumed. QEMU's default network
+    # (no -nic on the command line) is a user-mode network with an
+    # Intel 82540EM (e1000) at PCI 00:03.0 -- confirmed on the local
+    # QEMU 8.2.2 with `info pci` (PCI device 8086:100e) and `info
+    # network` (model=e1000) -- and PCI\VEN_8086&DEV_100E is on
+    # Microsoft's "Supported Ethernet NICs for Network Kernel
+    # Debugging" list (Windows 10 20H2 and Windows 8.1 pages). The
+    # kdnet files are all in the image (kdnet.dll, kdnic.sys with a
+    # Services\kdnic key -- Start 3, Type 1 -- kdstub.dll, kdcom.dll,
+    # all verified in the r109 boot.wim), and the Ramos reference PE
+    # carries exactly the same set (kdnic.sys + netvsc.sys only in
+    # System32\drivers, no vendor NIC miniport, no kd_*.dll) -- so
+    # no vendor miniport is needed in System32\drivers: kdnet drives
+    # the supported NIC through kdnic.sys. The QEMU command pins the
+    # same NIC explicitly (-nic user,model=e1000) so the slot the
+    # busparams below names cannot drift with a QEMU default.
+    #
+    # BCD settings (both stores in the media tree; QEMU boots UEFI,
+    # so the EFI BCD is the one that matters): debug on; dbgsettings
+    # net hostip 10.0.2.2 (QEMU slirp gateway -- the host as the
+    # guest sees it) port 50002 key 1.2.3.4; busparams 0.3.0 (the
+    # e1000's PCI slot, bus 0 device 3 function 0 -- Microsoft's
+    # manual-setup doc says busparams must be specified when
+    # configuring by hand). The key is fixed, not generated: the
+    # build step and the verify step are separate CI steps with no
+    # shared state, so a generated key would need a handoff file;
+    # the session is runner-local and the key only encrypts the KD
+    # packets. Port 50002 is inside the kd.exe recommended range
+    # (50000-50039) and does not collide with the serial KD port
+    # 50001 the control pass still uses. DHCP stays on (no nodhcp):
+    # slirp hands the guest 10.0.2.15. Round 26 adds a bootlog
     # (ntbtlog.txt): the kernel writes one "Loaded driver ..." /
     # "Did not load driver ..." line per driver to
     # X:\Windows\ntbtlog.txt during boot. Round 16 rejected it
@@ -1231,7 +1263,7 @@ function Set-CleanBcdKernelDebug {
     # blue screen, so the file's bytes in RAM are enough. Runs on both BCD stores in the media tree (UEFI +
     # BIOS); the QEMU verify boots UEFI, so the EFI BCD is the one that
     # matters. Kernel debugging with no debugger attached does not stop
-    # the boot: the kernel sends KD packets to the port and carries on,
+    # the boot: the kernel sends its OFFER packets and carries on,
     # and on a bugcheck it still writes the dump and reboots per
     # CrashControl.
     [CmdletBinding()]
@@ -1239,7 +1271,20 @@ function Set-CleanBcdKernelDebug {
         [Parameter(Mandatory = $true)]
         [string] $MediaDir,
 
-        [string] $BcdeditPath = 'bcdedit'
+        [string] $BcdeditPath = 'bcdedit',
+
+        # Round 34 KDNET settings. Must match the verify step's
+        # -KdPort / -KdNetKey (Invoke-CleanQemuVerify.ps1): the
+        # guest's kdnet sends OFFER packets to this hostip:port and
+        # kd.exe must listen with the same port and key, or the two
+        # sides never meet.
+        [string] $KdNetHostIp = '10.0.2.2',
+
+        [string] $KdNetPort = '50002',
+
+        [string] $KdNetKey = '1.2.3.4',
+
+        [string] $KdNetBusParams = '0.3.0'
     )
 
     $bcdPaths = @(
@@ -1254,11 +1299,13 @@ function Set-CleanBcdKernelDebug {
             continue
         }
         $found++
-        Write-Step "BCD kernel debug: debug on + serial 115200 on {default} in $bcd"
+        Write-Step ("BCD kernel debug: debug on + kdnet hostip:{0} port:{1} busparams {2} on {{default}} in {3}" -f $KdNetHostIp, $KdNetPort, $KdNetBusParams, $bcd)
         & $BcdeditPath /store $bcd /set '{default}' debug on | Out-Host
         Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /set debug failed for $bcd (exit $LASTEXITCODE)"
-        & $BcdeditPath /store $bcd /dbgsettings serial debugport:1 baudrate:115200 | Out-Host
-        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /dbgsettings failed for $bcd (exit $LASTEXITCODE)"
+        & $BcdeditPath /store $bcd /dbgsettings net hostip:$KdNetHostIp port:$KdNetPort key:$KdNetKey | Out-Host
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /dbgsettings net failed for $bcd (exit $LASTEXITCODE)"
+        & $BcdeditPath /store $bcd /set '{dbgsettings}' busparams $KdNetBusParams | Out-Host
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /set busparams failed for $bcd (exit $LASTEXITCODE)"
         # Round 26: bootlog Yes on the same entry (see the function
         # comment: the ELF scan reads ntbtlog.txt out of guest RAM).
         & $BcdeditPath /store $bcd /set '{default}' bootlog Yes | Out-Host
@@ -1267,8 +1314,18 @@ function Set-CleanBcdKernelDebug {
         Assert-True -Condition ($enum -match '(?m)^debug\s+Yes\s*$') -Message "BCD kernel debug: debug not confirmed on {default} in $bcd"
         Assert-True -Condition ($enum -match '(?m)^bootlog\s+Yes\s*$') -Message "BCD bootlog: bootlog not confirmed on {default} in $bcd"
         $dbg = & $BcdeditPath /store $bcd /dbgsettings 2>&1 | Out-String
-        Assert-True -Condition ($dbg -match 'Serial' -and $dbg -match '115200') -Message "BCD kernel debug: serial 115200 not confirmed in $bcd"
-        Write-SubStep "BCD kernel debug: $bcd now debugs on COM1 at 115200"
+        Assert-True -Condition ($dbg -match 'Net' -and $dbg -match [regex]::Escape($KdNetHostIp) -and $dbg -match [regex]::Escape($KdNetPort)) -Message "BCD kernel debug: kdnet hostip $KdNetHostIp port $KdNetPort not confirmed in $bcd"
+        # Round 34: busparams is set by the /set above (its exit
+        # code is the hard gate); the display check is warn-only
+        # because the exact /dbgsettings rendering of busparams is
+        # not pinned -- if it is absent here the log still shows the
+        # full output for the checker.
+        if ($dbg -match [regex]::Escape($KdNetBusParams)) {
+            Write-SubStep ("BCD kernel debug: $bcd now debugs over kdnet (hostip {0}, port {1}, busparams {2})" -f $KdNetHostIp, $KdNetPort, $KdNetBusParams)
+        }
+        else {
+            Write-Warn ("BCD kernel debug: busparams {0} not visible in the /dbgsettings output for {1} (the /set exit code was 0); full output: {2}" -f $KdNetBusParams, $bcd, $dbg)
+        }
     }
 
     Assert-True -Condition ($found -gt 0) -Message 'BCD kernel debug: no BCD store found in the media tree'

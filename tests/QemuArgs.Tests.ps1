@@ -2072,14 +2072,14 @@ rax=0000000000000000 rcx=000000000000005a
         (Test-Path -LiteralPath $kdInit) | Should -BeFalse
     }
 
-    It 'wires the serial port to the KD TCP server instead of a file' {
-        # Round 33: back to TCP after the round 31-32 pipe
-        # experiment (the pipe connected but the transport dropped
-        # the same way, and the control QEMU died again). The serial
-        # port is a TCP chardev again; the monitor stays on TCP (a
-        # different -monitor line, untouched here).
+    It 'wires the serial port to the KD TCP server instead of a file (serial transport)' {
+        # Round 34: the serial port is a TCP chardev for the serial
+        # transport and 'none' for kdnet (the KD pass debugs over
+        # the network now); the monitor stays on TCP (a different
+        # -monitor line, untouched here).
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.Contains("'-serial', `"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
+        $verify.Contains("`"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
+        $verify.Contains("if (`$KdTransport -eq 'kdnet') { 'none' }") | Should -BeTrue
         $verify.Contains("'-serial', `"pipe:") | Should -BeFalse
         $verify.Contains("'file:`$serialLog'") | Should -BeFalse
         $verify | Should -Match "\[string\] \`$KdPort = '50001'"
@@ -2224,20 +2224,22 @@ Describe 'Round 27 KD launch probe' {
         { Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'kd' } | Should -Throw
     }
 
-    It 'writes the minimal init script (echo + go only, no breakpoint -- round 33)' {
+    It 'writes the init script with the breakpoint back (round 34: bu/bl/BU ISSUED restored)' {
         Write-CleanKdInitScript -InitScriptPath $script:r27KdInit
         $lines = Get-Content -LiteralPath $script:r27KdInit
-        # Round 33: the script is three lines -- START, g, G ISSUED.
-        # The breakpoint (bu/bl/BU ISSUED) is out for this round: the
-        # transport drops before the script runs at all, so the
-        # minimal script only has to prove `g` gets through. The
-        # breakpoint design lives in the Start-CleanKdSession header
-        # comment and comes back in round 34 once `g` works.
-        $lines.Count | Should -Be 3
+        # Round 34: the breakpoint is back (round 27-32 order). The
+        # round 33 minimal script never ran at all, so it proved
+        # nothing about `bu`; round 34 changes the transport, so the
+        # breakpoint must be there in the same round to catch the
+        # parameters once the script runs.
+        $lines.Count | Should -Be 6
         $lines[0] | Should -Be '.echo *** KD-INIT START ***'
-        $lines[1] | Should -Be 'g'
-        $lines[2] | Should -Be '.echo *** KD-INIT G ISSUED ***'
-        ($lines -join "`n") | Should -Not -Match 'bu nt!KeBugCheckEx'
+        $lines[1] | Should -Match 'bu nt!KeBugCheckEx'
+        $lines[1] | Should -Match 'KEBUGCHECKEX HIT'
+        $lines[2] | Should -Be 'bl'
+        $lines[3] | Should -Be '.echo *** KD-INIT BU ISSUED ***'
+        $lines[4] | Should -Be 'g'
+        $lines[5] | Should -Be '.echo *** KD-INIT G ISSUED ***'
     }
 
     It 'finds kd.exe next to cdb.exe and returns null when it is absent' {
@@ -2691,19 +2693,21 @@ DBGHELP: Timeout to store: d:\a\mic-pe\mic-pe\verify-clean-out\kd-symbols*https:
 '@
     }
 
-    It 'writes the minimal init script with echo markers around g, in order (round 33)' {
-        # Round 33: the breakpoint is out -- the transport drops
-        # before the script runs at all, so the minimal script only
-        # has to prove `g` gets through. The markers must bracket
-        # the one command that matters: START first, then g, then
-        # G ISSUED last (it only prints on the next break-in, so its
-        # absence with START present means `g` never got through).
+    It 'writes the init script with echo markers around bu and g, in order (round 34)' {
+        # Round 34: the breakpoint is back. The markers must bracket
+        # the commands that matter: START first, then bu/bl/BU
+        # ISSUED, then g, then G ISSUED last (it only prints on the
+        # next break-in, so its absence with START present means `g`
+        # never got through).
         Write-CleanKdInitScript -InitScriptPath $script:r30KdInit
         $init = Get-Content -LiteralPath $script:r30KdInit
         $init[0] | Should -Be '.echo *** KD-INIT START ***'
-        $init[1] | Should -Be 'g'
-        $init[2] | Should -Be '.echo *** KD-INIT G ISSUED ***'
-        $init.Count | Should -Be 3
+        $init[1] | Should -Match 'bu nt!KeBugCheckEx'
+        $init[2] | Should -Be 'bl'
+        $init[3] | Should -Be '.echo *** KD-INIT BU ISSUED ***'
+        $init[4] | Should -Be 'g'
+        $init[5] | Should -Be '.echo *** KD-INIT G ISSUED ***'
+        $init.Count | Should -Be 6
     }
 
     It 'locates symchk.exe next to cdb.exe and returns null without it' {
@@ -2869,11 +2873,11 @@ The transport connection between host kernel debugger and target Windows seems l
         $kdLog = Join-Path $script:r30Work 'micpe-kd-drop.log'
         Set-Content -LiteralPath $kdLog -Value $script:r30KdLogDrop -Encoding utf8
         $summary = Join-Path $script:r30Work 'micpe-symbol-prestage.txt'
-        Set-Content -LiteralPath $summary -Value @('symbol pre-stage (round 33: ntkrnlmp.pdb into the local KD symbol cache)', 'outcome: cached', 'reason: symchk fetched the kernel PDB (ntkrnlmp.pdb) into the local cache (the KD session will not download it live)', 'cache: C:\fake\kd-symbols', 'kernel pdb: C:\fake\kd-symbols\ntkrnlmp.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1\ntkrnlmp.pdb') -Encoding utf8
+        Set-Content -LiteralPath $summary -Value @('symbol pre-stage (round 34: ntkrnlmp.pdb into the local KD symbol cache)', 'outcome: cached', 'reason: symchk fetched the kernel PDB (ntkrnlmp.pdb) into the local cache (the KD session will not download it live)', 'cache: C:\fake\kd-symbols', 'kernel pdb: C:\fake\kd-symbols\ntkrnlmp.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1\ntkrnlmp.pdb') -Encoding utf8
         $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r30Work -KdLogPath $kdLog -KdDebuggerName 'kd.exe' -SymbolPrestagePath $summary
         $result.BugCheck | Should -BeNullOrEmpty
         $report = Get-Content -LiteralPath (Join-Path $script:r30Work 'micpe-bugcheck.txt') -Raw
-        $report | Should -Match '--- symbol pre-stage \(round 33, ntkrnlmp\.pdb\) ---'
+        $report | Should -Match '--- symbol pre-stage \(round 34, ntkrnlmp\.pdb\) ---'
         $report | Should -Match 'outcome: cached'
         $report | Should -Match 'live KD init script: started=True, bu-issued=True, g-issued=False'
         $report | Should -Match 'init script started, but g was never issued'
@@ -2944,12 +2948,14 @@ Describe 'Round 33 TCP rollback (round 31-32 pipe transport removed)' {
         $proc | Should -BeNullOrEmpty
     }
 
-    It 'wires the QEMU serial port back to TCP, while the monitor stays on TCP' {
-        # Round 33: the -serial argument is the TCP chardev again --
-        # the bare pipe name (round 32) is gone, and so is the full
-        # \\.\pipe\ path (round 31).
+    It 'wires the QEMU serial port to TCP for serial and to none for kdnet, while the monitor stays on TCP' {
+        # Round 34: the -serial argument is conditional on the
+        # transport -- kdnet has no serial chardev at all ('none'),
+        # serial keeps the TCP chardev. The bare pipe name (round
+        # 32) and the full \\.\pipe\ path (round 31) are both gone.
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.Contains("'-serial', `"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
+        $verify.Contains("if (`$KdTransport -eq 'kdnet') { 'none' }") | Should -BeTrue
+        $verify.Contains("`"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
         $verify.Contains("'-serial', `"pipe:") | Should -BeFalse
         $verify.Contains("'-monitor', `"tcp:127.0.0.1:`$MonitorPort,server,nowait`"") | Should -BeTrue
     }
@@ -3007,7 +3013,7 @@ Describe 'Round 33 TCP rollback (round 31-32 pipe transport removed)' {
         $result.Reason | Should -Match 'symchk exited 0 but no ntkrnlmp\.pdb'
         $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
         $summary | Should -Match 'outcome: not cached'
-        $summary | Should -Match '--- symchk diagnostics \(round 33\) ---'
+        $summary | Should -Match '--- symchk diagnostics \(round 34\) ---'
         $summary | Should -Match 'symchk command:'
         $summary | Should -Match 'symchk exit code: 0'
         $summary | Should -Match 'ntoskrnl.exe bytes: 13'
@@ -3121,21 +3127,23 @@ Describe 'Round 33 minimal init script (g only) and TCP rollback' {
         $script:r33KdInit = Join-Path $script:r33Work 'kd-init.txt'
     }
 
-    It 'writes the minimal init script: START, g, G ISSUED -- and no breakpoint' {
-        # The round 32 log proves the transport drops before the
-        # script runs at all (three flags, 0 hits). The breakpoint
-        # commands are not the fault -- the connection is -- so this
-        # round's script only has to prove `g` gets through. The
-        # breakpoint design is parked in the Start-CleanKdSession
-        # header comment and returns in round 34 once `g` works.
+    It 'writes the init script with the breakpoint back: START, bu, bl, BU ISSUED, g, G ISSUED (round 34)' {
+        # Round 34: the round 33 minimal script never ran (START
+        # absent from the round 33 kd.log), so it proved nothing
+        # about `bu` -- only that the drop is in the transport. The
+        # transport changes this round (kdnet), so the breakpoint
+        # comes back in the same round to catch the parameters once
+        # the script runs.
         Write-CleanKdInitScript -InitScriptPath $script:r33KdInit
         $init = Get-Content -LiteralPath $script:r33KdInit
-        $init.Count | Should -Be 3
+        $init.Count | Should -Be 6
         $init[0] | Should -Be '.echo *** KD-INIT START ***'
-        $init[1] | Should -Be 'g'
-        $init[2] | Should -Be '.echo *** KD-INIT G ISSUED ***'
-        ($init -join "`n") | Should -Not -Match 'bu nt!KeBugCheckEx'
-        ($init -join "`n") | Should -Not -Match 'BU ISSUED'
+        $init[1] | Should -Match 'bu nt!KeBugCheckEx'
+        $init[1] | Should -Match 'du poi\(@r8\+8\)'
+        $init[2] | Should -Be 'bl'
+        $init[3] | Should -Be '.echo *** KD-INIT BU ISSUED ***'
+        $init[4] | Should -Be 'g'
+        $init[5] | Should -Be '.echo *** KD-INIT G ISSUED ***'
     }
 
     It 'keeps the breakpoint design in the session header comment for round 34' {
@@ -3145,9 +3153,10 @@ Describe 'Round 33 minimal init script (g only) and TCP rollback' {
         $verify | Should -Match 'du poi\(@r8\+8\)'
     }
 
-    It 'wires the QEMU serial port back to TCP (the round 31-32 pipe is gone)' {
+    It 'wires the QEMU serial port to TCP for serial and to none for kdnet (the round 31-32 pipe is gone)' {
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.Contains("'-serial', `"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
+        $verify.Contains("if (`$KdTransport -eq 'kdnet') { 'none' }") | Should -BeTrue
+        $verify.Contains("`"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
         $verify.Contains("'-serial', `"pipe:") | Should -BeFalse
         $verify | Should -Match "\[string\] \`$KdPort = '50001'"
         $verify | Should -Not -Match '\$KdPipeName'
@@ -3162,20 +3171,21 @@ Describe 'Round 33 minimal init script (g only) and TCP rollback' {
         $verify | Should -Not -Match 'Test-CleanKdPipe'
     }
 
-    It 'labels the pre-stage summary and diagnostics as round 33' {
+    It 'labels the pre-stage summary and diagnostics as round 34' {
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify.Contains("symbol pre-stage (round 33: ntkrnlmp.pdb into the local KD symbol cache)") | Should -BeTrue
-        $verify.Contains("--- symchk diagnostics (round 33) ---") | Should -BeTrue
-        $verify.Contains("--- symbol pre-stage (round 33, ntkrnlmp.pdb) ---") | Should -BeTrue
-        $verify | Should -Not -Match 'round 32: ntkrnlmp\.pdb'
-        $verify | Should -Not -Match 'symchk diagnostics \(round 31\)'
+        $verify.Contains("symbol pre-stage (round 34: ntkrnlmp.pdb into the local KD symbol cache)") | Should -BeTrue
+        $verify.Contains("--- symchk diagnostics (round 34) ---") | Should -BeTrue
+        $verify.Contains("--- symbol pre-stage (round 34, ntkrnlmp.pdb) ---") | Should -BeTrue
+        $verify | Should -Not -Match 'round 33: ntkrnlmp\.pdb'
+        $verify | Should -Not -Match 'symchk diagnostics \(round 33\)'
     }
 
-    It 'explains a g-issued log without a breakpoint as no-bugcheck, not a missed breakpoint' {
-        # Round 33's script has no breakpoint, so "the breakpoint
-        # never fired" would mislead the checker: g went through and
-        # the guest ran, but no bugcheck banner appeared within the
-        # session. A log WITH the breakpoint keeps the old reason.
+    It 'explains a g-issued log without BU ISSUED as never-armed, and with BU ISSUED as breakpoint-never-fired (round 34)' {
+        # Round 34: `bu` is back in the script, so a log with G
+        # ISSUED but no BU ISSUED is not a minimal script -- the
+        # breakpoint section never echoed (the transport dropped
+        # mid-script, or an older round 33 log). A log WITH the
+        # breakpoint keeps the round 30 reason.
         $withG = @'
 Connected to Windows 10 22621 x64 target at (Thu Nov 26 15:50:35.705 2026 (UTC + 0:00)), ptr64 TRUE
 Kernel Debugger connection established.
@@ -3186,7 +3196,8 @@ Kernel Debugger connection established.
         $parsed.InitStarted | Should -BeTrue
         $parsed.InitBuIssued | Should -BeFalse
         $parsed.InitGIssued | Should -BeTrue
-        $parsed.Reason | Should -Match 'no breakpoint this round'
+        $parsed.Reason | Should -Match 'never armed'
+        $parsed.Reason | Should -Not -Match 'no breakpoint this round'
         $withBu = @'
 Connected to Windows 10 22621 x64 target at (Thu Nov 26 15:50:35.705 2026 (UTC + 0:00)), ptr64 TRUE
 Kernel Debugger connection established.
@@ -3198,5 +3209,140 @@ Kernel Debugger connection established.
         $parsedBu.InitBuIssued | Should -BeTrue
         $parsedBu.InitGIssued | Should -BeTrue
         $parsedBu.Reason | Should -Match 'breakpoint never fired'
+        # kdnet: a log that never connected names the UDP OFFER
+        # side, not the serial TCP port.
+        $waiting = @'
+Microsoft (R) Windows Debugger Version 10.0.26100.9457 AMD64
+Waiting to reconnect...
+'@
+        $parsedKdnet = ConvertFrom-CleanKdLog -Content $waiting -Transport kdnet
+        $parsedKdnet.Connected | Should -BeFalse
+        $parsedKdnet.Reason | Should -Match 'kdnet'
+        $parsedKdnet.Reason | Should -Match 'no OFFER'
+        $parsedSerial = ConvertFrom-CleanKdLog -Content $waiting -Transport serial
+        $parsedSerial.Reason | Should -Match 'serial TCP port'
+    }
+}
+
+Describe 'Round 34 kdnet transport (serial KD drop bypassed)' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27-33 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r34Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r34-$(Get-Random)"
+        $script:r34Share = Join-Path $script:r34Dir 'share'
+        New-Item -ItemType Directory -Path $script:r34Share -Force | Out-Null
+        $script:r34Iso = Join-Path $script:r34Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r34Iso -Force | Out-Null
+        $script:r34Work = Join-Path $script:r34Dir 'work'
+        New-Item -ItemType Directory -Path $script:r34Work -Force | Out-Null
+        $script:r34Code = Join-Path $script:r34Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r34Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r34Iso -OvmfPath $script:r34Code -WorkDir $script:r34Work
+        $script:r34Pwsh = (Get-Process -Id $PID).Path
+        $script:r34KdLog = Join-Path $script:r34Work 'micpe-kd.log'
+        $script:r34KdInit = Join-Path $script:r34Work 'kd-init.txt'
+    }
+
+    It 'builds the kdnet connect string for the baseline variant' {
+        # Round 34: kd.exe listens on the UDP port and the guest's
+        # kdnet sends OFFER packets to it (hostip is BCD-side, not
+        # part of the host connect string). Same 8-element shape as
+        # the serial baseline, only the -k value changes.
+        $argv = Get-CleanKdArgList -KdPort '50002' -WorkDir $script:r34Work -KdLogPath $script:r34KdLog -InitScriptPath $script:r34KdInit -Variant 'baseline' -Transport kdnet
+        $argv.Count | Should -Be 8
+        $argv[0] | Should -Be '-k'
+        $argv[1] | Should -Be 'net:port=50002,key=1.2.3.4'
+        $argv[2] | Should -Be '-y'
+        $argv[3] | Should -Be ('SRV*{0}\kd-symbols*https://msdl.microsoft.com/download/symbols' -f $script:r34Work)
+        $argv[4] | Should -Be '-logo'
+        $argv[5] | Should -Be $script:r34KdLog
+        $argv[6] | Should -Be '-c'
+        $argv[7] | Should -Be ('$$><{0}' -f $script:r34KdInit)
+        ($argv -join ' ') | Should -Not -Match 'com:'
+    }
+
+    It 'ignores baud for kdnet and honors an explicit key' {
+        $baud = Get-CleanKdArgList -KdPort '50002' -WorkDir $script:r34Work -KdLogPath $script:r34KdLog -InitScriptPath $script:r34KdInit -Variant 'baud' -Transport kdnet
+        $baud[1] | Should -Be 'net:port=50002,key=1.2.3.4'
+        ($baud -join ' ') | Should -Not -Match 'baud='
+        $keyed = Get-CleanKdArgList -KdPort '50002' -WorkDir $script:r34Work -KdLogPath $script:r34KdLog -InitScriptPath $script:r34KdInit -Variant 'baseline' -Transport kdnet -KdNetKey 'a1b2.c3d4.e5f6.7890'
+        $keyed[1] | Should -Be 'net:port=50002,key=a1b2.c3d4.e5f6.7890'
+    }
+
+    It 'keeps the serial connect string as the default transport' {
+        # The probe and the control pass still use the serial
+        # default; only the kdnet KD pass opts in.
+        $argv = Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r34Work -KdLogPath $script:r34KdLog -InitScriptPath $script:r34KdInit -Variant 'baseline'
+        $argv[1] | Should -Be 'com:ipport=50001,port=127.0.0.1'
+    }
+
+    It 'launches the kdnet session without throwing on the transport (fake pwsh debugger)' {
+        # pwsh as the "kd.exe": it dies on the unknown -k switch, so
+        # the session returns null -- but it must NOT throw on the
+        # transport or the key, the way a ValidateSet gap would.
+        $proc = Start-CleanKdSession -KdPort '50002' -WorkDir $script:r34Work -KdLogPath $script:r34KdLog -InitScriptPath $script:r34KdInit -DebuggerPath $script:r34Pwsh -Variant 'baseline' -Transport kdnet -StartupWaitSec 1
+        $proc | Should -BeNullOrEmpty
+    }
+
+    It 'skips the probe for kdnet and picks kd.exe directly' {
+        # A fake kdnet peer does not exist (UDP + encrypted), and
+        # the debugger choice is settled (kd.exe, round 27). The
+        # probe runs for the serial transport only; the kdnet branch
+        # resolves kd.exe next to cdb.exe itself.
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains('KD probe skipped: kdnet has no fake peer') | Should -BeTrue
+        $verify.Contains("if (-not `$NoKdSession -and `$KdTransport -eq 'serial')") | Should -BeTrue
+        $verify.Contains('Get-CleanKdPath -CdbPath (Get-CleanCdbPath)') | Should -BeTrue
+        $verify | Should -Match 'kd\.exe not found next to cdb\.exe'
+    }
+
+    It 'pins the guest NIC explicitly and drops the serial chardev for kdnet' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains("'-nic', 'user,model=e1000'") | Should -BeTrue
+        $verify.Contains("if (`$KdTransport -eq 'kdnet') { 'none' }") | Should -BeTrue
+    }
+
+    It 'asks the monitor for the NIC PCI address before quit (info pci)' {
+        # The BCD busparams 0.3.0 names the NIC's PCI slot; this
+        # query is the record that proves the NIC was where the BCD
+        # says it is (or shows where it actually is, if kdnet never
+        # connects).
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains("'info pci'") | Should -BeTrue
+        $verify | Should -Match '\[string\] \$InfoPci'
+        $verify.Contains("-InfoPci `$monitorResponses['info pci']") | Should -BeTrue
+        $pci = Format-CleanMonitorStatus -InfoStatus 'VM status: running' -InfoRegisters 'RIP=fffff8040a41a6cc' -InfoCpus 'CPU #0: pc=0x0000000000000000' -InfoPci 'Bus 0, device 3, function 0: Ethernet controller: PCI device 8086:100e'
+        ($pci -join "`n") | Should -Match 'info pci:'
+        ($pci -join "`n") | Should -Match '8086:100e'
+    }
+
+    It 'passes kdnet through to the workflow KD pass, not the control pass' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $verifyStep = $buildYml.Substring($buildYml.IndexOf('- name: Verify clean build in QEMU'))
+        $verifyStep = $verifyStep.Substring(0, $verifyStep.IndexOf('- name: Verify (static)'))
+        $kdCall = $verifyStep.Substring($verifyStep.IndexOf('-WorkDir $kdWorkDir'))
+        $kdCall = $kdCall.Substring(0, $kdCall.IndexOf("`n"))
+        $kdCall.Contains('-KdTransport kdnet') | Should -BeTrue
+        $kdCall.Contains('-KdPort 50002') | Should -BeTrue
+        $controlCall = $verifyStep.Substring($verifyStep.IndexOf('-WorkDir $controlWorkDir -NoKdSession'))
+        $controlCall = $controlCall.Substring(0, $controlCall.IndexOf("`n"))
+        $controlCall.Contains('-KdTransport') | Should -BeFalse
+        $controlCall.Contains('-KdPort') | Should -BeFalse
+    }
+
+    It 'writes the kdnet settings into both BCDs (build script wiring)' {
+        # The BCD is baked into the ISO at build time, so the kdnet
+        # settings must be in Set-CleanBcdKernelDebug itself -- the
+        # verify step cannot change them per pass.
+        $build = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\build\Build-CleanPe.ps1') -Raw
+        $bcdFn = ($build -split 'function Set-CleanBcdKernelDebug')[1] -split 'function Invoke-CleanIsoStep' | Select-Object -First 1
+        $bcdFn | Should -Match 'dbgsettings net hostip:'
+        $bcdFn | Should -Match "busparams"
+        $bcdFn | Should -Match '10\.0\.2\.2'
+        $bcdFn | Should -Match '50002'
+        $bcdFn | Should -Match '1\.2\.3\.4'
+        $bcdFn | Should -Match '0\.3\.0'
+        $bcdFn | Should -Not -Match 'dbgsettings serial'
     }
 }

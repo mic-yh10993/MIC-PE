@@ -1163,15 +1163,21 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         $guard | Should -Match 'ErrorControl=3'
     }
 
-    It 'enables kernel debugging on the default boot entry before packaging the ISO (round 16 evidence)' {
-        # Round 16: the serial log only ever showed the two UEFI lines
-        # because kernel debugging was off, and micpe-qemu.log is 0 bytes
-        # (QEMU -D logs nothing without -d flags) so the Release step
-        # skips it. KD on COM1 at 115200 puts the kernel debug output
-        # into micpe-serial.log, which the Release already attaches.
+    It 'enables kernel debugging over kdnet on the default boot entry before packaging the ISO (round 34)' {
+        # Round 34: the serial transport drops the moment kd.exe hits
+        # the initial breakpoint (identical on the pipe and on TCP),
+        # so the BCD now carries kdnet settings instead of the serial
+        # ones (round 16's COM1/115200 wiring is history). The NIC
+        # side is verified: QEMU's default NIC is the Intel 82540EM
+        # (8086:100e) at PCI 00:03.0, on Microsoft's kdnet supported
+        # list, and kdnet.dll + kdnic.sys are in the image.
         $script:CleanScriptText | Should -Match 'function Set-CleanBcdKernelDebug'
         $script:CleanScriptText | Should -Match "debug on"
-        $script:CleanScriptText | Should -Match 'dbgsettings serial debugport:1 baudrate:115200'
+        $script:CleanScriptText | Should -Match 'dbgsettings net hostip:'
+        $script:CleanScriptText | Should -Match 'port:'
+        $script:CleanScriptText | Should -Match 'key:'
+        $script:CleanScriptText | Should -Match 'busparams'
+        $script:CleanScriptText | Should -Not -Match 'dbgsettings serial debugport:1 baudrate:115200'
         $isoStep = ($script:CleanScriptText -split 'function Invoke-CleanIsoStep')[1] -split '# Dispatch' | Select-Object -First 1
         $isoStep | Should -Match 'Set-CleanBcdKernelDebug'
         $isoStep.IndexOf('Set-CleanBcdKernelDebug') | Should -BeLessThan $isoStep.IndexOf('New-MicpeIso')
