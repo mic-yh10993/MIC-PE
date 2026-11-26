@@ -2484,3 +2484,154 @@ Describe 'Round 28 KD probe winner wiring' {
         $buildYml.Contains('"$isoHash  MICPE.iso"') | Should -BeFalse
     }
 }
+
+Describe 'Round 29 no-KD control pass' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27/28 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r29Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r29-$(Get-Random)"
+        $script:r29Share = Join-Path $script:r29Dir 'share'
+        New-Item -ItemType Directory -Path $script:r29Share -Force | Out-Null
+        $script:r29Iso = Join-Path $script:r29Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r29Iso -Force | Out-Null
+        $script:r29Work = Join-Path $script:r29Dir 'work'
+        New-Item -ItemType Directory -Path $script:r29Work -Force | Out-Null
+        $script:r29Code = Join-Path $script:r29Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r29Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r29Iso -OvmfPath $script:r29Code -WorkDir $script:r29Work
+        # Round 28 shape: the debugger connected, then the transport
+        # dropped -- no bugcheck banner, no breakpoint. The report
+        # must still name the debugger that actually ran.
+        $script:r29KdLogConnected = @'
+Microsoft (R) Windows Debugger Version 10.0.26100.9457 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 08:37:38.920 2026 (UTC + 0:00)), ptr64 TRUE
+Kernel Debugger connection established.
+Windows 10 Kernel Version 22621 MP (1 procs) Free x64
+Edition build lab: 22621.1.amd64fre.ni_release.220506-1250
+Kernel base = 0xfffff804`6fa00000 PsLoadedModuleList = 0xfffff804`70613450
+System Uptime: 0 days 0:00:00.016
+... Retry sending the same data packet for 64 times.
+The transport connection between host kernel debugger and target Windows seems lost.
+'@
+    }
+
+    It 'formats the three monitor responses as report lines, dropping the prompt and blank lines' {
+        $lines = Format-CleanMonitorStatus -InfoStatus "VM status: paused (running)`n(qemu)" `
+            -InfoRegisters "rax=0000000000000000 rcx=000000000000005a`nrip=0000000000000000`n(qemu)" `
+            -InfoVcpus "CPU #0: thread_id=12345`n(qemu)"
+        ($lines -join "`n") | Should -Match 'monitor info status:'
+        ($lines -join "`n") | Should -Match 'VM status: paused \(running\)'
+        ($lines -join "`n") | Should -Match 'monitor info registers:'
+        ($lines -join "`n") | Should -Match 'rax=0000000000000000 rcx=000000000000005a'
+        ($lines -join "`n") | Should -Match 'monitor info vcpus:'
+        ($lines -join "`n") | Should -Match 'CPU #0: thread_id=12345'
+        ($lines -join "`n") | Should -Not -Match '\(qemu\)'
+    }
+
+    It 'reports (no response) for a monitor query that said nothing' {
+        $lines = Format-CleanMonitorStatus -InfoStatus '' -InfoRegisters $null -InfoVcpus "  `n"
+        ($lines -join "`n") | Should -Match 'monitor info status:\s*\n  \(no response\)'
+        ($lines -join "`n") | Should -Match 'monitor info registers:\s*\n  \(no response\)'
+        ($lines -join "`n") | Should -Match 'monitor info vcpus:\s*\n  \(no response\)'
+    }
+
+    It 'writes the monitor status into micpe-bugcheck.txt' {
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r29Work `
+            -MonitorStatus @('monitor info status:', '  VM status: paused (running)', 'monitor info registers:', '  rax=0000000000000000')
+        $result.BugCheck | Should -BeNullOrEmpty
+        $report = Get-Content -LiteralPath (Join-Path $script:r29Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Match '--- QEMU monitor status \(queried before quit\) ---'
+        $report | Should -Match 'VM status: paused \(running\)'
+    }
+
+    It 'omits the monitor section when no monitor status was captured' {
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r29Work
+        $result.BugCheck | Should -BeNullOrEmpty
+        $report = Get-Content -LiteralPath (Join-Path $script:r29Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Not -Match 'QEMU monitor status'
+    }
+
+    It 'names the debugger that actually ran in the KD report header' {
+        $kdLog = Join-Path $script:r29Work 'micpe-kd-connected.log'
+        Set-Content -LiteralPath $kdLog -Value $script:r29KdLogConnected -Encoding utf8
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r29Work -KdLogPath $kdLog -KdDebuggerName 'kd.exe'
+        $result.BugCheck | Should -BeNullOrEmpty
+        $report = Get-Content -LiteralPath (Join-Path $script:r29Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Match '--- live KD session \(kd\.exe\) ---'
+        $report | Should -Match 'live KD: kd\.exe did connect to the guest'
+        # The round 28 report still said "round 26, cdb.exe" while
+        # the session ran kd.exe; the stale label must be gone.
+        $report | Should -Not -Match 'round 26, cdb\.exe'
+    }
+
+    It 'falls back to a generic debugger name when no session ran' {
+        $kdLog = Join-Path $script:r29Work 'micpe-kd-connected-noname.log'
+        Set-Content -LiteralPath $kdLog -Value $script:r29KdLogConnected -Encoding utf8
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r29Work -KdLogPath $kdLog
+        $result.BugCheck | Should -BeNullOrEmpty
+        $report = Get-Content -LiteralPath (Join-Path $script:r29Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Match '--- live KD session ---'
+        $report | Should -Match 'live KD: the debugger did connect to the guest'
+        $report | Should -Not -Match 'live KD session \('
+    }
+
+    It 'queries the monitor before quit and before the guest-memory dump' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        # The main-flow finally is the last 'finally {' in the file.
+        $finallyBlock = $verify.Substring($verify.LastIndexOf('finally {'))
+        $finallyBlock.IndexOf("'info status'") | Should -BeLessThan $finallyBlock.IndexOf("'quit'")
+        $finallyBlock.IndexOf("'info registers'") | Should -BeLessThan $finallyBlock.IndexOf("'quit'")
+        $finallyBlock.IndexOf("'info vcpus'") | Should -BeLessThan $finallyBlock.IndexOf("'quit'")
+        # The status query sits at the top of the finally, ahead of
+        # the ELF dump, so it runs even when the dump throws.
+        $finallyBlock.IndexOf('Format-CleanMonitorStatus') | Should -BeLessThan $finallyBlock.IndexOf('Invoke-CleanGuestMemoryDump')
+    }
+
+    It 'records the debugger binary on the live KD session process' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $session = $verify.Substring($verify.IndexOf('function Start-CleanKdSession'))
+        $session.Contains("Add-Member -NotePropertyName 'KdDebuggerName'") | Should -BeTrue
+    }
+
+    It 'passes the debugger name and the monitor status into the capture' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains('-KdDebuggerName $kdDebuggerName -MonitorStatus @($monitorStatusLines)') | Should -BeTrue
+    }
+
+    It 'runs the verify twice in the workflow: KD pass as the gate, no-KD control as the diagnosis' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $verifyStep = $buildYml.Substring($buildYml.IndexOf('- name: Verify clean build in QEMU'))
+        $verifyStep = $verifyStep.Substring(0, $verifyStep.IndexOf('- name: Verify (static)'))
+        # Same ISO, same QEMU, same timing; the control pass only adds
+        # -NoKdSession (no debugger attaches, probe skipped) and its
+        # own WorkDir so the evidence never overwrites the KD pass.
+        $verifyStep.Contains('-WorkDir $kdWorkDir') | Should -BeTrue
+        $verifyStep.Contains('-WorkDir $controlWorkDir -NoKdSession') | Should -BeTrue
+        $verifyStep.IndexOf('-WorkDir $kdWorkDir') | Should -BeLessThan $verifyStep.IndexOf('-WorkDir $controlWorkDir -NoKdSession')
+        $verifyStep.Contains('verify-clean-out-control') | Should -BeTrue
+        # Only the KD pass decides the step: the control runs even
+        # when the KD pass failed, and the step throws only on the KD
+        # pass outcome.
+        $verifyStep.Contains('if ($kdFailed)') | Should -BeTrue
+        $verifyStep.Contains('clean QEMU verify (control pass, no KD) failed:') | Should -BeTrue
+    }
+
+    It 'uploads the control pass evidence with the clean verify artifacts' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $buildYml | Should -Match 'verify-clean-out-control/screenshots/\*\.ppm'
+        $buildYml | Should -Match 'verify-clean-out-control/micpe-bugcheck\.txt'
+        $buildYml | Should -Match 'verify-clean-out-control/micpe-qemu\.log'
+    }
+
+    It 'attaches the control pass evidence to the Release under distinct names' {
+        # The KD pass already owns shot-01..07.png and
+        # micpe-bugcheck.txt, so the control files are renamed to
+        # avoid asset collisions.
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $buildYml | Should -Match 'shot-control-'
+        $buildYml | Should -Match 'micpe-bugcheck-control\.txt'
+    }
+}

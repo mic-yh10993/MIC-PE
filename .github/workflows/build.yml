@@ -354,16 +354,51 @@ jobs:
             throw "Verify clean build in QEMU: OVMF firmware file not found at '$ovmf'"
           }
           $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
-          $result = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir "$env:GITHUB_WORKSPACE\verify-clean-out"
-          Write-Host ("clean QEMU verify: {0} of {1} screenshots in {2}" -f $result.ShotsTaken, $result.ShotsExpected, $result.ScreenshotDir)
+          # Round 29: the round 28 firmware freeze needs a no-KD
+          # control pass -- same ISO, same QEMU arguments, same
+          # screenshot timing; the only difference is that no debugger
+          # attaches to the KD serial port (the -NoKdSession switch
+          # also skips the pre-flight probe). The KD pass is the
+          # product gate and decides the step; the control pass is
+          # diagnostic evidence and never changes the verdict by
+          # itself. Each pass gets its own WorkDir so its screenshots,
+          # KD log and bugcheck report never overwrite the other's.
+          $kdWorkDir = "$env:GITHUB_WORKSPACE\verify-clean-out"
+          $controlWorkDir = "$env:GITHUB_WORKSPACE\verify-clean-out-control"
+          $kdFailed = $false
+          $kdError = ''
+          try {
+            $result = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir $kdWorkDir
+            Write-Host ("clean QEMU verify (KD pass): {0} of {1} screenshots in {2}" -f $result.ShotsTaken, $result.ShotsExpected, $result.ScreenshotDir)
+          }
+          catch {
+            $kdFailed = $true
+            $kdError = $_.Exception.Message
+            Write-Host ("clean QEMU verify (KD pass) failed: {0}" -f $kdError)
+          }
+          $controlFailed = $false
+          $controlError = ''
+          try {
+            $controlResult = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir $controlWorkDir -NoKdSession
+            Write-Host ("clean QEMU verify (control pass, no KD): {0} of {1} screenshots in {2}" -f $controlResult.ShotsTaken, $controlResult.ShotsExpected, $controlResult.ScreenshotDir)
+          }
+          catch {
+            $controlFailed = $true
+            $controlError = $_.Exception.Message
+            Write-Host ("clean QEMU verify (control pass, no KD) failed: {0}" -f $controlError)
+          }
           if ($env:GITHUB_STEP_SUMMARY) {
             @(
               '## MICPE clean rebuild — QEMU screenshots'
               ''
-              'Screenshots go to the Release for this run as shot-01..07.png (backup: the `micpe-clean-verify` artifact). shot-01..03 boot -> LogonUI, shot-04..05 desktop after login, shot-06 Start menu, shot-07 desktop. Review them for: Explorer up, taskbar rendered, desktop icons, LogonUI login, StartAllBack/Start11 in effect.'
+              'Screenshots go to the Release for this run as shot-01..07.png (KD pass) and shot-control-01..07.png (no-KD control pass); backup: the `micpe-clean-verify` artifact. shot-01..03 boot -> LogonUI, shot-04..05 desktop after login, shot-06 Start menu, shot-07 desktop. Review them for: Explorer up, taskbar rendered, desktop icons, LogonUI login, StartAllBack/Start11 in effect.'
               ''
-              "| Shots captured | ``$($result.ShotsTaken) of $($result.ShotsExpected)`` |"
+              "| KD pass | ``$(if ($kdFailed) { 'FAILED: ' + $kdError } else { 'passed' })`` |"
+              "| Control pass (no KD) | ``$(if ($controlFailed) { 'FAILED: ' + $controlError } else { 'passed' })`` |"
             ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+          if ($kdFailed) {
+            throw ("clean QEMU verify (KD pass) failed: {0}" -f $kdError)
           }
 
       # A native-logon image never writes the classic micpe-probe.txt (its
@@ -464,6 +499,11 @@ jobs:
             verify-clean-out/micpe-bugcheck.txt
             verify-clean-out/micpe-dumpdisk-read.vhdx
             verify-clean-out/micpe-dumpdisk-read.vhd
+            verify-clean-out-control/screenshots/*.ppm
+            verify-clean-out-control/micpe-qemu.log
+            verify-clean-out-control/micpe-bugcheck.txt
+            verify-clean-out-control/micpe-dumpdisk-read.vhdx
+            verify-clean-out-control/micpe-dumpdisk-read.vhd
           retention-days: 30
           if-no-files-found: warn
           compression-level: 0
@@ -549,6 +589,39 @@ jobs:
               Write-Host ("release extras: {0} files" -f $releaseExtras.Count)
             }
           }
+          # Round 29: the no-KD control pass evidence rides the same
+          # Release under distinct asset names -- the KD pass already
+          # owns shot-01..07.png and micpe-bugcheck.txt, so the
+          # control files are renamed to avoid collisions. The
+          # control dump disk is NOT uploaded here (same file name as
+          # the KD pass disk, and the bugcheck report is the primary
+          # evidence); it stays in the micpe-clean-verify artifact.
+          $controlExtrasAdded = $false
+          $controlShotDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out-control\screenshots'
+          if (Test-Path -LiteralPath $controlShotDir) {
+            $controlPngDir = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out-control\screenshots-png'
+            . ./src/ci/Export-CleanScreenshots.ps1
+            foreach ($controlShot in @(Export-CleanScreenshots -ScreenshotDir $controlShotDir -OutputDir $controlPngDir)) {
+              $controlLeaf = [System.IO.Path]::GetFileName($controlShot)
+              if ($controlLeaf -match '^shot-(.+)$') { $controlName = ('shot-control-{0}' -f $Matches[1]) } else { $controlName = ('control-{0}' -f $controlLeaf) }
+              $controlDest = Join-Path $controlPngDir $controlName
+              if ($controlShot -ne $controlDest) { Move-Item -LiteralPath $controlShot -Destination $controlDest -Force }
+              $releaseExtras += $controlDest
+              $controlExtrasAdded = $true
+            }
+            $controlReport = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out-control\micpe-bugcheck.txt'
+            if (Test-Path -LiteralPath $controlReport) {
+              $controlReportCopy = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out-control\micpe-bugcheck-control.txt'
+              Copy-Item -LiteralPath $controlReport -Destination $controlReportCopy -Force
+              $releaseExtras += $controlReportCopy
+              $controlExtrasAdded = $true
+            }
+            $controlQemuLog = Join-Path $env:GITHUB_WORKSPACE 'verify-clean-out-control\micpe-qemu.log'
+            if (Test-Path -LiteralPath $controlQemuLog) {
+              $releaseExtras += $controlQemuLog
+              $controlExtrasAdded = $true
+            }
+          }
           $notes = @"
           MICPE $stage $build ($date), run $runNumber.
           ISO: $([math]::Round($isoBytes / 1MB, 1)) MB, SHA256 $isoHash
@@ -558,6 +631,9 @@ jobs:
           "@
           if ($releaseExtras.Count -gt 0) {
             $notes += "`nQEMU screenshots from the clean verify run are attached to this release."
+            if ($controlExtrasAdded) {
+              $notes += "`nThe no-KD control pass screenshots (shot-control-*.png) and report (micpe-bugcheck-control.txt) are attached too."
+            }
           }
           # The upload itself lives in Publish-CleanRelease.ps1: core files
           # (ISO, boot.wim, checksums) go up with the release creation and

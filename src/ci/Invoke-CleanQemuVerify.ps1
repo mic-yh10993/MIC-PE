@@ -224,6 +224,45 @@ function Read-CleanMonitorUntilPrompt {
     return $text
 }
 
+function Format-CleanMonitorStatus {
+    # Round 29: turn the three monitor query responses (info status /
+    # info registers / info vcpus, asked before 'quit') into the
+    # report lines for micpe-bugcheck.txt. Pure formatter, no TCP:
+    # the caller queries the monitor and hands the raw text here.
+    # An empty response means the monitor said nothing; a failed
+    # query arrives as a 'query failed: ...' line from the caller.
+    # The trailing '(qemu)' prompt and blank lines are dropped.
+    [CmdletBinding()]
+    param(
+        [string] $InfoStatus,
+
+        [string] $InfoRegisters,
+
+        [string] $InfoVcpus
+    )
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($pair in @(
+        @{ Query = 'info status'; Response = $InfoStatus },
+        @{ Query = 'info registers'; Response = $InfoRegisters },
+        @{ Query = 'info vcpus'; Response = $InfoVcpus }
+    )) {
+        $lines.Add(('monitor {0}:' -f $pair.Query))
+        $text = $pair.Response
+        if ($text -and $text.Trim()) {
+            foreach ($rl in ($text -split "`r`n|`n")) {
+                $trimmed = $rl.Trim()
+                if ($trimmed -ne '' -and $trimmed -ne '(qemu)') {
+                    $lines.Add(('  {0}' -f $rl.TrimEnd()))
+                }
+            }
+        }
+        else {
+            $lines.Add('  (no response)')
+        }
+    }
+    return ,$lines.ToArray()
+}
+
 function Invoke-CleanGuestMemoryDump {
     # Round 23: capture a guest-memory dump through the QEMU monitor
     # while the guest is still halted on the blue screen. This is the
@@ -2014,6 +2053,10 @@ function Start-CleanKdSession {
     $errTask = $proc.StandardError.ReadToEndAsync()
     $proc | Add-Member -NotePropertyName 'KdOutTask' -NotePropertyValue $outTask -Force
     $proc | Add-Member -NotePropertyName 'KdErrTask' -NotePropertyValue $errTask -Force
+    # Round 29: remember which debugger binary this session runs, so
+    # the bugcheck report names it -- the round 28 report still said
+    # "round 26, cdb.exe" while the session actually ran kd.exe.
+    $proc | Add-Member -NotePropertyName 'KdDebuggerName' -NotePropertyValue ([System.IO.Path]::GetFileName($debugger)) -Force
     # Give the debugger a moment to connect or fail fast on bad
     # arguments; a process that already exited here never attached
     # to anything.
@@ -2411,7 +2454,16 @@ function Invoke-CleanCrashDumpCapture {
 
         [string] $KdConsoleOutPath,
 
-        [string] $KdConsoleErrPath
+        [string] $KdConsoleErrPath,
+
+        # Round 29: the debugger binary the live session ran
+        # ('kd.exe' / 'cdb.exe'; empty when no session ran) and the
+        # QEMU monitor status queried before 'quit'. Both ride the
+        # report so the round 28 freeze has a second witness.
+        [string] $KdDebuggerName,
+
+        [AllowEmptyCollection()]
+        [string[]] $MonitorStatus
     )
 
     $reportPath = Join-Path $WorkDir 'micpe-bugcheck.txt'
@@ -2427,6 +2479,14 @@ function Invoke-CleanCrashDumpCapture {
     # below are the observation that tests this expectation; if they
     # say otherwise, this line is the claim being falsified.
     $lines.Add('expected drive letter: C: (dump disk is if=ide,index=0, the first fixed disk; WinPE''s own RAM disk is X: -- design expectation, not an observation)')
+    # Round 29: the QEMU monitor status queried before 'quit' (info
+    # status / info registers / info vcpus) -- the second witness for
+    # the round 28 firmware freeze, next to the screenshots. Present
+    # even when there is no KD log and no dump disk.
+    if ($MonitorStatus -and $MonitorStatus.Count -gt 0) {
+        $lines.Add('--- QEMU monitor status (queried before quit) ---')
+        foreach ($ml in $MonitorStatus) { $lines.Add($ml) }
+    }
     $result = [pscustomobject]@{ DumpFound = $false; BugCheck = $null; ReportPath = $reportPath; DiskPath = $null }
     # Round 26: parse the live KD log first (before the disk path,
     # and outside the try so it runs even when there is no dump disk
@@ -2437,7 +2497,8 @@ function Invoke-CleanCrashDumpCapture {
         if (Test-Path -LiteralPath $KdLogPath) {
             $kdContent = Get-Content -LiteralPath $KdLogPath -Raw -ErrorAction SilentlyContinue
             $kdParsed = ConvertFrom-CleanKdLog -Content ($kdContent -as [string])
-            $lines.Add('--- live KD session (round 26, cdb.exe) ---')
+            $kdHeader = if ($KdDebuggerName) { ('--- live KD session ({0}) ---' -f $KdDebuggerName) } else { '--- live KD session ---' }
+            $lines.Add($kdHeader)
             if ($null -ne $kdParsed.BugCheck) {
                 $lines.Add(('RESULT (live KD): BugCheckCode={0} Arg1={1} Arg2={2} Arg3={3} Arg4={4}' -f $kdParsed.BugCheck.BugCheckCode, $kdParsed.BugCheck.Arg1, $kdParsed.BugCheck.Arg2, $kdParsed.BugCheck.Arg3, $kdParsed.BugCheck.Arg4))
                 $result.BugCheck = $kdParsed.BugCheck
@@ -2447,7 +2508,12 @@ function Invoke-CleanCrashDumpCapture {
             }
             else {
                 $lines.Add(('live KD produced no bugcheck parameters: {0}' -f $kdParsed.Reason))
-                if ($kdParsed.Connected) { $lines.Add('live KD: cdb did connect to the guest') }
+                # Note: '-or' on strings returns a Boolean in
+                # PowerShell, so the fallback needs an explicit if --
+                # ($KdDebuggerName -or 'the debugger') would print
+                # 'True' here.
+                $kdNameText = if ($KdDebuggerName) { $KdDebuggerName } else { 'the debugger' }
+                if ($kdParsed.Connected) { $lines.Add(('live KD: {0} did connect to the guest' -f $kdNameText)) }
                 if ($kdParsed.BrokeIn) { $lines.Add('live KD: the KeBugCheckEx breakpoint did fire') }
                 $tail = @(($kdContent -split "`r`n|`n") | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 20)
                 if ($tail.Count -gt 0) {
@@ -2906,6 +2972,37 @@ try {
     }
 }
 finally {
+    # Round 29: ask the monitor what state the guest is in BEFORE
+    # anything kills QEMU -- the round 28 freeze needs a second
+    # witness besides the screenshots: is the guest paused (held at
+    # the initial breakpoint by the debugger), running (spinning
+    # somewhere with no display output), or triple-faulted (dead)?
+    # Best-effort only; a dead monitor never changes the verdict.
+    # The text lands in micpe-bugcheck.txt via -MonitorStatus on
+    # the capture call below, and is also printed to the step log.
+    $monitorStatusLines = @()
+    try {
+        $monitorResponses = @{}
+        foreach ($monitorQuery in @('info status', 'info registers', 'info vcpus')) {
+            try {
+                # WaitForPromptSec (not -ReadResponse): the banner is
+                # drained first and the read runs until the command's
+                # own completion prompt, so a long 'info registers'
+                # output arrives whole instead of truncated at a
+                # 2 s read gap.
+                $monitorResponses[$monitorQuery] = Invoke-CleanMonitorCommand -Port $MonitorPort -Command $monitorQuery -WaitForPromptSec 10
+            }
+            catch {
+                $monitorResponses[$monitorQuery] = ('query failed: {0}' -f $_.Exception.Message)
+            }
+        }
+        $monitorStatusLines = Format-CleanMonitorStatus -InfoStatus $monitorResponses['info status'] -InfoRegisters $monitorResponses['info registers'] -InfoVcpus $monitorResponses['info vcpus']
+        Write-Host ($monitorStatusLines -join "`n")
+    }
+    catch {
+        Write-Host ("!!! monitor status query failed (diagnostic only): {0}" -f $_.Exception.Message)
+        $monitorStatusLines = @()
+    }
     # Round 23: while the guest is still halted on the blue screen,
     # snapshot its RAM through the monitor. The ELF dump is the
     # alternative parameter source when the guest never wrote a
@@ -2969,8 +3066,14 @@ finally {
         ($script:guestMemoryElf -and (Test-Path -LiteralPath $script:guestMemoryElf)) -or
         (Test-Path -LiteralPath $kdLog) -or
         (Test-Path -LiteralPath $kdProbeSummary)) {
+        # Round 29: name the debugger binary the session ran (empty
+        # when no session ran -- the control pass, or cdb missing).
+        $kdDebuggerName = ''
+        if ($script:kdProc -and $script:kdProc.PSObject.Properties['KdDebuggerName']) {
+            $kdDebuggerName = [string]$script:kdProc.KdDebuggerName
+        }
         try {
-            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog -KdProbePath $kdProbeSummary -KdConsoleOutPath $kdConsoleOut -KdConsoleErrPath $kdConsoleErr
+            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog -KdProbePath $kdProbeSummary -KdConsoleOutPath $kdConsoleOut -KdConsoleErrPath $kdConsoleErr -KdDebuggerName $kdDebuggerName -MonitorStatus @($monitorStatusLines)
         }
         catch {
             Write-Host "!!! crash-dump capture failed (diagnostic only, run verdict unchanged): $($_.Exception.Message)"
