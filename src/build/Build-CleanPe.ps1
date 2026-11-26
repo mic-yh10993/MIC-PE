@@ -1221,9 +1221,14 @@ function Set-CleanBcdKernelDebug {
     # the kernel send its debug output to COM1 at 115200, which QEMU
     # already captures to micpe-serial.log and the Release step already
     # attaches -- so the next blue screen leaves a KD trace in the
-    # Release instead of nothing. A bootlog (ntbtlog.txt) was considered
-    # and rejected: it lands in the FBWF overlay in RAM and is gone when
-    # QEMU exits. Runs on both BCD stores in the media tree (UEFI +
+    # Release instead of nothing. Round 26 adds a bootlog
+    # (ntbtlog.txt): the kernel writes one "Loaded driver ..." /
+    # "Did not load driver ..." line per driver to
+    # X:\Windows\ntbtlog.txt during boot. Round 16 rejected it
+    # because the file lands in the FBWF overlay in RAM and is gone
+    # when QEMU exits -- but the round 26 ELF scan reads it out of
+    # the guest-memory dump taken while the guest is halted on the
+    # blue screen, so the file's bytes in RAM are enough. Runs on both BCD stores in the media tree (UEFI +
     # BIOS); the QEMU verify boots UEFI, so the EFI BCD is the one that
     # matters. Kernel debugging with no debugger attached does not stop
     # the boot: the kernel sends KD packets to the port and carries on,
@@ -1254,8 +1259,13 @@ function Set-CleanBcdKernelDebug {
         Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /set debug failed for $bcd (exit $LASTEXITCODE)"
         & $BcdeditPath /store $bcd /dbgsettings serial debugport:1 baudrate:115200 | Out-Host
         Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD kernel debug: bcdedit /dbgsettings failed for $bcd (exit $LASTEXITCODE)"
+        # Round 26: bootlog Yes on the same entry (see the function
+        # comment: the ELF scan reads ntbtlog.txt out of guest RAM).
+        & $BcdeditPath /store $bcd /set '{default}' bootlog Yes | Out-Host
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "BCD bootlog: bcdedit /set bootlog failed for $bcd (exit $LASTEXITCODE)"
         $enum = & $BcdeditPath /store $bcd /enum '{default}' 2>&1 | Out-String
         Assert-True -Condition ($enum -match '(?m)^debug\s+Yes\s*$') -Message "BCD kernel debug: debug not confirmed on {default} in $bcd"
+        Assert-True -Condition ($enum -match '(?m)^bootlog\s+Yes\s*$') -Message "BCD bootlog: bootlog not confirmed on {default} in $bcd"
         $dbg = & $BcdeditPath /store $bcd /dbgsettings 2>&1 | Out-String
         Assert-True -Condition ($dbg -match 'Serial' -and $dbg -match '115200') -Message "BCD kernel debug: serial 115200 not confirmed in $bcd"
         Write-SubStep "BCD kernel debug: $bcd now debugs on COM1 at 115200"

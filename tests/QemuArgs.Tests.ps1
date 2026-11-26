@@ -1912,3 +1912,245 @@ with open(of, 'wb') as f:
         $scan.Contains('loose search: examined') | Should -BeTrue
     }
 }
+
+Describe 'Round 26 live KD session and bootlog search' {
+    BeforeAll {
+        # Same dot-source pattern as the round 21/22/23/24 blocks: the
+        # clean verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r26Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r26-$(Get-Random)"
+        $script:r26Share = Join-Path $script:r26Dir 'share'
+        New-Item -ItemType Directory -Path $script:r26Share -Force | Out-Null
+        $script:r26Iso = Join-Path $script:r26Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r26Iso -Force | Out-Null
+        $script:r26Work = Join-Path $script:r26Dir 'work'
+        New-Item -ItemType Directory -Path $script:r26Work -Force | Out-Null
+        $script:r26Code = Join-Path $script:r26Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r26Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r26Iso -OvmfPath $script:r26Code -WorkDir $script:r26Work
+
+        # A synthetic cdb -logo transcript of a 0x5A bugcheck caught
+        # live: connect line, the bu command echo (which contains the
+        # marker text inside its quotes -- the parser must not mistake
+        # it for the .echo output), the breakpoint hit with the register
+        # dump and the two `du` strings, then the bugcheck banner.
+        $script:r26KdLog = @'
+Microsoft (R) Windows Debugger Version 10.0.26100.1 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 12:00:00 2026), ptr64 TRUE
+Kernel Debugger connection established.
+kd> bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"
+kd> g
+*** KEBUGCHECKEX HIT ***
+rax=0000000000000000 rbx=ffffba8f4e9f8c50 rcx=000000000000005a rdx=0000000000000001
+r8=ffffba8f4e9f8c50  r9=ffffce06bf0caa90 r10=0000000000000000
+\Registry\Machine\SYSTEM\CurrentControlSet\Services\SomeDriver
+\SystemRoot\System32\drivers\SomeDriver.sys
+Evaluate expression: 18446744073709551640 = ffffffffc0000428
+*** Fatal System Error: 0x0000005a
+      (0x0000000000000001,0xffffba8f4e9f8c50,0xffffce06bf0caa90,0xffffffffc0000428)
+'@
+
+        # Mocked Rizin for the bootlog search: three "Loaded driver"
+        # hits, one "Did not load driver" hit at the highest address,
+        # and a `ps` read that returns the tail of the log from there.
+        $script:r26LoadedHits = @(0x20000, 0x21000, 0x22000)
+        $script:r26NotLoadedHits = @(0x23000)
+        $script:r26BootlogEmpty = $false
+        $script:r26PsOutput = @(
+            'Did not load driver \SystemRoot\System32\drivers\fltMgr.sys'
+            'Loaded driver \SystemRoot\System32\drivers\lastgood.sys'
+        ) -join "`r`n"
+        function Invoke-CleanRizinFile {
+            param(
+                [string] $RizinPath,
+                [string] $FilePath,
+                [string] $Commands,
+                [string] $WorkDir
+            )
+            if ($script:r26BootlogEmpty) { return '' }
+            if ($Commands -match '4c6f6164656420647269766572') {
+                return (($script:r26LoadedHits | ForEach-Object { ('0x{0:x} 4 hit.bytes.0' -f $_) }) -join "`n")
+            }
+            if ($Commands -match '446964206e6f74206c6f616420647269766572') {
+                return (($script:r26NotLoadedHits | ForEach-Object { ('0x{0:x} 4 hit.bytes.0' -f $_) }) -join "`n")
+            }
+            if ($Commands -match 'ps @') { return $script:r26PsOutput }
+            return ''
+        }
+    }
+
+    It 'parses the bugcheck banner and the two du strings out of a live KD log' {
+        $parsed = ConvertFrom-CleanKdLog -Content $script:r26KdLog
+        $parsed.BugCheck.BugCheckCode | Should -Be '0x0000005a'
+        $parsed.BugCheck.Arg1 | Should -Be '0x0000000000000001'
+        $parsed.BugCheck.Arg2 | Should -Be '0xffffba8f4e9f8c50'
+        $parsed.BugCheck.Arg3 | Should -Be '0xffffce06bf0caa90'
+        $parsed.BugCheck.Arg4 | Should -Be '0xffffffffc0000428'
+        $parsed.Arg2String | Should -Be '\Registry\Machine\SYSTEM\CurrentControlSet\Services\SomeDriver'
+        $parsed.Arg3String | Should -Be '\SystemRoot\System32\drivers\SomeDriver.sys'
+        $parsed.Connected | Should -BeTrue
+        $parsed.BrokeIn | Should -BeTrue
+    }
+
+    It 'does not mistake the bu command echo for the breakpoint firing' {
+        # The `kd> bu ...` line contains the marker text inside its
+        # quotes; a log that ends there must report BrokeIn false.
+        $log = @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 12:00:00 2026), ptr64 TRUE
+kd> bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"
+kd> g
+'@
+        $parsed = ConvertFrom-CleanKdLog -Content $log
+        $parsed.BrokeIn | Should -BeFalse
+        $parsed.BugCheck | Should -BeNullOrEmpty
+        $parsed.Reason | Should -Match 'breakpoint never fired'
+    }
+
+    It 'reports an empty KD log as empty instead of inventing parameters' {
+        $parsed = ConvertFrom-CleanKdLog -Content ''
+        $parsed.BugCheck | Should -BeNullOrEmpty
+        $parsed.Connected | Should -BeFalse
+        $parsed.Reason | Should -Match 'empty'
+    }
+
+    It 'reports a KD log that never connected (timeout branch)' {
+        # cdb retries the TCP connect and logs "Waiting to reconnect"
+        # until it is killed; the parser must say the session never
+        # connected, not guess at parameters.
+        $log = @'
+Microsoft (R) Windows Debugger Version 10.0.26100.1 AMD64
+Waiting to reconnect...
+Waiting to reconnect...
+'@
+        $parsed = ConvertFrom-CleanKdLog -Content $log
+        $parsed.BugCheck | Should -BeNullOrEmpty
+        $parsed.Connected | Should -BeFalse
+        $parsed.Reason | Should -Match 'never connected'
+    }
+
+    It 'reports a connected KD session whose breakpoint never fired' {
+        $log = @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 12:00:00 2026), ptr64 TRUE
+kd> g
+'@
+        $parsed = ConvertFrom-CleanKdLog -Content $log
+        $parsed.BugCheck | Should -BeNullOrEmpty
+        $parsed.Connected | Should -BeTrue
+        $parsed.Reason | Should -Match 'breakpoint never fired'
+    }
+
+    It 'reports a fired breakpoint with no banner instead of inventing parameters' {
+        $log = @'
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 12:00:00 2026), ptr64 TRUE
+*** KEBUGCHECKEX HIT ***
+rax=0000000000000000 rcx=000000000000005a
+'@
+        $parsed = ConvertFrom-CleanKdLog -Content $log
+        $parsed.BrokeIn | Should -BeTrue
+        $parsed.BugCheck | Should -BeNullOrEmpty
+        $parsed.Reason | Should -Match 'no bugcheck banner'
+    }
+
+    It 'returns null from Get-CleanCdbPath on a host without cdb' {
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'cdb.exe may genuinely be installed on a Windows host (the CI runner image ships it); the not-found branch is covered by the Linux run, and the Windows run covers the parser and wiring instead'
+        }
+        (Get-CleanCdbPath) | Should -BeNullOrEmpty
+    }
+
+    It 'Start-CleanKdSession returns null without throwing when cdb is missing (wiring failure branch)' {
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'same as the Get-CleanCdbPath test: cdb.exe may exist on Windows, and starting a real session here would leak a debugger process that retries its TCP connect forever'
+        }
+        $kdLog = Join-Path $script:r26Work 'micpe-kd.log'
+        $kdInit = Join-Path $script:r26Work 'kd-init.txt'
+        $proc = Start-CleanKdSession -KdPort '50001' -WorkDir $script:r26Work -KdLogPath $kdLog -InitScriptPath $kdInit
+        $proc | Should -BeNullOrEmpty
+        # The init script is only written once cdb is found.
+        (Test-Path -LiteralPath $kdInit) | Should -BeFalse
+    }
+
+    It 'wires the serial port to the KD TCP server instead of a file' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.Contains("'-serial', `"tcp:127.0.0.1:`$KdPort,server,nowait`"") | Should -BeTrue
+        $verify.Contains("'file:`$serialLog'") | Should -BeFalse
+        $verify | Should -Match "\[string\] \`$KdPort = '50001'"
+        $verify | Should -Match '\[switch\] \$NoKdSession'
+    }
+
+    It 'starts the KD session after the monitor is up and kills it before the capture parses its log' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify.IndexOf("'QEMU monitor is up; booting'") | Should -BeLessThan $verify.IndexOf('Start-CleanKdSession -KdPort')
+        $verify.IndexOf('Start-CleanKdSession -KdPort') | Should -BeLessThan $verify.IndexOf('Start-Sleep -Seconds $BootWaitSec')
+        # The kill sits in the finally block, after QEMU exits and
+        # before the capture call (so the -logo file is flushed when
+        # it is parsed).
+        $verify.IndexOf('$script:kdProc.Kill()') | Should -BeLessThan $verify.IndexOf('Invoke-CleanCrashDumpCapture -Qcow2Path')
+        $verify.Contains('-KdLogPath $kdLog') | Should -BeTrue
+        # The capture also runs when a KD log exists even if the disk
+        # and the ELF are both gone.
+        $verify.Contains('(Test-Path -LiteralPath $kdLog)') | Should -BeTrue
+    }
+
+    It 'uploads the KD log with the clean verify artifacts and the Release' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $buildYml | Should -Match 'verify-clean-out/micpe-kd\.log'
+        $buildYml | Should -Match "'micpe-kd\.log'"
+        # The old serial log is gone from the clean paths (the
+        # non-clean verify still produces it, so its entry stays).
+        $buildYml.Contains('verify-clean-out/micpe-serial.log') | Should -BeFalse
+    }
+
+    It 'writes the live KD parameters into micpe-bugcheck.txt when the disk and ELF are both absent' {
+        # The integration proof for the KD path: no qcow2, no ELF, only
+        # a KD log -- the capture must still parse it and write the
+        # RESULT line (the early return still runs the finally, which
+        # writes the report).
+        $kdLog = Join-Path $script:r26Work 'micpe-kd.log'
+        Set-Content -LiteralPath $kdLog -Value $script:r26KdLog -Encoding utf8
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r26Work -KdLogPath $kdLog
+        $result.BugCheck.BugCheckCode | Should -Be '0x0000005a'
+        $result.BugCheck.Arg2 | Should -Be '0xffffba8f4e9f8c50'
+        $report = Get-Content -LiteralPath (Join-Path $script:r26Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Match 'RESULT \(live KD\): BugCheckCode=0x0000005a'
+        $report | Should -Match 'Arg2 \(service registry path, live KD\): \\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\SomeDriver'
+        $report | Should -Match 'Arg3 \(driver image path, live KD\): \\SystemRoot\\System32\\drivers\\SomeDriver\.sys'
+    }
+
+    It 'writes the KD failure reason into micpe-bugcheck.txt when the log has no bugcheck' {
+        $kdLog = Join-Path $script:r26Work 'micpe-kd-empty.log'
+        Set-Content -LiteralPath $kdLog -Value 'Waiting to reconnect...' -Encoding utf8
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r26Work -KdLogPath $kdLog
+        $result.BugCheck | Should -BeNullOrEmpty
+        $report = Get-Content -LiteralPath (Join-Path $script:r26Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Match 'live KD produced no bugcheck parameters: KD never connected'
+    }
+
+    It 'reads the bootlog tail out of guest memory (mocked Rizin)' {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $found = Invoke-CleanBootlogSearch -RizinPath 'C:\fake\rizin.exe' -ElfPath (Join-Path $script:r26Work 'guest.elf') -WorkDir $script:r26Work -Lines $lines
+        $found.Found | Should -BeTrue
+        $found.LoadedCount | Should -Be 3
+        $found.NotLoadedCount | Should -Be 1
+        $found.LastLines.Count | Should -Be 2
+        ($lines -join "`n") | Should -Match 'bootlog tail \(highest hit, 0x23000, NotLoaded\)'
+        ($lines -join "`n") | Should -Match 'last driver loaded before the crash: \\SystemRoot\\System32\\drivers\\lastgood\.sys'
+    }
+
+    It 'reports the bootlog as missing when neither pattern hits' {
+        $script:r26BootlogEmpty = $true
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $found = Invoke-CleanBootlogSearch -RizinPath 'C:\fake\rizin.exe' -ElfPath (Join-Path $script:r26Work 'guest.elf') -WorkDir $script:r26Work -Lines $lines
+        $script:r26BootlogEmpty = $false
+        $found.Found | Should -BeFalse
+        ($lines -join "`n") | Should -Match 'bootlog NOT found in guest memory'
+    }
+
+    It 'calls the bootlog search from the ELF scan' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $scan = $verify.Substring($verify.IndexOf('function Invoke-CleanElfBugCheckScan'))
+        $scan.Contains('Invoke-CleanBootlogSearch -RizinPath $RizinPath -ElfPath $ElfPath -WorkDir $WorkDir -Lines $Lines') | Should -BeTrue
+    }
+}

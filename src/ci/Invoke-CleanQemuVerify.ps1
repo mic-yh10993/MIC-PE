@@ -50,6 +50,23 @@ param(
 
     [string] $MonitorPort = '4444',
 
+    # Round 26: live kernel-debugger (KD) serial port. The guest's
+    # COM1 (kernel debug, serial 115200, enabled on both BCDs since
+    # round 16) is wired to a TCP server here so cdb.exe can attach
+    # live and catch the 0x5A bugcheck the moment it fires; the
+    # monitor stays on $MonitorPort. The default 50001 is a high
+    # port nothing else on the runner uses. The round 24 serial log
+    # proved the kernel re-sends its initial breakpoint (26 identical
+    # packets) with no debugger attached and then stops sending KD
+    # packets entirely, so offline parsing of serial.log is dead --
+    # the debugger must be attached from the start.
+    [string] $KdPort = '50001',
+
+    # Round 26: skip the live KD session (escape hatch for a re-run
+    # if the debugger misbehaves in CI; the serial output is then
+    # discarded and the disk/ELF paths are the only evidence).
+    [switch] $NoKdSession,
+
     # Seconds to wait after QEMU start before the first screenshot, then
     # the gap between the boot screenshots. Boot to LogonUI on a hosted
     # runner is typically 60-180 s; the timeline below brackets it.
@@ -1317,6 +1334,11 @@ function Invoke-CleanElfBugCheckScan {
                 $Lines.Add(('loose search: examined {0} of {1} hit(s) ({2} accepted, {3} rejected)' -f $take, $looseHits.Count, $looseAccepted, $looseRejected))
             }
         }
+        # --- bootlog (round 26): the last driver loaded before the
+        # crash. Independent of the parameters above (a cross-check
+        # for them): the boot log is the only ordered record of which
+        # drivers got as far as loading.
+        $null = Invoke-CleanBootlogSearch -RizinPath $RizinPath -ElfPath $ElfPath -WorkDir $WorkDir -Lines $Lines
         $result.Candidates = $candidates.ToArray()
         $confirmed = @($candidates | Where-Object { $_.Valid })
         if ($confirmed.Count -gt 0) {
@@ -1335,6 +1357,89 @@ function Invoke-CleanElfBugCheckScan {
     }
     catch {
         $Lines.Add(('ELF memory scan failed: {0}' -f $_.Exception.Message))
+    }
+    return $result
+}
+
+function Invoke-CleanBootlogSearch {
+    # Round 26: searches the guest-memory ELF for the boot log
+    # (ntbtlog.txt) content. The BCD now sets bootlog Yes (round 26,
+    # Set-CleanBcdKernelDebug), so the kernel writes "Loaded driver
+    # ..." / "Did not load driver ..." lines to X:\Windows\ntbtlog.txt
+    # during boot. The file lives on the WIM RAM disk and vanishes
+    # when QEMU exits, but the ELF dump taken while the guest is
+    # halted on the blue screen still holds its bytes in RAM -- that
+    # is the only way to read it. Two ASCII searches; the highest
+    # address hit of either is the last log line written before the
+    # crash, read back with `ps` (its first lines are the tail of the
+    # boot sequence). Returns @{ Found; LoadedCount; NotLoadedCount;
+    # LastLines } (Found = $false when neither pattern hit). Never
+    # throws: a missing bootlog is itself a finding (logged, not
+    # thrown).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RizinPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ElfPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]] $Lines
+    )
+
+    $result = [pscustomobject]@{ Found = $false; LoadedCount = 0; NotLoadedCount = 0; LastLines = @() }
+    # ASCII hex: "Loaded driver" / "Did not load driver".
+    $loadedHex = '4c6f6164656420647269766572'
+    $notLoadedHex = '446964206e6f74206c6f616420647269766572'
+    try {
+        $loadedOut = Invoke-CleanRizinFile -RizinPath $RizinPath -FilePath $ElfPath -Commands ("/x $loadedHex") -WorkDir $WorkDir
+        $loadedHits = @(ConvertFrom-CleanRizinSearchHits -Output $loadedOut)
+        $result.LoadedCount = $loadedHits.Count
+        $Lines.Add(('bootlog search: "Loaded driver" {0} hit(s) in guest memory' -f $loadedHits.Count))
+        $notOut = Invoke-CleanRizinFile -RizinPath $RizinPath -FilePath $ElfPath -Commands ("/x $notLoadedHex") -WorkDir $WorkDir
+        $notHits = @(ConvertFrom-CleanRizinSearchHits -Output $notOut)
+        $result.NotLoadedCount = $notHits.Count
+        $Lines.Add(('bootlog search: "Did not load driver" {0} hit(s) in guest memory' -f $notHits.Count))
+        if ($loadedHits.Count -eq 0 -and $notHits.Count -eq 0) {
+            $Lines.Add('bootlog NOT found in guest memory: ntbtlog.txt was never written, or its RAM-disk backing is not in this dump (bootlog Yes may not have taken effect, or the log is not in the captured RAM)')
+            return $result
+        }
+        # The highest address of either pattern is the last log line
+        # written before the crash. (Do NOT use Measure-Object
+        # -Maximum here: it returns a Double, and "{0:x}" formatting
+        # a Double throws FormatException.)
+        $lastAddr = [UInt64]0
+        $lastKind = ''
+        foreach ($h in $loadedHits) { if ($h -gt $lastAddr) { $lastAddr = $h; $lastKind = 'Loaded' } }
+        foreach ($h in $notHits) { if ($h -gt $lastAddr) { $lastAddr = $h; $lastKind = 'NotLoaded' } }
+        # `ps` reads from there until a NUL (the end of the file's
+        # last cluster); its first lines are the tail of the boot
+        # sequence.
+        $psOut = Invoke-CleanRizinFile -RizinPath $RizinPath -FilePath $ElfPath -Commands ("ps @ 0x{0:x}" -f $lastAddr) -WorkDir $WorkDir
+        $tail = @(($psOut -split "`r`n|`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -First 15)
+        $bootLines = @($tail | Where-Object { $_ -match '^(Loaded driver|Did not load driver)\s' })
+        if ($bootLines.Count -gt 0) {
+            $result.Found = $true
+            $result.LastLines = $bootLines
+            $Lines.Add(('bootlog tail (highest hit, 0x{0:x}, {1}): last {2} bootlog line(s) before the crash:' -f $lastAddr, $lastKind, $bootLines.Count))
+            foreach ($bl in $bootLines) { $Lines.Add(('  {0}' -f $bl)) }
+            $lastLoaded = @($bootLines | Where-Object { $_ -match '^Loaded driver\s' } | Select-Object -Last 1)
+            if ($lastLoaded.Count -gt 0) {
+                $Lines.Add(('bootlog: last driver loaded before the crash: {0} (the failing driver is likely the next one that never got to log)' -f ($lastLoaded[0] -replace '^Loaded driver\s+', '')))
+            }
+        }
+        else {
+            $firstTail = if ($tail.Count -gt 0) { $tail[0] } else { '(empty)' }
+            $Lines.Add(('bootlog: highest hit at 0x{0:x} does not read back as bootlog lines (first line: {1}) -- the hit may be the "Loaded driver" format string inside ntoskrnl, not the log buffer' -f $lastAddr, $firstTail))
+        }
+    }
+    catch {
+        $Lines.Add(('bootlog search failed: {0}' -f $_.Exception.Message))
     }
     return $result
 }
@@ -1601,6 +1706,223 @@ function Get-CleanDiskSignature {
     }
 }
 
+function Get-CleanCdbPath {
+    # Round 26: locate cdb.exe (the console debugger from the
+    # Windows SDK / Debugging Tools for Windows). The windows-2025
+    # runner image installs the Windows Desktop Debuggers component
+    # (cdb.exe) with the Windows 11 SDK -- actions/runner-images
+    # Install-VisualStudio.ps1 enables OptionId.WindowsDesktopDebuggers
+    # -- so the standard SDK path is checked first and the PATH
+    # second (a manual SDK install). Returns $null (never throws)
+    # when cdb is not found: the KD session is best-effort and its
+    # absence is a finding in micpe-bugcheck.txt, not a failure.
+    [CmdletBinding()]
+    param()
+
+    $candidates = @(
+        'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+        'C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe'
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path -LiteralPath $c) { return $c }
+    }
+    $cmd = Get-Command -Name 'cdb.exe' -ErrorAction SilentlyContinue
+    if ($null -ne $cmd -and $cmd.Source) { return $cmd.Source }
+    return $null
+}
+
+function Start-CleanKdSession {
+    # Round 26: start cdb.exe as a background process attached to
+    # the guest's KD serial port (QEMU -serial tcp:127.0.0.1:$KdPort,
+    # server,nowait), with a log file and a script file that sets a
+    # deferred breakpoint on KeBugCheckEx and continues. Returns the
+    # Process object, or $null when cdb is missing or could not start
+    # (best-effort: the caller logs the reason and continues without
+    # live KD). The caller kills the process in the finally block
+    # (it exits on its own when QEMU quits and the TCP connection
+    # drops, but never rely on that).
+    #
+    # The debugger commands live in $InitScriptPath (a file, not a
+    # -c string): -c "$$><path>" is a single quote-free token, so no
+    # quoting layer can mangle the breakpoint's command list. The
+    # argv is built with ProcessStartInfo.ArgumentList, so each
+    # element is exactly one argument on any host (round 23 lesson:
+    # Start-Process -ArgumentList splits arguments on spaces on
+    # Linux). The init script itself:
+    #   bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"
+    #   g
+    # `bu` (not `bp`) is a deferred breakpoint: at the initial
+    # break-in the symbols may not be ready yet, and `bu` resolves
+    # via the export table (KeBugCheckEx is exported by ntoskrnl)
+    # and stays pending until it can bind. `r` prints the registers
+    # (rcx = bugcheck code, rdx = Arg1, r8 = Arg2, r9 = Arg3); the
+    # two `du` print the UNICODE_STRING contents Arg2/Arg3 point at
+    # (service registry path, driver image path); `?` prints the
+    # Arg4 NTSTATUS from the stack; the trailing `g` continues into
+    # the bugcheck, where cdb breaks again and logs the bugcheck
+    # banner. No `!analyze -v` (needs interactive work at the
+    # bugcheck break; a later round can add it). The bp commands use
+    # only `r`/`du`/`?`/`.echo`, none of which needs PDBs, so a slow
+    # symbol download cannot break the breakpoint -- it can only
+    # delay the `g` that resumes the boot.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $KdPort,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [Parameter(Mandatory = $true)]
+        [string] $KdLogPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $InitScriptPath
+    )
+
+    $cdbPath = Get-CleanCdbPath
+    if ($null -eq $cdbPath) {
+        Write-Host 'live KD session skipped: cdb.exe not found (no Windows SDK Debuggers on this host); continuing without live KD'
+        return $null
+    }
+    $initLines = @(
+        'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"'
+        'g'
+    )
+    $initLines | Set-Content -LiteralPath $InitScriptPath -Encoding ASCII
+    $symPath = ('SRV*{0}\kd-symbols*https://msdl.microsoft.com/download/symbols' -f $WorkDir)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $cdbPath
+    $psi.ArgumentList.Add('-k')
+    $psi.ArgumentList.Add(('com:ipport={0},port=127.0.0.1' -f $KdPort))
+    $psi.ArgumentList.Add('-y')
+    $psi.ArgumentList.Add($symPath)
+    $psi.ArgumentList.Add('-logo')
+    $psi.ArgumentList.Add($KdLogPath)
+    $psi.ArgumentList.Add('-c')
+    $psi.ArgumentList.Add(('$$><{0}' -f $InitScriptPath))
+    # No stdout/stderr redirect: cdb's transcript goes to the -logo
+    # file, and inheriting the step's console means the transcript is
+    # also visible in the step log; redirecting without a reader
+    # could deadlock on a full pipe buffer.
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    try {
+        $null = $proc.Start()
+    }
+    catch {
+        Write-Host "live KD session failed to start cdb.exe ($cdbPath): $($_.Exception.Message)"
+        return $null
+    }
+    # Give cdb a moment to connect or fail fast on bad arguments; a
+    # process that already exited here never attached to anything.
+    Start-Sleep -Seconds 5
+    if ($proc.HasExited) {
+        Write-Host ('live KD session: cdb.exe exited immediately (exit {0}); see {1} for the reason' -f $proc.ExitCode, $KdLogPath)
+        return $null
+    }
+    Write-Host ('live KD session started: cdb.exe (pid {0}) attached to 127.0.0.1:{1}, log {2}' -f $proc.Id, $KdPort, $KdLogPath)
+    return $proc
+}
+
+function ConvertFrom-CleanKdLog {
+    # Round 26: parses a cdb -logo session transcript for the 0x5A
+    # bugcheck. The transcript holds (a) the bugcheck banner the
+    # kernel prints when the debugger breaks in on KeBugCheckEx, and
+    # (b) the two `du` lines from the `bu nt!KeBugCheckEx` breakpoint
+    # (the UNICODE_STRING contents: service registry path and driver
+    # image path). The register dump and the `?` output (Arg4 from
+    # the stack) are in the log for manual cross-check but are not
+    # parsed -- the banner is authoritative (it comes from the
+    # kernel). Pure parser, unit-testable. Returns
+    # @{ BugCheck; Arg2String; Arg3String; Connected; BrokeIn;
+    # Reason } -- BugCheck is $null when the log has no bugcheck
+    # banner (KD never connected, never broke in, or the guest never
+    # bugchecked); Reason then says which, from the log's own lines,
+    # so the caller reports the failure instead of inventing
+    # parameters. The banner is authoritative (it comes from the
+    # kernel); the registers are corroboration only. The `?` output
+    # (Arg4 from the stack) is in the log for manual cross-check.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Content
+    )
+
+    $result = [pscustomobject]@{
+        BugCheck = $null
+        Arg2String = $null
+        Arg3String = $null
+        Connected = $false
+        BrokeIn = $false
+        Reason = 'KD log is empty (cdb produced no output)'
+    }
+    if ([string]::IsNullOrWhiteSpace($Content)) { return $result }
+    $lines = ($Content -split "`r`n|`n")
+    if ($Content -match 'Connected to Windows') { $result.Connected = $true }
+    $markerIdx = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        # The .echo output line itself (*** KEBUGCHECKEX HIT ***), not
+        # the `kd> bu ...` command echo, which contains the same text
+        # inside its quotes.
+        if ($lines[$i] -match '^\s*\*\*\* KEBUGCHECKEX HIT \*\*\*\s*$') { $markerIdx = $i; break }
+    }
+    $result.BrokeIn = ($markerIdx -ge 0)
+    # Bugcheck banner (cdb prints it when it breaks in on the bugcheck):
+    #   *** Fatal System Error: 0x0000005a
+    #         (0x0000000000000001,0xffff...,0xffff...,0xffffffffc0000428)
+    for ($i = 0; $i -lt ($lines.Count - 1); $i++) {
+        $m = [regex]::Match($lines[$i], 'Fatal System Error:\s*0x([0-9a-fA-F]+)')
+        if (-not $m.Success) { continue }
+        $a = [regex]::Match($lines[$i + 1], '\(\s*0x([0-9a-fA-F]+)\s*,\s*0x([0-9a-fA-F]+)\s*,\s*0x([0-9a-fA-F]+)\s*,\s*0x([0-9a-fA-F]+)\s*\)')
+        if ($a.Success) {
+            $result.BugCheck = [pscustomobject]@{
+                BugCheckCode = ('0x{0}' -f $m.Groups[1].Value.ToLowerInvariant())
+                Arg1 = ('0x{0}' -f $a.Groups[1].Value.ToLowerInvariant())
+                Arg2 = ('0x{0}' -f $a.Groups[2].Value.ToLowerInvariant())
+                Arg3 = ('0x{0}' -f $a.Groups[3].Value.ToLowerInvariant())
+                Arg4 = ('0x{0}' -f $a.Groups[4].Value.ToLowerInvariant())
+            }
+            $result.Reason = 'bugcheck banner found in the live KD log'
+            break
+        }
+    }
+    if ($markerIdx -ge 0) {
+        # Path-like lines after the marker are the two `du` outputs
+        # (first = Arg2's string, second = Arg3's): a bare string
+        # with no whitespace, starting with a backslash. The `r`
+        # output lines contain '=' and the `?` output starts with
+        # 'Evaluate expression:', so neither can match.
+        $paths = [System.Collections.Generic.List[string]]::new()
+        for ($i = $markerIdx; $i -lt $lines.Count; $i++) {
+            $t = $lines[$i].Trim()
+            if ($t -match '^\\[^\s]{7,}$') { $paths.Add($t) }
+        }
+        if ($paths.Count -ge 1) { $result.Arg2String = $paths[0] }
+        if ($paths.Count -ge 2) { $result.Arg3String = $paths[1] }
+        if ($null -eq $result.BugCheck) {
+            $result.Reason = 'the KeBugCheckEx breakpoint fired, but no bugcheck banner followed (cdb was killed before the banner, or the breakpoint fired on a different path)'
+        }
+    }
+    elseif ($null -eq $result.BugCheck) {
+        if (-not $result.Connected) {
+            if ($Content -match 'Waiting to reconnect|Waiting for reconnect|could not connect|Connection refused') {
+                $result.Reason = 'KD never connected to the guest (cdb could not reach the QEMU serial TCP port)'
+            }
+            else {
+                $result.Reason = 'KD never connected to the guest (no "Connected to Windows" in the log)'
+            }
+        }
+        else {
+            $result.Reason = 'KD connected, but the KeBugCheckEx breakpoint never fired (the guest never bugchecked, or the breakpoint did not resolve)'
+        }
+    }
+    return $result
+}
+
 function Invoke-CleanCrashDumpCapture {
     # Round 22: after QEMU exits, convert the dump disk back to VHDX,
     # attach it, and read the dedicated dump file the blue screen was
@@ -1660,7 +1982,13 @@ function Invoke-CleanCrashDumpCapture {
 
         [string] $RizinVersion = 'v0.9.1',
 
-        [string] $ElfPath
+        [string] $ElfPath,
+
+        # Round 26: the live KD session log (cdb.exe -logo). Parsed
+        # first, before the disk path: it is the most direct evidence
+        # (the kernel's own bugcheck banner), and when it yields a
+        # BugCheck the ELF scan is skipped like a good disk dump.
+        [string] $KdLogPath
     )
 
     $reportPath = Join-Path $WorkDir 'micpe-bugcheck.txt'
@@ -1677,6 +2005,38 @@ function Invoke-CleanCrashDumpCapture {
     # say otherwise, this line is the claim being falsified.
     $lines.Add('expected drive letter: C: (dump disk is if=ide,index=0, the first fixed disk; WinPE''s own RAM disk is X: -- design expectation, not an observation)')
     $result = [pscustomobject]@{ DumpFound = $false; BugCheck = $null; ReportPath = $reportPath; DiskPath = $null }
+    # Round 26: parse the live KD log first (before the disk path,
+    # and outside the try so it runs even when there is no dump disk
+    # to read back -- the early return below still runs the finally,
+    # which writes these lines). The caller kills cdb before calling
+    # this function, so the log is complete.
+    if ($KdLogPath) {
+        if (Test-Path -LiteralPath $KdLogPath) {
+            $kdContent = Get-Content -LiteralPath $KdLogPath -Raw -ErrorAction SilentlyContinue
+            $kdParsed = ConvertFrom-CleanKdLog -Content ($kdContent -as [string])
+            $lines.Add('--- live KD session (round 26, cdb.exe) ---')
+            if ($null -ne $kdParsed.BugCheck) {
+                $lines.Add(('RESULT (live KD): BugCheckCode={0} Arg1={1} Arg2={2} Arg3={3} Arg4={4}' -f $kdParsed.BugCheck.BugCheckCode, $kdParsed.BugCheck.Arg1, $kdParsed.BugCheck.Arg2, $kdParsed.BugCheck.Arg3, $kdParsed.BugCheck.Arg4))
+                $result.BugCheck = $kdParsed.BugCheck
+                $result.DumpFound = $true
+                if ($kdParsed.Arg2String) { $lines.Add(('Arg2 (service registry path, live KD): {0}' -f $kdParsed.Arg2String)) }
+                if ($kdParsed.Arg3String) { $lines.Add(('Arg3 (driver image path, live KD): {0}' -f $kdParsed.Arg3String)) }
+            }
+            else {
+                $lines.Add(('live KD produced no bugcheck parameters: {0}' -f $kdParsed.Reason))
+                if ($kdParsed.Connected) { $lines.Add('live KD: cdb did connect to the guest') }
+                if ($kdParsed.BrokeIn) { $lines.Add('live KD: the KeBugCheckEx breakpoint did fire') }
+                $tail = @(($kdContent -split "`r`n|`n") | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 20)
+                if ($tail.Count -gt 0) {
+                    $lines.Add('live KD log tail (last 20 non-empty lines; the full log is micpe-kd.log in the Release):')
+                    foreach ($tl in $tail) { $lines.Add(('  {0}' -f $tl)) }
+                }
+            }
+        }
+        else {
+            $lines.Add(('live KD session: no log file at {0} (cdb never started, or -NoKdSession)' -f $KdLogPath))
+        }
+    }
     $vhdx = Join-Path $WorkDir 'micpe-dumpdisk-read.vhdx'
     $vhd = Join-Path $WorkDir 'micpe-dumpdisk-read.vhd'
     $attachedLetter = $null
@@ -1740,7 +2100,7 @@ function Invoke-CleanCrashDumpCapture {
         if (-not (Test-Path -LiteralPath $dumpFile)) {
             $lines.Add('RESULT: NO DUMP FILE -- the blue screen did not write a dedicated dump file to the second disk.')
             $lines.Add('This is expected when the system booted cleanly (no bugcheck, nothing to write). It is a problem only when the screenshots show a blue screen; then the causes are: (1) the crash-dump stack was not initialised yet when the 0x5A fired at IopLoadDriver time; (2) the second disk was not C: in WinPE, so DedicatedDumpFile pointed at the wrong letter; (3) the disk was not enumerated in time. The disk was attached and readable, so the file really is absent.')
-            $lines.Add('Next step if the screenshots show a blue screen and this repeats: switch to the Rizin winkd KD session (backup plan) or re-check the drive letter with a WinPE command-line probe.')
+            $lines.Add('Next step if the screenshots show a blue screen and this repeats: read micpe-kd.log (live KD session, round 26) -- if it has no parameters, the session itself failed and its log says why. Re-checking the drive letter with a WinPE command-line probe is the remaining fallback.')
         }
         else {
             $size = (Get-Item -LiteralPath $dumpFile).Length
@@ -1845,7 +2205,11 @@ $varsTemplate = Find-CleanOvmfVars -CodePath $OvmfPath
 $varsPath = Join-Path $WorkDir 'OVMF_VARS.fd'
 Copy-Item -LiteralPath $varsTemplate -Destination $varsPath -Force
 
-$serialLog = Join-Path $WorkDir 'micpe-serial.log'
+# Round 26: the serial port now goes to cdb over TCP (see -serial
+# below), so there is no micpe-serial.log any more; the KD session
+# log (micpe-kd.log) is the replacement, uploaded by the workflow.
+$kdLog = Join-Path $WorkDir 'micpe-kd.log'
+$kdInit = Join-Path $WorkDir 'kd-init.txt'
 $qemuLog = Join-Path $WorkDir 'micpe-qemu.log'
 
 # Round 21: the crash-dump disk. Diagnostic only: a failure here must
@@ -1873,7 +2237,12 @@ $qemuArgs = @(
     '-no-shutdown'
     '-rtc', 'base=localtime'
     '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
-    '-serial', "file:$serialLog"
+    # Round 26: the guest COM1 (kernel debug) goes to a TCP server
+    # for the live KD session instead of a file; without a debugger
+    # the output is discarded (the old micpe-serial.log is gone --
+    # see micpe-kd.log). `server,nowait` means QEMU never blocks
+    # waiting for cdb to connect.
+    '-serial', "tcp:127.0.0.1:$KdPort,server,nowait"
     '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$OvmfPath"
     '-drive', "if=pflash,format=raw,unit=1,file=$varsPath"
     '-cdrom', $IsoPath
@@ -1898,6 +2267,7 @@ $shotIndex = 0
 $script:crashDumpResult = $null
 $script:blueScreenSeen = $false
 $script:guestMemoryElf = $null
+$script:kdProc = $null
 try {
     # Wait for the monitor to accept connections.
     $monitorUp = $false
@@ -1919,6 +2289,26 @@ try {
         throw 'QEMU monitor never came up within 120 s'
     }
     Write-Host 'QEMU monitor is up; booting'
+
+    # Round 26: attach the live KD session now, while the guest is
+    # still early in boot -- the kernel re-sends its initial
+    # breakpoint only for a while (round 24: 26 retries, then silence),
+    # so the debugger must be attached from the start. Best-effort
+    # only: a KD failure is logged, never throws, never changes the
+    # run's verdict.
+    if (-not $NoKdSession) {
+        try {
+            $script:kdProc = Start-CleanKdSession -KdPort $KdPort -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit
+            if ($null -eq $script:kdProc) { Write-Host '!!! live KD session not started; continuing without live KD (disk/ELF paths remain)' }
+        }
+        catch {
+            Write-Host "!!! live KD session failed to start (diagnostic only): $($_.Exception.Message)"
+            $script:kdProc = $null
+        }
+    }
+    else {
+        Write-Host 'live KD session disabled (-NoKdSession); the serial output is discarded'
+    }
 
     # Boot progress -> LogonUI.
     Start-Sleep -Seconds $BootWaitSec
@@ -2037,16 +2427,30 @@ finally {
             $qemu.Kill()
         }
     }
+    # Round 26: stop the live KD session now that QEMU has exited, so
+    # the -logo file is flushed before the capture parses it. cdb
+    # normally exits on its own when the TCP connection drops; the
+    # kill is the backstop (same shape as the QEMU kill above).
+    if ($script:kdProc -and -not $script:kdProc.HasExited) {
+        $script:kdProc.WaitForExit(10000)
+        if (-not $script:kdProc.HasExited) {
+            try { $script:kdProc.Kill() } catch {}
+        }
+    }
+    if ($script:kdProc) { try { $script:kdProc.Dispose() } catch {} }
     # Round 21: crash-dump capture. Runs even when the screen gate threw
     # (a blue screen is exactly when the dump matters); never changes the
     # run's verdict -- a capture failure is logged, not thrown.
     # Round 23: run it when there is a dump disk to read back OR a
     # guest-memory ELF to scan (the ELF scan lives inside the capture,
     # so the ELF-only case still gets parsed).
+    # Round 26: also run it when a KD log exists -- the log is parsed
+    # even when the disk and the ELF are both gone.
     if (($dumpDiskQcow2 -and (Test-Path -LiteralPath $dumpDiskQcow2)) -or
-        ($script:guestMemoryElf -and (Test-Path -LiteralPath $script:guestMemoryElf))) {
+        ($script:guestMemoryElf -and (Test-Path -LiteralPath $script:guestMemoryElf)) -or
+        (Test-Path -LiteralPath $kdLog)) {
         try {
-            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf
+            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog
         }
         catch {
             Write-Host "!!! crash-dump capture failed (diagnostic only, run verdict unchanged): $($_.Exception.Message)"

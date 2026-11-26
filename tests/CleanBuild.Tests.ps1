@@ -1177,6 +1177,19 @@ Describe 'Invoke-CleanWimBootStep (round 15: IO1 INITIALIZATION FAILED, WIM boot
         $isoStep.IndexOf('Set-CleanBcdKernelDebug') | Should -BeLessThan $isoStep.IndexOf('New-MicpeIso')
     }
 
+    It 'enables the bootlog on the default boot entry (round 26)' {
+        # Round 26: ntbtlog.txt lands on the WIM RAM disk and vanishes
+        # when QEMU exits (the round 16 reason for rejecting it), but
+        # the ELF scan reads it out of the guest-memory dump taken
+        # while the guest is halted on the blue screen, so the file's
+        # bytes in RAM are enough. The bootlog line is set and
+        # asserted in the same function as the kernel-debug lines.
+        $bcdFn = ($script:CleanScriptText -split 'function Set-CleanBcdKernelDebug')[1] -split 'function Invoke-CleanIsoStep' | Select-Object -First 1
+        $bcdFn | Should -Match "bootlog Yes"
+        $bcdFn | Should -Match '\^bootlog\\s\+Yes'
+        $bcdFn.IndexOf("bootlog Yes") | Should -BeLessThan $bcdFn.IndexOf("BCD bootlog: bootlog not confirmed")
+    }
+
     It 'Get-CleanRegistryValue returns $null for a missing value instead of throwing (round 17 guard fix)' {
         # Round 16 build died in Test-BootCriticalFiles with "The
         # property 'Start' cannot be found on this object": 43 of the
