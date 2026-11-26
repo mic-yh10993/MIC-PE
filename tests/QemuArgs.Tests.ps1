@@ -2218,12 +2218,15 @@ Describe 'Round 27 KD launch probe' {
         { Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r27Work -KdLogPath $script:r27KdLog -InitScriptPath $script:r27KdInit -Variant 'kd' } | Should -Throw
     }
 
-    It 'writes the two-line init script (breakpoint + go)' {
+    It 'writes the init script (breakpoint + go, with round 30 echo markers)' {
         Write-CleanKdInitScript -InitScriptPath $script:r27KdInit
         $lines = Get-Content -LiteralPath $script:r27KdInit
-        $lines.Count | Should -Be 2
-        $lines[0] | Should -Match 'bu nt!KeBugCheckEx'
-        $lines[1] | Should -Be 'g'
+        # Round 30: the two commands are still there (bu on line 2,
+        # g on line 5), bracketed by .echo markers that show where
+        # the script stopped. The round 30 block pins the exact order.
+        $lines.Count | Should -Be 6
+        $lines[1] | Should -Match 'bu nt!KeBugCheckEx'
+        $lines[4] | Should -Be 'g'
     }
 
     It 'finds kd.exe next to cdb.exe and returns null when it is absent' {
@@ -2521,21 +2524,21 @@ The transport connection between host kernel debugger and target Windows seems l
     It 'formats the three monitor responses as report lines, dropping the prompt and blank lines' {
         $lines = Format-CleanMonitorStatus -InfoStatus "VM status: paused (running)`n(qemu)" `
             -InfoRegisters "rax=0000000000000000 rcx=000000000000005a`nrip=0000000000000000`n(qemu)" `
-            -InfoVcpus "CPU #0: thread_id=12345`n(qemu)"
+            -InfoCpus "CPU #0: thread_id=12345`n(qemu)"
         ($lines -join "`n") | Should -Match 'monitor info status:'
         ($lines -join "`n") | Should -Match 'VM status: paused \(running\)'
         ($lines -join "`n") | Should -Match 'monitor info registers:'
         ($lines -join "`n") | Should -Match 'rax=0000000000000000 rcx=000000000000005a'
-        ($lines -join "`n") | Should -Match 'monitor info vcpus:'
+        ($lines -join "`n") | Should -Match 'monitor info cpus:'
         ($lines -join "`n") | Should -Match 'CPU #0: thread_id=12345'
         ($lines -join "`n") | Should -Not -Match '\(qemu\)'
     }
 
     It 'reports (no response) for a monitor query that said nothing' {
-        $lines = Format-CleanMonitorStatus -InfoStatus '' -InfoRegisters $null -InfoVcpus "  `n"
+        $lines = Format-CleanMonitorStatus -InfoStatus '' -InfoRegisters $null -InfoCpus "  `n"
         ($lines -join "`n") | Should -Match 'monitor info status:\s*\n  \(no response\)'
         ($lines -join "`n") | Should -Match 'monitor info registers:\s*\n  \(no response\)'
-        ($lines -join "`n") | Should -Match 'monitor info vcpus:\s*\n  \(no response\)'
+        ($lines -join "`n") | Should -Match 'monitor info cpus:\s*\n  \(no response\)'
     }
 
     It 'writes the monitor status into micpe-bugcheck.txt' {
@@ -2584,7 +2587,10 @@ The transport connection between host kernel debugger and target Windows seems l
         $finallyBlock = $verify.Substring($verify.LastIndexOf('finally {'))
         $finallyBlock.IndexOf("'info status'") | Should -BeLessThan $finallyBlock.IndexOf("'quit'")
         $finallyBlock.IndexOf("'info registers'") | Should -BeLessThan $finallyBlock.IndexOf("'quit'")
-        $finallyBlock.IndexOf("'info vcpus'") | Should -BeLessThan $finallyBlock.IndexOf("'quit'")
+        # Round 30: 'info vcpus' is an unknown command on this QEMU
+        # (both round 29 passes said so); the query is 'info cpus'.
+        $finallyBlock.IndexOf("'info cpus'") | Should -BeLessThan $finallyBlock.IndexOf("'quit'")
+        $finallyBlock.IndexOf("'info vcpus'") | Should -Be -1
         # The status query sits at the top of the finally, ahead of
         # the ELF dump, so it runs even when the dump throws.
         $finallyBlock.IndexOf('Format-CleanMonitorStatus') | Should -BeLessThan $finallyBlock.IndexOf('Invoke-CleanGuestMemoryDump')
@@ -2633,5 +2639,251 @@ The transport connection between host kernel debugger and target Windows seems l
         $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
         $buildYml | Should -Match 'shot-control-'
         $buildYml | Should -Match 'micpe-bugcheck-control\.txt'
+    }
+}
+
+Describe 'Round 30 KD transport drop: symbol pre-stage and init echo' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27-29 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r30Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r30-$(Get-Random)"
+        $script:r30Share = Join-Path $script:r30Dir 'share'
+        New-Item -ItemType Directory -Path $script:r30Share -Force | Out-Null
+        $script:r30Iso = Join-Path $script:r30Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r30Iso -Force | Out-Null
+        $script:r30Work = Join-Path $script:r30Dir 'work'
+        New-Item -ItemType Directory -Path $script:r30Work -Force | Out-Null
+        $script:r30Code = Join-Path $script:r30Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r30Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r30Iso -OvmfPath $script:r30Code -WorkDir $script:r30Work
+        $script:r30KdInit = Join-Path $script:r30Work 'kd-init.txt'
+        # Round 29 micpe-kd.log shape: connected, then the transport
+        # retry storm, no script output at all. The round 30 markers
+        # must be readable from exactly this shape with the echoes
+        # inserted at the right places.
+        $script:r30KdLogDrop = @'
+Microsoft (R) Windows Debugger Version 10.0.26100.9457 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 10:25:21.403 2026 (UTC + 0:00)), ptr64 TRUE
+Kernel Debugger connection established.
+Windows 10 Kernel Version 22621 MP (1 procs) Free x64
+Edition build lab: 22621.1.amd64fre.ni_release.220506-1250
+Kernel base = 0xfffff802`76600000 PsLoadedModuleList = 0xfffff802`77213450
+System Uptime: 0 days 0:00:00.015
+*** KD-INIT START ***
+*** KD-INIT BU ISSUED ***
+... Retry sending the same data packet for 64 times.
+The transport connection between host kernel debugger and target Windows seems lost.
+DBGHELP: Timeout to store: d:\a\mic-pe\mic-pe\verify-clean-out\kd-symbols*https://msdl.microsoft.com/download/symbols
+'@
+    }
+
+    It 'writes the init script with echo markers around bu and g, in order' {
+        # Rounds 28-29 left no trace of whether the -c script ran at
+        # all. The markers must bracket the two commands that matter:
+        # START first, then bu, then bl (shows whether the breakpoint
+        # resolved), then BU ISSUED, then g, then G ISSUED last (it
+        # only prints on the next break-in, so its absence with BU
+        # ISSUED present means `g` never got through).
+        Write-CleanKdInitScript -InitScriptPath $script:r30KdInit
+        $init = Get-Content -LiteralPath $script:r30KdInit
+        $init[0] | Should -Be '.echo *** KD-INIT START ***'
+        $init[1] | Should -Match '^bu nt!KeBugCheckEx '
+        $init[1] | Should -Match 'KEBUGCHECKEX HIT'
+        $init[2] | Should -Be 'bl'
+        $init[3] | Should -Be '.echo *** KD-INIT BU ISSUED ***'
+        $init[4] | Should -Be 'g'
+        $init[5] | Should -Be '.echo *** KD-INIT G ISSUED ***'
+        $init.Count | Should -Be 6
+    }
+
+    It 'locates symchk.exe next to cdb.exe and returns null without it' {
+        $sdk = Join-Path $script:r30Work 'fake-sdk-r30'
+        New-Item -ItemType Directory -Path $sdk -Force | Out-Null
+        $fakeCdb = Join-Path $sdk 'cdb.exe'
+        New-Item -ItemType File -Path $fakeCdb -Force | Out-Null
+        Get-CleanSymchkPath -CdbPath $fakeCdb | Should -BeNullOrEmpty
+        $fakeSymchk = Join-Path $sdk 'symchk.exe'
+        New-Item -ItemType File -Path $fakeSymchk -Force | Out-Null
+        Get-CleanSymchkPath -CdbPath $fakeCdb | Should -Be $fakeSymchk
+        Get-CleanSymchkPath -CdbPath '' | Should -BeNullOrEmpty
+    }
+
+    It 'detects a cached ntoskrnl.pdb in a GUID subfolder and reports an empty cache as cold' {
+        $cache = Join-Path $script:r30Work 'kd-symbols-test'
+        Test-CleanSymbolCache -CacheDir $cache | Should -BeFalse
+        New-Item -ItemType Directory -Path $cache -Force | Out-Null
+        Test-CleanSymbolCache -CacheDir $cache | Should -BeFalse
+        $guidDir = Join-Path $cache 'ntoskrnl.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1'
+        New-Item -ItemType Directory -Path $guidDir -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $guidDir 'ntoskrnl.pdb') -Force | Out-Null
+        Test-CleanSymbolCache -CacheDir $cache | Should -BeTrue
+    }
+
+    It 'reads the init echo markers from a connected-but-dropped KD log' {
+        $parsed = ConvertFrom-CleanKdLog -Content $script:r30KdLogDrop
+        $parsed.Connected | Should -BeTrue
+        $parsed.BugCheck | Should -BeNullOrEmpty
+        $parsed.InitStarted | Should -BeTrue
+        $parsed.InitBuIssued | Should -BeTrue
+        $parsed.InitGIssued | Should -BeFalse
+        # The reason must say where the session stopped: the script
+        # started but `g` never issued.
+        $parsed.Reason | Should -Match 'init script started, but g was never issued'
+    }
+
+    It 'keeps the round 26 reason for a log with no init markers (pre-round-30 logs)' {
+        $parsed = ConvertFrom-CleanKdLog -Content @'
+Microsoft (R) Windows Debugger Version 10.0.26100.9457 AMD64
+Connected to Windows 10 22621 x64 target at (Thu Nov 26 08:37:38.920 2026 (UTC + 0:00)), ptr64 TRUE
+Kernel Debugger connection established.
+... Retry sending the same data packet for 64 times.
+The transport connection between host kernel debugger and target Windows seems lost.
+'@
+        $parsed.Connected | Should -BeTrue
+        $parsed.InitStarted | Should -BeFalse
+        $parsed.InitBuIssued | Should -BeFalse
+        $parsed.InitGIssued | Should -BeFalse
+        $parsed.Reason | Should -Match 'breakpoint never fired'
+    }
+
+    It 'pre-stages ntoskrnl.pdb with fake wimlib and symchk and writes the summary' {
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'the fake wimlib/symchk are Python scripts with shebangs; they only execute directly on Linux'
+        }
+        $fakeWim = Join-Path $script:r30Work 'fake-boot.wim'
+        New-Item -ItemType File -Path $fakeWim -Force | Out-Null
+        $bin = Join-Path $script:r30Work 'fake-bin'
+        New-Item -ItemType Directory -Path $bin -Force | Out-Null
+        # Fake wimlib-imagex: `extract <wim> 1 \Windows\System32\ntoskrnl.exe --dest-dir=<dir>`
+        # drops a dummy ntoskrnl.exe in the dest dir.
+        $fakeWimlib = Join-Path $bin 'wimlib-imagex'
+        Set-Content -LiteralPath $fakeWimlib -Value @(
+            '#!/usr/bin/env python3'
+            'import sys, os'
+            'dest = [a for a in sys.argv if a.startswith("--dest-dir=")][0][len("--dest-dir="):]'
+            'os.makedirs(dest, exist_ok=True)'
+            'open(os.path.join(dest, "ntoskrnl.exe"), "wb").write(b"FAKE-NTOSKRNL")'
+        ) -Encoding ascii
+        chmod +x $fakeWimlib
+        # Fake symchk: `/v <ntoskrnl.exe> /s SRV*<cache>*https://msdl...`
+        # plants ntoskrnl.pdb in the cache the way the real symchk does
+        # (a GUID-named subfolder under ntoskrnl.pdb).
+        $fakeSymchk = Join-Path $bin 'symchk'
+        Set-Content -LiteralPath $fakeSymchk -Value @(
+            '#!/usr/bin/env python3'
+            'import sys, os'
+            'sym = sys.argv[sys.argv.index("/s") + 1]'
+            'cache = sym.split("*")[1]'
+            'd = os.path.join(cache, "ntoskrnl.pdb", "A1B2C3D4E5F60718293A4B5C6D7E8F90A1")'
+            'os.makedirs(d, exist_ok=True)'
+            'open(os.path.join(d, "ntoskrnl.pdb"), "wb").write(b"FAKE-PDB")'
+        ) -Encoding ascii
+        chmod +x $fakeSymchk
+        $work = Join-Path $script:r30Work 'prestage-work'
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $result = Invoke-CleanSymbolPrestage -BootWimPath $fakeWim -WorkDir $work -SymchkPath $fakeSymchk -WimlibPath $fakeWimlib -TimeoutSec 30
+        $result.Success | Should -BeTrue
+        $result.PdbPath | Should -Match 'ntoskrnl\.pdb'
+        Test-Path -LiteralPath $result.SummaryPath | Should -BeTrue
+        $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
+        $summary | Should -Match 'outcome: cached'
+        $summary | Should -Match 'ntoskrnl\.pdb: .*ntoskrnl\.pdb'
+        # Second call: already cached, no download needed.
+        $again = Invoke-CleanSymbolPrestage -BootWimPath $fakeWim -WorkDir $work -SymchkPath $fakeSymchk -WimlibPath $fakeWimlib -TimeoutSec 30
+        $again.Success | Should -BeTrue
+        $again.Reason | Should -Match 'already in the local cache'
+    }
+
+    It 'reports a failed symchk as not cached without throwing' {
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'the fake wimlib/symchk are Python scripts with shebangs; they only execute directly on Linux'
+        }
+        $fakeWim = Join-Path $script:r30Work 'fake-boot2.wim'
+        New-Item -ItemType File -Path $fakeWim -Force | Out-Null
+        $bin = Join-Path $script:r30Work 'fake-bin2'
+        New-Item -ItemType Directory -Path $bin -Force | Out-Null
+        $fakeWimlib = Join-Path $bin 'wimlib-imagex'
+        Set-Content -LiteralPath $fakeWimlib -Value @(
+            '#!/usr/bin/env python3'
+            'import sys, os'
+            'dest = [a for a in sys.argv if a.startswith("--dest-dir=")][0][len("--dest-dir="):]'
+            'os.makedirs(dest, exist_ok=True)'
+            'open(os.path.join(dest, "ntoskrnl.exe"), "wb").write(b"FAKE-NTOSKRNL")'
+        ) -Encoding ascii
+        chmod +x $fakeWimlib
+        # Fake symchk that fails: exit 1, no PDB planted.
+        $fakeSymchk = Join-Path $bin 'symchk'
+        Set-Content -LiteralPath $fakeSymchk -Value @('#!/usr/bin/env python3', 'import sys', 'sys.exit(1)') -Encoding ascii
+        chmod +x $fakeSymchk
+        $work = Join-Path $script:r30Work 'prestage-work-fail'
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        # A scriptblock runs in a child scope, so the result is
+        # captured through a hashtable (assignment inside the block
+        # would not reach the outer $result).
+        $out = @{}
+        { $out.Result = Invoke-CleanSymbolPrestage -BootWimPath $fakeWim -WorkDir $work -SymchkPath $fakeSymchk -WimlibPath $fakeWimlib -TimeoutSec 30 } | Should -Not -Throw
+        $result = $out.Result
+        $result.Success | Should -BeFalse
+        $result.Reason | Should -Match 'symchk exited 1'
+        Test-Path -LiteralPath $result.SummaryPath | Should -BeTrue
+        (Get-Content -LiteralPath $result.SummaryPath -Raw) | Should -Match 'outcome: not cached'
+    }
+
+    It 'skips the pre-stage without throwing when no boot.wim path is given' {
+        $work = Join-Path $script:r30Work 'prestage-work-nowskim'
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        # A scriptblock runs in a child scope, so the result is
+        # captured through a hashtable (assignment inside the block
+        # would not reach the outer $result).
+        $out = @{}
+        { $out.Result = Invoke-CleanSymbolPrestage -WorkDir $work -TimeoutSec 30 } | Should -Not -Throw
+        $result = $out.Result
+        $result.Success | Should -BeFalse
+        $result.Reason | Should -Match 'no boot.wim path'
+        Test-Path -LiteralPath $result.SummaryPath | Should -BeTrue
+    }
+
+    It 'writes the pre-stage summary into micpe-bugcheck.txt and reports the init markers' {
+        $kdLog = Join-Path $script:r30Work 'micpe-kd-drop.log'
+        Set-Content -LiteralPath $kdLog -Value $script:r30KdLogDrop -Encoding utf8
+        $summary = Join-Path $script:r30Work 'micpe-symbol-prestage.txt'
+        Set-Content -LiteralPath $summary -Value @('symbol pre-stage (round 30: ntoskrnl.pdb into the local KD symbol cache)', 'outcome: cached', 'reason: symchk fetched ntoskrnl.pdb into the local cache (the KD session will not download it live)', 'cache: C:\fake\kd-symbols', 'ntoskrnl.pdb: C:\fake\kd-symbols\ntoskrnl.pdb\A1B2C3D4E5F60718293A4B5C6D7E8F90A1\ntoskrnl.pdb') -Encoding utf8
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r30Work -KdLogPath $kdLog -KdDebuggerName 'kd.exe' -SymbolPrestagePath $summary
+        $result.BugCheck | Should -BeNullOrEmpty
+        $report = Get-Content -LiteralPath (Join-Path $script:r30Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Match '--- symbol pre-stage \(round 30, ntoskrnl\.pdb\) ---'
+        $report | Should -Match 'outcome: cached'
+        $report | Should -Match 'live KD init script: started=True, bu-issued=True, g-issued=False'
+        $report | Should -Match 'init script started, but g was never issued'
+    }
+
+    It 'omits the pre-stage section when no summary file exists' {
+        $result = Invoke-CleanCrashDumpCapture -QemuImgPath 'C:\fake\qemu-img.exe' -WorkDir $script:r30Work -SymbolPrestagePath (Join-Path $script:r30Work 'no-such-summary.txt')
+        $result.BugCheck | Should -BeNullOrEmpty
+        $report = Get-Content -LiteralPath (Join-Path $script:r30Work 'micpe-bugcheck.txt') -Raw
+        $report | Should -Not -Match 'symbol pre-stage'
+    }
+
+    It 'passes BootWimPath to the KD pass only, not the control pass, in the workflow' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $verifyStep = $buildYml.Substring($buildYml.IndexOf('- name: Verify clean build in QEMU'))
+        $verifyStep = $verifyStep.Substring(0, $verifyStep.IndexOf('- name: Verify (static)'))
+        # The KD pass is the gate: it pre-stages symbols from the
+        # boot.wim the Build step exported as BOOT_WIM_PATH.
+        $verifyStep.Contains('-BootWimPath $bootWim') | Should -BeTrue
+        $verifyStep.Contains('$bootWim = if ($env:BOOT_WIM_PATH)') | Should -BeTrue
+        # The control pass must stay identical to round 29: no
+        # pre-stage, no BootWimPath (its evidence is the no-KD
+        # baseline, and the pre-stage is KD-only by design).
+        $controlCall = $verifyStep.Substring($verifyStep.IndexOf('-WorkDir $controlWorkDir -NoKdSession'))
+        $controlCall.Contains('-BootWimPath') | Should -BeFalse
+    }
+
+    It 'uploads the pre-stage summary with the clean verify artifacts' {
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $buildYml | Should -Match 'verify-clean-out/micpe-symbol-prestage\.txt'
     }
 }

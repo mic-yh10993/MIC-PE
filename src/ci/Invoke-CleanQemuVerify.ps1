@@ -42,6 +42,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $WorkDir,
 
+    # Round 30: path to the built boot.wim, used only to pre-stage
+    # ntoskrnl symbols before the KD session (Invoke-CleanSymbolPrestage
+    # extracts ntoskrnl.exe from it and fetches its PDB into the local
+    # symbol cache). Optional: empty means the pre-stage is skipped
+    # with a warning and the session keeps the round 26 SRV* symbol
+    # path. The workflow passes $env:BOOT_WIM_PATH (exported by the
+    # Build step); local runs without it simply skip the pre-stage.
+    [string] $BootWimPath = '',
+
     [string] $QemuPath = 'qemu-system-x86_64',
 
     [int] $MemoryMb = 4096,
@@ -226,25 +235,27 @@ function Read-CleanMonitorUntilPrompt {
 
 function Format-CleanMonitorStatus {
     # Round 29: turn the three monitor query responses (info status /
-    # info registers / info vcpus, asked before 'quit') into the
+    # info registers / info cpus, asked before 'quit') into the
     # report lines for micpe-bugcheck.txt. Pure formatter, no TCP:
     # the caller queries the monitor and hands the raw text here.
     # An empty response means the monitor said nothing; a failed
     # query arrives as a 'query failed: ...' line from the caller.
     # The trailing '(qemu)' prompt and blank lines are dropped.
+    # Round 30: 'info vcpus' is an unknown command on this QEMU
+    # (both round 29 passes), so the third query is 'info cpus'.
     [CmdletBinding()]
     param(
         [string] $InfoStatus,
 
         [string] $InfoRegisters,
 
-        [string] $InfoVcpus
+        [string] $InfoCpus
     )
     $lines = [System.Collections.Generic.List[string]]::new()
     foreach ($pair in @(
         @{ Query = 'info status'; Response = $InfoStatus },
         @{ Query = 'info registers'; Response = $InfoRegisters },
-        @{ Query = 'info vcpus'; Response = $InfoVcpus }
+        @{ Query = 'info cpus'; Response = $InfoCpus }
     )) {
         $lines.Add(('monitor {0}:' -f $pair.Query))
         $text = $pair.Response
@@ -1776,14 +1787,29 @@ function Write-CleanKdInitScript {
     # KeBugCheckEx that prints the registers and the two
     # UNICODE_STRING arguments, then `g` to continue into the
     # bugcheck. Idempotent: the probe and the real session share it.
+    # Round 30: the script now echoes its own progress -- rounds
+    # 28-29 left no trace of whether the script ran at all (the log
+    # went straight from the kernel banner to the transport retry
+    # storm). The markers say exactly where it stopped: START means
+    # the -c script began executing; BU ISSUED means the `bu` line
+    # ran (and `bl` right after it shows whether the breakpoint
+    # resolved to an address or stayed deferred); G ISSUED prints on
+    # the NEXT break-in after `g` resumes the target, so its absence
+    # with BU ISSUED present means `g` never got through. The
+    # markers are plain .echo lines, so ConvertFrom-CleanKdLog can
+    # read them without parsing debugger output.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string] $InitScriptPath
     )
     $initLines = @(
+        '.echo *** KD-INIT START ***'
         'bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"'
+        'bl'
+        '.echo *** KD-INIT BU ISSUED ***'
         'g'
+        '.echo *** KD-INIT G ISSUED ***'
     )
     $initLines | Set-Content -LiteralPath $InitScriptPath -Encoding ASCII
 }
@@ -1876,6 +1902,217 @@ function Get-CleanDebuggerVersion {
     return $null
 }
 
+function Get-CleanSymchkPath {
+    # Round 30: locates symchk.exe in the same SDK Debuggers
+    # directory as cdb.exe (it ships with the debugger package), or
+    # $null when cdb.exe is missing or symchk.exe is not next to it.
+    # Pure lookup, never throws -- the pre-stage degrades to a
+    # warning without it.
+    [CmdletBinding()]
+    param(
+        [string] $CdbPath
+    )
+    if (-not $CdbPath) { return $null }
+    $dir = Split-Path -Parent $CdbPath
+    if (-not $dir) { return $null }
+    $symchk = Join-Path $dir 'symchk.exe'
+    if (Test-Path -LiteralPath $symchk -PathType Leaf) { return $symchk }
+    return $null
+}
+
+function Get-CleanWimlibPath {
+    # Round 30: locates wimlib-imagex (choco install, on PATH in CI)
+    # or $null when it is not installed. Never throws.
+    [CmdletBinding()]
+    param()
+    foreach ($name in @('wimlib-imagex.exe', 'wimlib-imagex')) {
+        $found = (Get-Command $name -ErrorAction SilentlyContinue).Source
+        if ($found) { return $found }
+    }
+    return $null
+}
+
+function Test-CleanSymbolCache {
+    # Round 30: $true when the local symbol cache already holds an
+    # ntoskrnl.pdb (symchk stores it under a GUID-named subfolder, so
+    # the check is recursive). Pure predicate, never throws.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CacheDir
+    )
+    if (-not (Test-Path -LiteralPath $CacheDir -PathType Container)) { return $false }
+    $pdb = Get-ChildItem -LiteralPath $CacheDir -Filter 'ntoskrnl.pdb' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    return ($null -ne $pdb)
+}
+
+function Expand-CleanNtoskrnlFromWim {
+    # Round 30: extracts \Windows\System32\ntoskrnl.exe from the
+    # built boot.wim into $DestDir via wimlib-imagex and returns the
+    # extracted path, or $null when wimlib is missing, the WIM is
+    # missing, or the extract fails. Never throws -- the caller logs
+    # the reason and continues without pre-staged symbols.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $BootWimPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WimlibPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $DestDir,
+
+        [int] $TimeoutSec = 60
+    )
+    if (-not (Test-Path -LiteralPath $BootWimPath -PathType Leaf)) {
+        Write-Host ('symbol pre-stage: boot.wim not found at {0}' -f $BootWimPath)
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $WimlibPath -PathType Leaf)) {
+        Write-Host ('symbol pre-stage: wimlib-imagex not found at {0}' -f $WimlibPath)
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $DestDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+    }
+    $outFile = Join-Path $DestDir 'wimlib-extract.out'
+    $errFile = Join-Path $DestDir 'wimlib-extract.err'
+    try {
+        $proc = Invoke-CleanProcessToFile -FilePath $WimlibPath `
+            -ArgumentList @('extract', $BootWimPath, '1', '\Windows\System32\ntoskrnl.exe', ('--dest-dir={0}' -f $DestDir)) `
+            -OutFile $outFile -ErrFile $errFile -TimeoutSec $TimeoutSec
+        if ($proc.ExitCode -ne 0) {
+            Write-Host ('symbol pre-stage: wimlib-imagex extract exited {0} (see {1})' -f $proc.ExitCode, $errFile)
+            return $null
+        }
+    }
+    catch {
+        Write-Host ('symbol pre-stage: wimlib-imagex extract failed: {0}' -f $_.Exception.Message)
+        return $null
+    }
+    $ntoskrnl = Join-Path $DestDir 'ntoskrnl.exe'
+    if (Test-Path -LiteralPath $ntoskrnl -PathType Leaf) { return $ntoskrnl }
+    Write-Host ('symbol pre-stage: wimlib-imagex exited 0 but no ntoskrnl.exe appeared in {0}' -f $DestDir)
+    return $null
+}
+
+function Invoke-CleanSymbolPrestage {
+    # Round 30: warms the local symbol cache with the ntoskrnl PDB
+    # BEFORE the KD session starts, so the `bu nt!KeBugCheckEx`
+    # breakpoint resolves from disk instead of stalling on a live
+    # msdl download. Evidence: the round 29 micpe-kd.log ends with
+    # 'DBGHELP: Timeout to store: ...\kd-symbols*https://msdl...'
+    # and the transport dropped right after the connection, before
+    # the init script printed anything. The real session keeps its
+    # round 26 SRV* symbol path unchanged (same argv, same cache
+    # directory) -- a warm cache simply means the download never
+    # happens. Steps: (1) skip when already cached; (2) extract
+    # ntoskrnl.exe from boot.wim; (3) symchk /v it against the SRV*
+    # store; (4) verify the PDB landed in the cache. Best-effort:
+    # any step may fail and the run continues with the round 29
+    # behaviour; the summary file (micpe-symbol-prestage.txt) always
+    # records the outcome so the check round can see whether the
+    # cache was warm. Returns @{ Success; Reason; PdbPath; CacheDir;
+    # SummaryPath }. Never throws.
+    [CmdletBinding()]
+    param(
+        [string] $BootWimPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [string] $SymchkPath,
+
+        [string] $WimlibPath,
+
+        [int] $TimeoutSec = 120
+    )
+    $cacheDir = Join-Path $WorkDir 'kd-symbols'
+    $summaryPath = Join-Path $WorkDir 'micpe-symbol-prestage.txt'
+    $finish = {
+        param($success, $reason, $pdbPath)
+        $summary = [System.Collections.Generic.List[string]]::new()
+        $summary.Add('symbol pre-stage (round 30: ntoskrnl.pdb into the local KD symbol cache)')
+        $summary.Add(('outcome: {0}' -f $(if ($success) { 'cached' } else { 'not cached' })))
+        $summary.Add(('reason: {0}' -f $reason))
+        $summary.Add(('cache: {0}' -f $cacheDir))
+        $summary.Add(('ntoskrnl.pdb: {0}' -f $(if ($pdbPath) { $pdbPath } else { 'none' })))
+        $summary | Set-Content -LiteralPath $summaryPath -Encoding ASCII
+        return [pscustomobject]@{
+            Success = $success; Reason = $reason; PdbPath = $pdbPath
+            CacheDir = $cacheDir; SummaryPath = $summaryPath
+        }
+    }
+    try {
+        if (Test-CleanSymbolCache -CacheDir $cacheDir) {
+            $pdb = Get-ChildItem -LiteralPath $cacheDir -Filter 'ntoskrnl.pdb' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $pdbPath = if ($pdb) { $pdb.FullName } else { $null }
+            return (& $finish $true 'ntoskrnl.pdb already in the local cache (no download needed)' $pdbPath)
+        }
+        if (-not $BootWimPath -or -not (Test-Path -LiteralPath $BootWimPath -PathType Leaf)) {
+            return (& $finish $false 'no boot.wim path (pre-stage skipped; the session keeps the SRV* symbol path)' $null)
+        }
+        $symchk = $SymchkPath
+        if (-not $symchk) {
+            $cdb = Get-CleanCdbPath
+            $symchk = Get-CleanSymchkPath -CdbPath $cdb
+        }
+        if (-not $symchk) {
+            return (& $finish $false 'symchk.exe not found (no Windows SDK Debuggers next to cdb.exe)' $null)
+        }
+        $wimlib = $WimlibPath
+        if (-not $wimlib) { $wimlib = Get-CleanWimlibPath }
+        if (-not $wimlib) {
+            return (& $finish $false 'wimlib-imagex not found (cannot extract ntoskrnl.exe from boot.wim)' $null)
+        }
+        $extractDir = Join-Path $WorkDir 'kd-symbol-prestage'
+        $ntoskrnl = Expand-CleanNtoskrnlFromWim -BootWimPath $BootWimPath -WimlibPath $wimlib -DestDir $extractDir -TimeoutSec 60
+        if (-not $ntoskrnl) {
+            return (& $finish $false 'could not extract ntoskrnl.exe from boot.wim (see wimlib-extract.err in kd-symbol-prestage)' $null)
+        }
+        $symPath = ('SRV*{0}*https://msdl.microsoft.com/download/symbols' -f $cacheDir)
+        $outFile = Join-Path $WorkDir 'micpe-symbol-prestage-symchk.out'
+        $errFile = Join-Path $WorkDir 'micpe-symbol-prestage-symchk.err'
+        $proc = $null
+        try {
+            $proc = Invoke-CleanProcessToFile -FilePath $symchk `
+                -ArgumentList @('/v', $ntoskrnl, '/s', $symPath) `
+                -OutFile $outFile -ErrFile $errFile -TimeoutSec $TimeoutSec
+        }
+        catch {
+            return (& $finish $false ('symchk failed to run (timeout {0} s or launch error: {1})' -f $TimeoutSec, $_.Exception.Message) $null)
+        }
+        if ($proc.ExitCode -ne 0) {
+            return (& $finish $false ('symchk exited {0} (see micpe-symbol-prestage-symchk.err)' -f $proc.ExitCode) $null)
+        }
+        if (Test-CleanSymbolCache -CacheDir $cacheDir) {
+            $pdb = Get-ChildItem -LiteralPath $cacheDir -Filter 'ntoskrnl.pdb' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $pdbPath = if ($pdb) { $pdb.FullName } else { $null }
+            return (& $finish $true 'symchk fetched ntoskrnl.pdb into the local cache (the KD session will not download it live)' $pdbPath)
+        }
+        return (& $finish $false 'symchk exited 0 but no ntoskrnl.pdb appeared in the cache' $null)
+    }
+    catch {
+        try { return (& $finish $false ('pre-stage aborted: {0}' -f $_.Exception.Message) $null) } catch {}
+        return [pscustomobject]@{
+            Success = $false; Reason = ('pre-stage aborted: {0}' -f $_.Exception.Message); PdbPath = $null
+            CacheDir = $cacheDir; SummaryPath = $summaryPath
+        }
+    }
+    finally {
+        # The extracted ntoskrnl.exe is a scratch copy; the cache
+        # holds the PDB. Best-effort cleanup, never throws.
+        try {
+            $extractDir = Join-Path $WorkDir 'kd-symbol-prestage'
+            if (Test-Path -LiteralPath $extractDir -PathType Container) {
+                Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {}
+    }
+}
+
 function Test-CleanTcpPort {
     # Round 27: is anything listening on 127.0.0.1:$Port? A short
     # TCP connect with a timeout; returns $false on refusal, timeout
@@ -1964,8 +2201,12 @@ function Start-CleanKdSession {
     # element is exactly one argument on any host (round 23 lesson:
     # Start-Process -ArgumentList splits arguments on spaces on
     # Linux). The init script itself:
+    #   .echo *** KD-INIT START ***
     #   bu nt!KeBugCheckEx ".echo *** KEBUGCHECKEX HIT ***; r; du poi(@r8+8); du poi(@r9+8); ? poi(@rsp+0x20); g"
+    #   bl
+    #   .echo *** KD-INIT BU ISSUED ***
     #   g
+    #   .echo *** KD-INIT G ISSUED ***
     # `bu` (not `bp`) is a deferred breakpoint: at the initial
     # break-in the symbols may not be ready yet, and `bu` resolves
     # via the export table (KeBugCheckEx is exported by ntoskrnl)
@@ -1977,9 +2218,16 @@ function Start-CleanKdSession {
     # the bugcheck, where cdb breaks again and logs the bugcheck
     # banner. No `!analyze -v` (needs interactive work at the
     # bugcheck break; a later round can add it). The bp commands use
-    # only `r`/`du`/`?`/`.echo`, none of which needs PDBs, so a slow
-    # symbol download cannot break the breakpoint -- it can only
-    # delay the `g` that resumes the boot.
+    # only `r`/`du`/`?`/`.echo`, none of which needs PDBs -- but
+    # round 29 showed the assumption "a slow symbol download can
+    # only delay `g`" is wrong in practice: the log went straight
+    # from the kernel banner to the transport retry storm with no
+    # script output at all, so the download stall (DBGHELP timeout
+    # on the SRV* store) coincides with the transport dropping.
+    # Round 30 therefore pre-stages the ntoskrnl PDB into the
+    # local cache before the session (Invoke-CleanSymbolPrestage)
+    # and the script echoes its own progress, so the log now shows
+    # exactly where the session stopped.
     #
     # Round 27: the argv comes from Get-CleanKdArgList (shared with
     # the probe, so a variant that survives the probe is launched
@@ -2294,13 +2542,20 @@ function ConvertFrom-CleanKdLog {
     # parsed -- the banner is authoritative (it comes from the
     # kernel). Pure parser, unit-testable. Returns
     # @{ BugCheck; Arg2String; Arg3String; Connected; BrokeIn;
-    # Reason } -- BugCheck is $null when the log has no bugcheck
-    # banner (KD never connected, never broke in, or the guest never
-    # bugchecked); Reason then says which, from the log's own lines,
-    # so the caller reports the failure instead of inventing
-    # parameters. The banner is authoritative (it comes from the
-    # kernel); the registers are corroboration only. The `?` output
-    # (Arg4 from the stack) is in the log for manual cross-check.
+    # InitStarted; InitBuIssued; InitGIssued; Reason } -- BugCheck is
+    # $null when the log has no bugcheck banner (KD never connected,
+    # never broke in, or the guest never bugchecked); Reason then
+    # says which, from the log's own lines, so the caller reports the
+    # failure instead of inventing parameters. The banner is
+    # authoritative (it comes from the kernel); the registers are
+    # corroboration only. The `?` output (Arg4 from the stack) is in
+    # the log for manual cross-check.
+    # Round 30: also reads the init script's .echo progress markers
+    # (KD-INIT START / BU ISSUED / G ISSUED) into InitStarted /
+    # InitBuIssued / InitGIssued, so the caller can tell whether the
+    # -c script ran at all and whether `g` got through. Logs from
+    # before round 30 have no markers, so all three stay $false and
+    # the Reason falls back to the round 26 wording.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -2314,6 +2569,9 @@ function ConvertFrom-CleanKdLog {
         Arg3String = $null
         Connected = $false
         BrokeIn = $false
+        InitStarted = $false
+        InitBuIssued = $false
+        InitGIssued = $false
         Reason = 'KD log is empty (cdb produced no output)'
     }
     if ([string]::IsNullOrWhiteSpace($Content)) { return $result }
@@ -2325,6 +2583,15 @@ function ConvertFrom-CleanKdLog {
         # the `kd> bu ...` command echo, which contains the same text
         # inside its quotes.
         if ($lines[$i] -match '^\s*\*\*\* KEBUGCHECKEX HIT \*\*\*\s*$') { $markerIdx = $i; break }
+    }
+    # Round 30 init-script progress markers (see
+    # Write-CleanKdInitScript). The .echo output lines are exact
+    # lines of their own, so the anchored match cannot hit the
+    # command echo inside the `bu` line.
+    foreach ($l in $lines) {
+        if ($l -match '^\s*\*\*\* KD-INIT START \*\*\*\s*$') { $result.InitStarted = $true }
+        if ($l -match '^\s*\*\*\* KD-INIT BU ISSUED \*\*\*\s*$') { $result.InitBuIssued = $true }
+        if ($l -match '^\s*\*\*\* KD-INIT G ISSUED \*\*\*\s*$') { $result.InitGIssued = $true }
     }
     $result.BrokeIn = ($markerIdx -ge 0)
     # Bugcheck banner (cdb prints it when it breaks in on the bugcheck):
@@ -2373,7 +2640,21 @@ function ConvertFrom-CleanKdLog {
             }
         }
         else {
-            $result.Reason = 'KD connected, but the KeBugCheckEx breakpoint never fired (the guest never bugchecked, or the breakpoint did not resolve)'
+            if ($result.InitStarted) {
+                # The round 30 init script echoes its own progress,
+                # so the log itself says where the session stopped:
+                # START with no G ISSUED means the transport dropped
+                # while the script ran and `g` never got through.
+                if ($result.InitGIssued) {
+                    $result.Reason = 'KD connected and the init script ran (g issued), but the KeBugCheckEx breakpoint never fired (the guest never bugchecked, or the breakpoint did not resolve)'
+                }
+                else {
+                    $result.Reason = 'KD connected and the init script started, but g was never issued (the transport dropped while the script ran)'
+                }
+            }
+            else {
+                $result.Reason = 'KD connected, but the KeBugCheckEx breakpoint never fired (the guest never bugchecked, or the breakpoint did not resolve)'
+            }
         }
     }
     return $result
@@ -2463,7 +2744,13 @@ function Invoke-CleanCrashDumpCapture {
         [string] $KdDebuggerName,
 
         [AllowEmptyCollection()]
-        [string[]] $MonitorStatus
+        [string[]] $MonitorStatus,
+
+        # Round 30: the symbol pre-stage summary
+        # (micpe-symbol-prestage.txt) -- whether ntoskrnl.pdb was
+        # already in the local cache when the KD session started.
+        # Empty when the pre-stage was skipped (no-KD control pass).
+        [string] $SymbolPrestagePath
     )
 
     $reportPath = Join-Path $WorkDir 'micpe-bugcheck.txt'
@@ -2486,6 +2773,20 @@ function Invoke-CleanCrashDumpCapture {
     if ($MonitorStatus -and $MonitorStatus.Count -gt 0) {
         $lines.Add('--- QEMU monitor status (queried before quit) ---')
         foreach ($ml in $MonitorStatus) { $lines.Add($ml) }
+    }
+    # Round 30: the symbol pre-stage outcome (was ntoskrnl.pdb
+    # already in the local cache when the KD session started?). The
+    # summary file is written by Invoke-CleanSymbolPrestage even when
+    # the pre-stage failed, so a missing file here means the
+    # pre-stage never ran (control pass, or an older script).
+    if ($SymbolPrestagePath -and (Test-Path -LiteralPath $SymbolPrestagePath)) {
+        $preContent = Get-Content -LiteralPath $SymbolPrestagePath -Raw -ErrorAction SilentlyContinue
+        if ($preContent) {
+            $lines.Add('--- symbol pre-stage (round 30, ntoskrnl.pdb) ---')
+            foreach ($pl in ($preContent -split "`r`n|`n")) {
+                if ($pl.Trim() -ne '') { $lines.Add(('  {0}' -f $pl)) }
+            }
+        }
     }
     $result = [pscustomobject]@{ DumpFound = $false; BugCheck = $null; ReportPath = $reportPath; DiskPath = $null }
     # Round 26: parse the live KD log first (before the disk path,
@@ -2515,6 +2816,14 @@ function Invoke-CleanCrashDumpCapture {
                 $kdNameText = if ($KdDebuggerName) { $KdDebuggerName } else { 'the debugger' }
                 if ($kdParsed.Connected) { $lines.Add(('live KD: {0} did connect to the guest' -f $kdNameText)) }
                 if ($kdParsed.BrokeIn) { $lines.Add('live KD: the KeBugCheckEx breakpoint did fire') }
+                # Round 30: the init script's own progress markers.
+                # Only when at least one marker is present -- logs
+                # from before round 30 have none, and reporting
+                # 'started=False' for them would be wrong (the old
+                # script had no markers to print).
+                if ($kdParsed.InitStarted -or $kdParsed.InitBuIssued -or $kdParsed.InitGIssued) {
+                    $lines.Add(('live KD init script: started={0}, bu-issued={1}, g-issued={2}' -f $kdParsed.InitStarted, $kdParsed.InitBuIssued, $kdParsed.InitGIssued))
+                }
                 $tail = @(($kdContent -split "`r`n|`n") | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 20)
                 if ($tail.Count -gt 0) {
                     $lines.Add('live KD log tail (last 20 non-empty lines; the full log is micpe-kd.log in the Release):')
@@ -2777,6 +3086,31 @@ if ($dumpDiskQcow2) {
     $qemuArgs += @('-drive', "file=$dumpDiskQcow2,format=qcow2,if=ide,index=0")
 }
 
+# Round 30: symbol pre-stage -- warm the local KD symbol cache
+# with the ntoskrnl PDB BEFORE the probe and the real session run,
+# so `bu nt!KeBugCheckEx` resolves from disk instead of stalling on
+# a live msdl download. Evidence: the round 29 micpe-kd.log ends
+# with 'DBGHELP: Timeout to store: ...\kd-symbols*https://msdl...'
+# and the transport dropped right after the connection. Best-effort
+# only: a failed pre-stage only warns, and the session keeps the
+# round 26 SRV* symbol path (the argv is unchanged either way).
+# The summary (micpe-symbol-prestage.txt) rides micpe-bugcheck.txt
+# via -SymbolPrestagePath on the capture call below.
+$symbolPrestageSummary = Join-Path $WorkDir 'micpe-symbol-prestage.txt'
+$script:symbolPrestageResult = $null
+if (-not $NoKdSession) {
+    try {
+        $script:symbolPrestageResult = Invoke-CleanSymbolPrestage -BootWimPath $BootWimPath -WorkDir $WorkDir -TimeoutSec 120
+        if ($null -ne $script:symbolPrestageResult) {
+            Write-Host ('symbol pre-stage: {0}' -f $script:symbolPrestageResult.Reason)
+        }
+    }
+    catch {
+        Write-Host "!!! symbol pre-stage failed (diagnostic only, continuing with the SRV* symbol path): $($_.Exception.Message)"
+        $script:symbolPrestageResult = $null
+    }
+}
+
 # Round 27: pre-flight KD probe -- reproduce the round 26 cdb launch
 # against a fake TCP listener BEFORE QEMU starts, so a failing argv
 # is diagnosed without touching the guest. Runs only when the KD
@@ -2983,7 +3317,10 @@ finally {
     $monitorStatusLines = @()
     try {
         $monitorResponses = @{}
-        foreach ($monitorQuery in @('info status', 'info registers', 'info vcpus')) {
+        # Round 30: info vcpus is an unknown command on this QEMU
+        # (both round 29 passes said so); info cpus is the one that
+        # answers.
+        foreach ($monitorQuery in @('info status', 'info registers', 'info cpus')) {
             try {
                 # WaitForPromptSec (not -ReadResponse): the banner is
                 # drained first and the read runs until the command's
@@ -2996,7 +3333,7 @@ finally {
                 $monitorResponses[$monitorQuery] = ('query failed: {0}' -f $_.Exception.Message)
             }
         }
-        $monitorStatusLines = Format-CleanMonitorStatus -InfoStatus $monitorResponses['info status'] -InfoRegisters $monitorResponses['info registers'] -InfoVcpus $monitorResponses['info vcpus']
+        $monitorStatusLines = Format-CleanMonitorStatus -InfoStatus $monitorResponses['info status'] -InfoRegisters $monitorResponses['info registers'] -InfoCpus $monitorResponses['info cpus']
         Write-Host ($monitorStatusLines -join "`n")
     }
     catch {
@@ -3073,7 +3410,7 @@ finally {
             $kdDebuggerName = [string]$script:kdProc.KdDebuggerName
         }
         try {
-            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog -KdProbePath $kdProbeSummary -KdConsoleOutPath $kdConsoleOut -KdConsoleErrPath $kdConsoleErr -KdDebuggerName $kdDebuggerName -MonitorStatus @($monitorStatusLines)
+            $script:crashDumpResult = Invoke-CleanCrashDumpCapture -Qcow2Path $dumpDiskQcow2 -QemuImgPath $qemuImgPath -WorkDir $WorkDir -ElfPath $script:guestMemoryElf -KdLogPath $kdLog -KdProbePath $kdProbeSummary -KdConsoleOutPath $kdConsoleOut -KdConsoleErrPath $kdConsoleErr -KdDebuggerName $kdDebuggerName -MonitorStatus @($monitorStatusLines) -SymbolPrestagePath $symbolPrestageSummary
         }
         catch {
             Write-Host "!!! crash-dump capture failed (diagnostic only, run verdict unchanged): $($_.Exception.Message)"

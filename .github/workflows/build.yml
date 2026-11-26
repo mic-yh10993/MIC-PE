@@ -365,10 +365,18 @@ jobs:
           # KD log and bugcheck report never overwrite the other's.
           $kdWorkDir = "$env:GITHUB_WORKSPACE\verify-clean-out"
           $controlWorkDir = "$env:GITHUB_WORKSPACE\verify-clean-out-control"
+          # Round 30: the KD pass pre-stages the ntoskrnl PDB before
+          # the session (Invoke-CleanSymbolPrestage) and needs the
+          # built boot.wim for it. The Build step exported
+          # BOOT_WIM_PATH to GITHUB_ENV; an empty value only skips
+          # the pre-stage with a warning, it never fails the pass.
+          # The control pass is unchanged (no BootWimPath, no
+          # pre-stage): it must stay identical to round 29.
+          $bootWim = if ($env:BOOT_WIM_PATH) { $env:BOOT_WIM_PATH } else { '' }
           $kdFailed = $false
           $kdError = ''
           try {
-            $result = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir $kdWorkDir
+            $result = ./src/ci/Invoke-CleanQemuVerify.ps1 -IsoPath $iso -OvmfPath $ovmf -QemuPath $qemu -WorkDir $kdWorkDir -BootWimPath $bootWim
             Write-Host ("clean QEMU verify (KD pass): {0} of {1} screenshots in {2}" -f $result.ShotsTaken, $result.ShotsExpected, $result.ScreenshotDir)
           }
           catch {
@@ -495,6 +503,7 @@ jobs:
             verify-clean-out/micpe-kd-console.err
             verify-clean-out/micpe-kd-probe.txt
             verify-clean-out/micpe-kd-probe-*
+            verify-clean-out/micpe-symbol-prestage.txt
             verify-clean-out/micpe-qemu.log
             verify-clean-out/micpe-bugcheck.txt
             verify-clean-out/micpe-dumpdisk-read.vhdx
