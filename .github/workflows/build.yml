@@ -502,7 +502,7 @@ jobs:
           $isoHash = (Get-FileHash -LiteralPath $iso -Algorithm SHA256).Hash.ToLower()
           $wimHash = (Get-FileHash -LiteralPath $wim -Algorithm SHA256).Hash.ToLower()
           $checksums = Join-Path $env:GITHUB_WORKSPACE 'checksums.sha256'
-          @("$isoHash  MICPE.iso", "$wimHash  boot.wim") |
+          @("$isoHash  $(Split-Path -Leaf $iso)", "$wimHash  boot.wim") |
               Set-Content -LiteralPath $checksums -Encoding ASCII
           # QEMU screenshots (clean rebuild only): convert the PPM evidence
           # to PNG and attach it to this same Release. Run 45432615549

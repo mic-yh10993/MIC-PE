@@ -2410,3 +2410,77 @@ Describe 'Round 27 KD launch probe' {
         $report | Should -Match 'Waiting to reconnect'
     }
 }
+
+Describe 'Round 28 KD probe winner wiring' {
+    BeforeAll {
+        # Same dot-source pattern as the round 27 block: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r28Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r28-$(Get-Random)"
+        $script:r28Share = Join-Path $script:r28Dir 'share'
+        New-Item -ItemType Directory -Path $script:r28Share -Force | Out-Null
+        $script:r28Iso = Join-Path $script:r28Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r28Iso -Force | Out-Null
+        $script:r28Work = Join-Path $script:r28Dir 'work'
+        New-Item -ItemType Directory -Path $script:r28Work -Force | Out-Null
+        $script:r28Code = Join-Path $script:r28Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r28Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r28Iso -OvmfPath $script:r28Code -WorkDir $script:r28Work
+        $script:r28Pwsh = (Get-Process -Id $PID).Path
+        $script:r28KdLog = Join-Path $script:r28Work 'micpe-kd.log'
+        $script:r28KdInit = Join-Path $script:r28Work 'kd-init.txt'
+    }
+
+    It 'returns the argv variant (not the probe label) when kd.exe wins' {
+        # Round 27 bug: the probe returned the winning LABEL ('kd')
+        # as Variant, and Start-CleanKdSession's ValidateSet rightly
+        # rejected it ('kd' is a binary choice, not an argv shape),
+        # so the real session never started. The probe must return
+        # the argv variant ('baseline' for the kd winner) with the
+        # kd.exe path -- the exact value that reaches the session.
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'the fake kd.exe is a Python script with a shebang; it only executes directly on Linux. The wiring is still covered by the session-variant rejection test below'
+        }
+        $sdk = Join-Path $script:r28Work 'fake-sdk'
+        New-Item -ItemType Directory -Path $sdk -Force | Out-Null
+        # Fake cdb.exe: a symlink to pwsh, which rejects the unknown
+        # -k switch and exits fast (round 27 behaviour). Fake kd.exe:
+        # a Python script that ignores its argv and sleeps, so the
+        # kd variant is the first survivor.
+        $fakeCdb = Join-Path $sdk 'cdb.exe'
+        New-Item -ItemType SymbolicLink -Path $fakeCdb -Target $script:r28Pwsh | Out-Null
+        $fakeKd = Join-Path $sdk 'kd.exe'
+        Set-Content -LiteralPath $fakeKd -Value @('#!/usr/bin/env python3', 'import time', 'time.sleep(30)') -Encoding ascii
+        chmod +x $fakeKd
+        $result = Invoke-CleanKdProbe -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit `
+            -ProbePort 50197 -ObserveSeconds 2 -CdbPath $fakeCdb
+        $result.Label | Should -Be 'kd'
+        $result.Variant | Should -Be 'baseline'
+        $result.DebuggerPath | Should -Be $fakeKd
+        $summary = Get-Content -LiteralPath $result.SummaryPath -Raw
+        $summary | Should -Match 'result: variant kd \(.*kd\.exe\) selected for the real session'
+        # The returned Variant must be accepted downstream: this is
+        # the exact value Start-CleanKdSession hands to
+        # Get-CleanKdArgList, so it must not throw here.
+        { Get-CleanKdArgList -KdPort '50001' -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit -Variant $result.Variant } | Should -Not -Throw
+    }
+
+    It 'rejects the kd label as a session variant (the probe translates it first)' {
+        # The session takes an argv variant; 'kd' is a probe label
+        # (binary choice), not an argv shape. If the probe ever
+        # handed 'kd' to the session again, this must fail loudly
+        # instead of dying silently in CI.
+        { Start-CleanKdSession -KdPort '50001' -WorkDir $script:r28Work -KdLogPath $script:r28KdLog -InitScriptPath $script:r28KdInit `
+            -DebuggerPath $script:r28Pwsh -Variant 'kd' -StartupWaitSec 1 } | Should -Throw
+    }
+
+    It 'uses the real ISO file name in checksums.sha256' {
+        # Round 27: checksums.sha256 said MICPE.iso while the
+        # Release asset is MICPE-clean.iso (hashes matched, names
+        # did not). The name must come from the built ISO path, not
+        # a hardcoded string.
+        $buildYml = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\build.yml') -Raw
+        $buildYml.Contains('$(Split-Path -Leaf $iso)') | Should -BeTrue
+        $buildYml.Contains('"$isoHash  MICPE.iso"') | Should -BeFalse
+    }
+}

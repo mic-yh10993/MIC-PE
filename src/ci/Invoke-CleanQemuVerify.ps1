@@ -2111,6 +2111,14 @@ function Invoke-CleanKdProbe {
     # the listener cannot start (probe inconclusive: the caller falls
     # back to the round 26 behaviour). Never throws for a debugger
     # failure; only a broken listener setup returns $null.
+    # Round 28: the returned Variant is the ARGV variant for the
+    # real session, never a probe label. The variants table splits
+    # Label from Variant on purpose -- 'kd' wins with the baseline
+    # argv and kd.exe as the binary -- and round 27 returned the
+    # label instead, which Start-CleanKdSession's Variant
+    # ValidateSet correctly rejected ('kd' is a binary choice, not
+    # an argv shape). Label carries the winning probe label for the
+    # summary and the call-site log only.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -2149,6 +2157,7 @@ function Invoke-CleanKdProbe {
     }
     $attempts = @()
     $winner = $null
+    $winnerLabel = $null
     $winnerDebugger = $null
     try {
         $kdExe = Get-CleanKdPath -CdbPath $cdb
@@ -2175,7 +2184,14 @@ function Invoke-CleanKdProbe {
                     Write-Host 'KD probe: only the no--c variant stays alive -- the -c token is the trigger (probe-only, never used for the real session)'
                 }
                 else {
-                    $winner = $v.Label
+                    # Round 28: keep the ARGV variant, not the probe
+                    # label. 'kd' wins with the baseline argv and
+                    # kd.exe as the binary; handing the label 'kd'
+                    # to Start-CleanKdSession was the round 27
+                    # failure (its Variant ValidateSet rightly
+                    # rejects a binary label as an argv shape).
+                    $winner = $v.Variant
+                    $winnerLabel = $v.Label
                     $winnerDebugger = $v.Debugger
                     Write-Host ('KD probe: variant {0} stays alive ({1} s); using it for the real session' -f $v.Label, $ObserveSeconds)
                 }
@@ -2213,13 +2229,13 @@ function Invoke-CleanKdProbe {
         elseif ($a.Error) { $summary.Add(('variant {0}: FAILED to launch ({1})' -f $a.Label, $a.Error)) }
         else { $summary.Add(('variant {0}: EXITED fast (exit {1}); console: {2} / {3}' -f $a.Label, $a.ExitCode, $a.OutFile, $a.ErrFile)) }
     }
-    if ($winner) { $summary.Add(('result: variant {0} ({1}) selected for the real session' -f $winner, $winnerDebugger)) }
+    if ($winner) { $summary.Add(('result: variant {0} ({1}) selected for the real session' -f $winnerLabel, $winnerDebugger)) }
     elseif (@($attempts | Where-Object { $_.Alive }).Count -gt 0) { $summary.Add('result: only the no--c variant stays alive -- the -c token is the trigger; the real KD session is disabled this run') }
     else { $summary.Add('result: no variant stays alive; the real KD session is disabled this run') }
     $summary | Set-Content -LiteralPath $summaryPath -Encoding ASCII
     Write-Host ('KD probe summary: {0}' -f $summaryPath)
     return [pscustomobject]@{
-        Variant = $winner; DebuggerPath = $winnerDebugger
+        Variant = $winner; Label = $winnerLabel; DebuggerPath = $winnerDebugger
         Attempts = $attempts; SummaryPath = $summaryPath
     }
 }
@@ -2704,7 +2720,12 @@ if (-not $NoKdSession) {
     try {
         $script:kdProbeResult = Invoke-CleanKdProbe -WorkDir $WorkDir -KdLogPath $kdLog -InitScriptPath $kdInit
         if ($null -ne $script:kdProbeResult -and $null -ne $script:kdProbeResult.Variant) {
-            Write-Host ('KD probe: using variant {0} ({1}) for the real session' -f $script:kdProbeResult.Variant, $script:kdProbeResult.DebuggerPath)
+            # Round 28: log the probe label ('kd') so this line
+            # matches micpe-kd-probe.txt; Variant is the argv shape
+            # ('baseline' for the kd winner) and goes to the session.
+            $probeLabel = $script:kdProbeResult.Label
+            if ($null -eq $probeLabel) { $probeLabel = $script:kdProbeResult.Variant }
+            Write-Host ('KD probe: using variant {0} ({1}) for the real session' -f $probeLabel, $script:kdProbeResult.DebuggerPath)
         }
         elseif ($null -ne $script:kdProbeResult) {
             Write-Host 'KD probe: no variant stays alive; the real KD session is disabled this run (see micpe-kd-probe.txt)'
