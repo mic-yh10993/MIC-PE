@@ -1031,6 +1031,72 @@ function Test-CleanKdbgCandidate {
     return [pscustomobject]@{ Valid = $true; Reason = 'KDBG accepted' }
 }
 
+function Test-CleanElfCore {
+    # Validates an ELF64 core dump header + program headers by parsing
+    # them directly (no Rizin): magic, 64-bit class, little-endian,
+    # ET_CORE type, and the PT_LOAD segments (count + total mapped
+    # bytes). Round 23's scan ran Rizin without checking whether the
+    # 4.3 GB ELF was even well-formed; a truncated or unmapped dump
+    # would silently yield 0 hits. Only the header + program-header
+    # table are read (a few KB), never the whole file, so this is cheap
+    # even on a 4 GB dump. Returns @{ Valid; Segments; MappedBytes;
+    # Reason }. Never throws: a read failure is itself a finding.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ElfPath
+    )
+
+    $result = [pscustomobject]@{ Valid = $false; Segments = 0; MappedBytes = [UInt64]0; Reason = '' }
+    try {
+        $item = Get-Item -LiteralPath $ElfPath -ErrorAction Stop
+        if ($item.Length -lt 64) { $result.Reason = 'file is smaller than an ELF64 header (64 bytes)'; return $result }
+        $fs = [System.IO.FileStream]::new($ElfPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $hdr = [byte[]]::new(64)
+            if ($fs.Read($hdr, 0, 64) -lt 64) { $result.Reason = 'could not read the ELF64 header'; return $result }
+            if ($hdr[0] -ne 0x7F -or $hdr[1] -ne 0x45 -or $hdr[2] -ne 0x4C -or $hdr[3] -ne 0x46) { $result.Reason = 'not an ELF file (bad magic)'; return $result }
+            if ($hdr[4] -ne 2) { $result.Reason = 'not a 64-bit ELF (EI_CLASS is not 2)'; return $result }
+            if ($hdr[5] -ne 1) { $result.Reason = 'not little-endian (EI_DATA is not 1)'; return $result }
+            $eType = [BitConverter]::ToUInt16($hdr, 16)
+            if ($eType -ne 4) { $result.Reason = ('e_type is {0}, not ET_CORE (4)' -f $eType); return $result }
+            $ePhoff = [BitConverter]::ToUInt64($hdr, 32)
+            $ePhentsize = [BitConverter]::ToUInt16($hdr, 54)
+            $ePhnum = [BitConverter]::ToUInt16($hdr, 56)
+            if ($ePhentsize -ne 56) { $result.Reason = ('unexpected program-header size {0} (expected 56)' -f $ePhentsize); return $result }
+            if ($ePhnum -eq 0) { $result.Reason = 'no program headers'; return $result }
+            if ($ePhnum -eq 0xFFFF) { $result.Reason = 'extended program-header numbering (PN_XNUM) not supported'; return $result }
+            $phdrSize = $ePhnum * 56
+            if ($item.Length -lt ($ePhoff + $phdrSize)) { $result.Reason = 'program-header table is truncated'; return $result }
+            $null = $fs.Seek([Int64]$ePhoff, [System.IO.SeekOrigin]::Begin)
+            $phdrs = [byte[]]::new($phdrSize)
+            if ($fs.Read($phdrs, 0, $phdrSize) -lt $phdrSize) { $result.Reason = 'could not read the program-header table'; return $result }
+            $segments = 0
+            $mapped = [UInt64]0
+            for ($i = 0; $i -lt $ePhnum; $i++) {
+                $off = $i * 56
+                if ([BitConverter]::ToUInt32($phdrs, $off) -eq 1) {
+                    $segments++
+                    $mapped += [BitConverter]::ToUInt64($phdrs, $off + 32)
+                }
+            }
+            if ($segments -eq 0) { $result.Reason = 'no PT_LOAD segments'; return $result }
+            $result.Valid = $true
+            $result.Segments = $segments
+            $result.MappedBytes = $mapped
+            $result.Reason = 'ELF core OK'
+            return $result
+        }
+        finally {
+            $fs.Dispose()
+        }
+    }
+    catch {
+        $result.Reason = $_.Exception.Message
+        return $result
+    }
+}
+
 function Invoke-CleanElfBugCheckScan {
     # Round 23: reads the 0x5A bugcheck parameters out of a QEMU ELF
     # guest-memory dump with Rizin, without needing the guest to have
@@ -1064,18 +1130,31 @@ function Invoke-CleanElfBugCheckScan {
         [Parameter(Mandatory = $true)]
         [string] $WorkDir,
 
+        # Round 24: the dump disk's MBR signature (0 = unknown / skip).
+        # When set, the scan also looks for those 4 bytes in guest
+        # memory: found = the guest read this disk's MBR (enumerated);
+        # absent = the guest never got as far as reading the disk.
+        [UInt32] $DiskSignature = 0,
+
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
         [System.Collections.Generic.List[string]] $Lines
     )
 
-    $result = [pscustomobject]@{ BugCheck = $null; KernBase = $null; Candidates = @() }
+    $result = [pscustomobject]@{ BugCheck = $null; KernBase = $null; Candidates = @(); DiskSignatureHits = $null }
     if (-not (Test-Path -LiteralPath $ElfPath)) {
         $Lines.Add('ELF memory scan skipped: no guest-memory dump file was captured')
         return $result
     }
     $elfSize = (Get-Item -LiteralPath $ElfPath).Length
     $Lines.Add(('ELF memory scan: {0} ({1:N0} bytes)' -f $ElfPath, $elfSize))
+    $elfCheck = Test-CleanElfCore -ElfPath $ElfPath
+    if ($elfCheck.Valid) {
+        $Lines.Add(('ELF core: {0} PT_LOAD segment(s), {1:N0} bytes mapped' -f $elfCheck.Segments, $elfCheck.MappedBytes))
+    }
+    else {
+        $Lines.Add(('ELF core validation failed: {0} (scanning anyway; Rizin may still find hits)' -f $elfCheck.Reason))
+    }
     try {
         # --- KDBG: prove the ELF is Windows memory, get the kernel base.
         $kdbgOut = Invoke-CleanRizinFile -RizinPath $RizinPath -FilePath $ElfPath `
@@ -1083,7 +1162,7 @@ function Invoke-CleanElfBugCheckScan {
         $kdbgHits = @(ConvertFrom-CleanRizinSearchHits -Output $kdbgOut)
         $Lines.Add(('KDBG search: {0} hit(s)' -f $kdbgHits.Count))
         if ($kdbgHits.Count -gt 0) {
-            $take = [Math]::Min(10, $kdbgHits.Count)
+            $take = [Math]::Min(20, $kdbgHits.Count)
             $reads = [System.Collections.Generic.List[string]]::new()
             for ($i = 0; $i -lt $take; $i++) {
                 $hit = $kdbgHits[$i]
@@ -1107,6 +1186,31 @@ function Invoke-CleanElfBugCheckScan {
             if ($null -eq $result.KernBase) { $Lines.Add('KDBG: no hit validated (KernBase unknown)') }
         }
 
+        # --- disk signature: did the guest read this disk's MBR at all?
+        # The 4 signature bytes are the disk's own marker (read from
+        # the qcow2 MBR at capture time). Found in guest RAM = the
+        # kernel read the MBR, so the disk was enumerated and the
+        # drive-letter question stays open; absent = the guest never
+        # got as far as reading this disk, and the letter is moot --
+        # the dump route is dead for a bugcheck this early. One-sided
+        # evidence only (an absent signature can also mean the MBR
+        # buffer was freed before the dump), so the line says exactly
+        # what was and was not found.
+        if ($DiskSignature -ne 0) {
+            $sigPattern = (([BitConverter]::GetBytes($DiskSignature) | ForEach-Object { '{0:x2}' -f $_ }) -join '')
+            $sigOut = Invoke-CleanRizinFile -RizinPath $RizinPath -FilePath $ElfPath `
+                -Commands ("/x $sigPattern") -WorkDir $WorkDir
+            $sigHits = @(ConvertFrom-CleanRizinSearchHits -Output $sigOut)
+            $result.DiskSignatureHits = $sigHits.Count
+            $Lines.Add(('disk signature 0x{0:x8}: {1} hit(s) in guest memory' -f $DiskSignature, $sigHits.Count))
+            if ($sigHits.Count -gt 0) {
+                $Lines.Add('disk signature found in guest memory: the guest read this disk''s MBR (the disk was enumerated)')
+            }
+            else {
+                $Lines.Add('disk signature NOT found in guest memory: the guest never read this disk''s MBR (not enumerated), or the MBR buffer was freed before the dump')
+            }
+        }
+
         # --- strict pattern: { code 0x5A, Arg1 1 } then two pointers + NTSTATUS.
         $strictOut = Invoke-CleanRizinFile -RizinPath $RizinPath -FilePath $ElfPath `
             -Commands '/x 5a000000000000000100000000000000' -WorkDir $WorkDir
@@ -1114,7 +1218,9 @@ function Invoke-CleanElfBugCheckScan {
         $Lines.Add(('strict KiBugCheckData search: {0} hit(s)' -f $strictHits.Count))
         $candidates = [System.Collections.Generic.List[pscustomobject]]::new()
         if ($strictHits.Count -gt 0) {
-            $take = [Math]::Min(20, $strictHits.Count)
+            # Round 24: validate up to 50 (was 20). The reads are one
+            # Rizin call either way; the cap only bounded the output.
+            $take = [Math]::Min(50, $strictHits.Count)
             $reads = [System.Collections.Generic.List[string]]::new()
             for ($i = 0; $i -lt $take; $i++) {
                 foreach ($off in @(0, 8, 16, 24, 32)) {
@@ -1123,6 +1229,8 @@ function Invoke-CleanElfBugCheckScan {
             }
             $vals = @(ConvertFrom-CleanRizinValues -Output (Invoke-CleanRizinFile -RizinPath $RizinPath `
                 -FilePath $ElfPath -Commands ($reads -join '; ') -WorkDir $WorkDir))
+            $strictAccepted = 0
+            $strictRejected = 0
             for ($i = 0; $i -lt $take; $i++) {
                 if ((5 * $i + 4) -ge $vals.Count) { break }
                 $check = Test-CleanBugCheckCandidate -Code $vals[5 * $i] -Arg1 $vals[5 * $i + 1] `
@@ -1140,12 +1248,17 @@ function Invoke-CleanElfBugCheckScan {
                 }
                 $candidates.Add($cand)
                 if ($check.Valid) {
+                    # A valid candidate is always logged, wherever it
+                    # sits in the hit list -- it is the result.
+                    $strictAccepted++
                     $Lines.Add(('RESULT: BugCheckCode={0} Arg1={1} Arg2={2} Arg3={3} Arg4={4} (from guest memory at 0x{5:x})' -f $cand.Code, $cand.Arg1, $cand.Arg2, $cand.Arg3, $cand.Arg4, $cand.Address))
                 }
                 else {
-                    $Lines.Add(('strict candidate at 0x{0:x} rejected: {1}' -f $cand.Address, $check.Reason))
+                    $strictRejected++
+                    if ($i -lt 10) { $Lines.Add(('strict candidate at 0x{0:x} rejected: {1}' -f $cand.Address, $check.Reason)) }
                 }
             }
+            $Lines.Add(('strict search: examined {0} of {1} hit(s) ({2} accepted, {3} rejected)' -f $take, $strictHits.Count, $strictAccepted, $strictRejected))
         }
         $confirmed = @($candidates | Where-Object { $_.Valid })
         if ($confirmed.Count -eq 0) {
@@ -1159,7 +1272,11 @@ function Invoke-CleanElfBugCheckScan {
             $looseHits = @(ConvertFrom-CleanRizinSearchHits -Output $looseOut)
             $Lines.Add(('loose KiBugCheckData search: {0} hit(s)' -f $looseHits.Count))
             if ($looseHits.Count -gt 0) {
-                $take = [Math]::Min(10, $looseHits.Count)
+                # Round 24: validate up to 200 (was 10). Round 23 had
+                # 125 loose hits and only the first 10 were ever
+                # examined -- a real candidate past position 10 was
+                # never seen.
+                $take = [Math]::Min(200, $looseHits.Count)
                 $reads = [System.Collections.Generic.List[string]]::new()
                 for ($i = 0; $i -lt $take; $i++) {
                     foreach ($off in @(0, 8, 16, 24, 32)) {
@@ -1168,6 +1285,8 @@ function Invoke-CleanElfBugCheckScan {
                 }
                 $vals = @(ConvertFrom-CleanRizinValues -Output (Invoke-CleanRizinFile -RizinPath $RizinPath `
                     -FilePath $ElfPath -Commands ($reads -join '; ') -WorkDir $WorkDir))
+                $looseAccepted = 0
+                $looseRejected = 0
                 for ($i = 0; $i -lt $take; $i++) {
                     if ((5 * $i + 4) -ge $vals.Count) { break }
                     $check = Test-CleanBugCheckCandidate -Code $vals[5 * $i] -Arg1 $vals[5 * $i + 1] `
@@ -1185,12 +1304,17 @@ function Invoke-CleanElfBugCheckScan {
                     }
                     $candidates.Add($cand)
                     if ($check.Valid) {
+                        # A valid candidate is always logged, wherever
+                        # it sits in the hit list -- it is the result.
+                        $looseAccepted++
                         $Lines.Add(('RESULT (loose, unconfirmed): BugCheckCode={0} Arg1={1} Arg2={2} Arg3={3} Arg4={4} (from guest memory at 0x{5:x})' -f $cand.Code, $cand.Arg1, $cand.Arg2, $cand.Arg3, $cand.Arg4, $cand.Address))
                     }
                     else {
-                        $Lines.Add(('loose candidate at 0x{0:x} rejected: {1}' -f $cand.Address, $check.Reason))
+                        $looseRejected++
+                        if ($i -lt 10) { $Lines.Add(('loose candidate at 0x{0:x} rejected: {1}' -f $cand.Address, $check.Reason)) }
                     }
                 }
+                $Lines.Add(('loose search: examined {0} of {1} hit(s) ({2} accepted, {3} rejected)' -f $take, $looseHits.Count, $looseAccepted, $looseRejected))
             }
         }
         $result.Candidates = $candidates.ToArray()
@@ -1367,6 +1491,116 @@ function ConvertTo-CleanDeSparseDisk {
     return $OutPath
 }
 
+function Format-CleanVolumeContents {
+    # Round 24: formats one line per entry in a directory listing for
+    # the crash-dump disk report. Pure function (takes the listing,
+    # returns one string). Directories have no .Length property --
+    # reading it under Set-StrictMode throws exactly "The property
+    # 'Length' cannot be found on this object", which is what killed
+    # round 23's capture after a successful attach (a freshly
+    # formatted NTFS volume always has "System Volume Information"
+    # in its root). Files are shown with their byte size.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.IO.FileSystemInfo[]] $Entries
+    )
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in $Entries) {
+        if ($entry.PSIsContainer) {
+            $parts.Add(('{0} (directory)' -f $entry.Name))
+        }
+        else {
+            $parts.Add(('{0} ({1:N0} bytes)' -f $entry.Name, $entry.Length))
+        }
+    }
+    return ($parts -join '; ')
+}
+
+function ConvertFrom-CleanMbrSignature {
+    # Round 24: pure parser for a 512-byte MBR image. Returns the
+    # 4-byte disk signature at offset 0x1B8 as a [UInt32], or $null
+    # when the image is too short or lacks the 0x55AA boot signature
+    # (in which case there is no MBR to trust). The returned value is
+    # the bytes as stored, little-endian.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]] $MbrBytes
+    )
+
+    if ($MbrBytes.Length -lt 512) { return $null }
+    if ($MbrBytes[510] -ne 0x55 -or $MbrBytes[511] -ne 0xAA) { return $null }
+    return [BitConverter]::ToUInt32($MbrBytes, 0x1B8)
+}
+
+function Get-CleanDiskSignature {
+    # Round 24: reads the crash-dump disk's MBR signature from the
+    # qcow2 image (qemu-img dd, 512 bytes) and logs it, so the ELF
+    # scan can test whether the guest ever read this disk's MBR.
+    # Never throws; returns [UInt32] 0 when the signature cannot be
+    # determined, and the caller then skips the signature search.
+    # Runs at the start of the capture (before the qcow2 is deleted
+    # by a successful attach) and uses Invoke-CleanProcessToFile for
+    # exact argv passing (round 23: Start-Process -ArgumentList
+    # splits on spaces on Linux).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $QemuImgPath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Qcow2Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $WorkDir,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]] $Lines
+    )
+
+    $mbrFile = Join-Path $WorkDir 'micpe-dumpdisk-mbr.bin'
+    $outFile = Join-Path $WorkDir 'micpe-dumpdisk-mbr.out'
+    $errFile = Join-Path $WorkDir 'micpe-dumpdisk-mbr.err'
+    try {
+        $run = Invoke-CleanProcessToFile -FilePath $QemuImgPath -ArgumentList @(
+            'dd', '-f', 'qcow2', '-O', 'raw', ('if={0}' -f $Qcow2Path), ('of={0}' -f $mbrFile), 'bs=512', 'count=1'
+        ) -OutFile $outFile -ErrFile $errFile
+        if ($run.ExitCode -ne 0) {
+            $err = ''
+            if (Test-Path -LiteralPath $errFile) { $err = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue) }
+            if ($err) { $err = $err.Trim(); if ($err.Length -gt 500) { $err = $err.Substring(0, 500) } }
+            $Lines.Add(('disk MBR signature: qemu-img dd failed (exit {0}): {1}' -f $run.ExitCode, $err))
+            return [UInt32]0
+        }
+        if (-not (Test-Path -LiteralPath $mbrFile)) {
+            $Lines.Add('disk MBR signature: qemu-img dd reported success but wrote no MBR file')
+            return [UInt32]0
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($mbrFile)
+        $sig = ConvertFrom-CleanMbrSignature -MbrBytes $bytes
+        if ($null -eq $sig) {
+            $Lines.Add('disk MBR signature: no valid MBR (image too short or missing 0x55AA)')
+            return [UInt32]0
+        }
+        $Lines.Add(('disk MBR signature: 0x{0:x8}' -f $sig))
+        return $sig
+    }
+    catch {
+        $Lines.Add(('disk MBR signature: could not read the MBR: {0}' -f $_.Exception.Message))
+        return [UInt32]0
+    }
+    finally {
+        foreach ($f in @($mbrFile, $outFile, $errFile)) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
 function Invoke-CleanCrashDumpCapture {
     # Round 22: after QEMU exits, convert the dump disk back to VHDX,
     # attach it, and read the dedicated dump file the blue screen was
@@ -1398,6 +1632,22 @@ function Invoke-CleanCrashDumpCapture {
     # (Invoke-CleanElfBugCheckScan) as the alternative source. The
     # ELF is deleted after the scan -- 4 GB cannot leave the runner
     # (Release caps assets at ~1.9 GB).
+    # Round 24: the round 23 capture died AFTER a successful attach
+    # with "The property 'Length' cannot be found on this object" --
+    # the volume-contents line read .Length on "System Volume
+    # Information", which is a directory (DirectoryInfo has no
+    # .Length; StrictMode turns the read into a throw). The listing
+    # is now Format-CleanVolumeContents (directories shown as such),
+    # and Add-CleanVolumeList runs on every attach success plus in
+    # the catch -- rounds 22-23 only wired it into the three attach
+    # failure paths, so the promised Get-Volume diagnosis never
+    # appeared in micpe-bugcheck.txt. The disk's MBR signature is
+    # read at the start of the capture and searched for in the ELF:
+    # found = the guest read this disk's MBR (enumerated); absent =
+    # the guest never got that far, and the drive-letter question is
+    # moot for a bugcheck this early. The ELF scan also validates
+    # the core dump's program headers first and validates up to
+    # 200 loose hits (round 23 examined only 10 of 125).
     [CmdletBinding()]
     param(
         [string] $Qcow2Path,
@@ -1417,11 +1667,22 @@ function Invoke-CleanCrashDumpCapture {
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add('MICPE crash-dump capture (round 21: 0x5A bugcheck parameters)')
     if ($Qcow2Path) { $lines.Add(('QEMU dump disk: {0}' -f $Qcow2Path)) }
+    # Round 24: the drive letter the dump is expected on. This is the
+    # DESIGN expectation, not an observation -- the disk is
+    # if=ide,index=0 (the first fixed disk; the CD-ROM is the second
+    # drive) and WinPE's own RAM disk is X:, so the first fixed disk
+    # should be C: in the guest and DedicatedDumpFile (C:\...) should
+    # land on it. The volume listing and the MBR-signature search
+    # below are the observation that tests this expectation; if they
+    # say otherwise, this line is the claim being falsified.
+    $lines.Add('expected drive letter: C: (dump disk is if=ide,index=0, the first fixed disk; WinPE''s own RAM disk is X: -- design expectation, not an observation)')
     $result = [pscustomobject]@{ DumpFound = $false; BugCheck = $null; ReportPath = $reportPath; DiskPath = $null }
     $vhdx = Join-Path $WorkDir 'micpe-dumpdisk-read.vhdx'
     $vhd = Join-Path $WorkDir 'micpe-dumpdisk-read.vhd'
     $attachedLetter = $null
     $diskFile = $null
+    $volumesListed = $false
+    $diskSignature = [UInt32]0
     try {
         if (-not $Qcow2Path -or -not (Test-Path -LiteralPath $Qcow2Path)) {
             # No dump disk to read back (creation failed, or the caller
@@ -1431,6 +1692,12 @@ function Invoke-CleanCrashDumpCapture {
             $lines.Add('no qcow2 dump disk to read back (creation failed or no disk); skipping the disk path')
             return $result
         }
+        # Round 24: read the disk's MBR signature now -- the qcow2
+        # is deleted once an image attaches, and the signature is
+        # needed by the ELF scan to test whether the guest ever read
+        # this disk's MBR.
+        $sig = Get-CleanDiskSignature -QemuImgPath $QemuImgPath -Qcow2Path $Qcow2Path -WorkDir $WorkDir -Lines $lines
+        if ($null -ne $sig -and $sig -ne 0) { $diskSignature = $sig }
         # Windows cannot attach qcow2, so convert back first. VHDX is
         # the format the disk was created in; VHD (vpc) is the fallback
         # if the qemu-img VHDX will not attach (known qemu-img VHDX
@@ -1453,12 +1720,23 @@ function Invoke-CleanCrashDumpCapture {
         $attachedLetter = $attached.Letter
         $diskFile = $attached.DiskPath
         $result.DiskPath = $diskFile
+        # Round 24: the volume listing now runs on every attach
+        # success, not only on attach failure -- rounds 22-23
+        # promised it in the report and it never appeared, because
+        # Add-CleanVolumeList was only wired into the three attach
+        # failure paths.
+        Add-CleanVolumeList -Lines $lines
+        $volumesListed = $true
         Remove-Item -LiteralPath $Qcow2Path -Force -ErrorAction SilentlyContinue
         $dumpFile = "${attachedLetter}:\dedicateddumpfile.sys"
         $lines.Add(('attached as {0}: ; dump file path {1}' -f $attachedLetter, $dumpFile))
-        $volFiles = @(Get-ChildItem -LiteralPath "${attachedLetter}:\" -Force -ErrorAction SilentlyContinue |
-            ForEach-Object { '{0} ({1:N0} bytes)' -f $_.Name, $_.Length })
-        $lines.Add(('volume contents: {0}' -f ($volFiles -join '; ')))
+        # Round 24: Format-CleanVolumeContents lists directories
+        # without touching .Length (round 23 died here: a fresh
+        # NTFS root always contains "System Volume Information",
+        # and DirectoryInfo has no .Length -- under StrictMode the
+        # read throws before the volume-contents line is written).
+        $volEntries = @(Get-ChildItem -LiteralPath "${attachedLetter}:\" -Force -ErrorAction SilentlyContinue)
+        $lines.Add(('volume contents: {0}' -f (Format-CleanVolumeContents -Entries $volEntries)))
         if (-not (Test-Path -LiteralPath $dumpFile)) {
             $lines.Add('RESULT: NO DUMP FILE -- the blue screen did not write a dedicated dump file to the second disk.')
             $lines.Add('This is expected when the system booted cleanly (no bugcheck, nothing to write). It is a problem only when the screenshots show a blue screen; then the causes are: (1) the crash-dump stack was not initialised yet when the 0x5A fired at IopLoadDriver time; (2) the second disk was not C: in WinPE, so DedicatedDumpFile pointed at the wrong letter; (3) the disk was not enumerated in time. The disk was attached and readable, so the file really is absent.')
@@ -1504,6 +1782,10 @@ function Invoke-CleanCrashDumpCapture {
         }
     }
     catch {
+        # Round 24: if the attach succeeded but the read-back died
+        # (round 23: the .Length error), the volume listing still
+        # belongs in the report -- it is the drive-letter evidence.
+        if (-not $volumesListed) { Add-CleanVolumeList -Lines $lines }
         $lines.Add(('RESULT: capture failed: {0}' -f $_.Exception.Message))
     }
     finally {
@@ -1522,7 +1804,7 @@ function Invoke-CleanCrashDumpCapture {
             try {
                 $lines.Add('disk path produced no bugcheck parameters; scanning the guest-memory ELF dump')
                 $rizin = Get-CleanRizinPath -WorkDir $WorkDir -Version $RizinVersion
-                $elfScan = Invoke-CleanElfBugCheckScan -RizinPath $rizin -ElfPath $ElfPath -WorkDir $WorkDir -Lines $lines
+                $elfScan = Invoke-CleanElfBugCheckScan -RizinPath $rizin -ElfPath $ElfPath -WorkDir $WorkDir -DiskSignature $diskSignature -Lines $lines
                 if ($null -ne $elfScan.BugCheck) {
                     $result.BugCheck = $elfScan.BugCheck
                     $result.DumpFound = $true

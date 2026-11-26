@@ -1518,3 +1518,397 @@ Describe 'Round 23 guest-memory ELF scan and de-sparse read-back' {
         }
     }
 }
+
+Describe 'Round 24 crash-dump capture: null-safe read-back, volume listing, MBR signature, ELF validation' {
+    BeforeAll {
+        # Same dot-source pattern as the round 21/22/23 blocks: the
+        # clean verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r24Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r24-$(Get-Random)"
+        $script:r24Share = Join-Path $script:r24Dir 'share'
+        New-Item -ItemType Directory -Path $script:r24Share -Force | Out-Null
+        $script:r24Iso = Join-Path $script:r24Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r24Iso -Force | Out-Null
+        $script:r24Work = Join-Path $script:r24Dir 'work'
+        New-Item -ItemType Directory -Path $script:r24Work -Force | Out-Null
+        $script:r24Code = Join-Path $script:r24Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r24Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r24Iso -OvmfPath $script:r24Code -WorkDir $script:r24Work
+
+        # Get-Volume does not exist on the Linux test host, and
+        # Add-CleanVolumeList is the function under test, so stub it
+        # here (same scope the production functions were dot-sourced
+        # into, so the call resolves to this stub). Same pattern as
+        # the round 23 block.
+        $script:r24VolData = @(
+            [pscustomobject]@{ DriveLetter = 'C'; FileSystemLabel = 'System'; FileSystem = 'NTFS'; Size = 8589417920 }
+            [pscustomobject]@{ DriveLetter = 'Z'; FileSystemLabel = 'MICPE-DUMP'; FileSystem = 'NTFS'; Size = 8589417920 }
+        )
+        $script:r24VolThrow = $false
+        function Get-Volume {
+            if ($script:r24VolThrow) { throw 'no storage module' }
+            return $script:r24VolData
+        }
+
+        # Builds a minimal ELF64 core: a 64-byte header plus PT_LOAD
+        # program headers. DeclaredSizes (when given) is what the
+        # header claims; SegmentSizes is what is actually allocated,
+        # so a 4 GiB declared segment can be tested from a ~4 KB file
+        # (Test-CleanElfCore only reads the header + program headers).
+        function New-R24ElfFixture {
+            param(
+                [string] $Path,
+                [UInt64[]] $SegmentSizes = @(4096),
+                [UInt64[]] $DeclaredSizes,
+                [switch] $BadMagic,
+                [switch] $NotCore,
+                [switch] $NoLoad,
+                [switch] $TruncateHeader
+            )
+            $phnum = $SegmentSizes.Count
+            if ($NoLoad) { $phnum = 0 }
+            $hdr = [byte[]]::new(64)
+            $hdr[0] = 0x7F; $hdr[1] = 0x45; $hdr[2] = 0x4C; $hdr[3] = 0x46
+            if ($BadMagic) { $hdr[1] = 0x58 }
+            $hdr[4] = 2; $hdr[5] = 1; $hdr[6] = 1
+            $type = if ($NotCore) { [UInt16]2 } else { [UInt16]4 }
+            [Array]::Copy([BitConverter]::GetBytes($type), 0, $hdr, 16, 2)
+            [Array]::Copy([BitConverter]::GetBytes([UInt16]62), 0, $hdr, 18, 2)
+            [Array]::Copy([BitConverter]::GetBytes([UInt32]1), 0, $hdr, 20, 4)
+            [Array]::Copy([BitConverter]::GetBytes([UInt64]64), 0, $hdr, 32, 8)
+            [Array]::Copy([BitConverter]::GetBytes([UInt16]64), 0, $hdr, 52, 2)
+            [Array]::Copy([BitConverter]::GetBytes([UInt16]56), 0, $hdr, 54, 2)
+            [Array]::Copy([BitConverter]::GetBytes([UInt16]$phnum), 0, $hdr, 56, 2)
+            $phdrs = [byte[]]::new(56 * $phnum)
+            $off = 64
+            for ($i = 0; $i -lt $phnum; $i++) {
+                $p = $i * 56
+                $declared = if ($DeclaredSizes) { $DeclaredSizes[$i] } else { $SegmentSizes[$i] }
+                [Array]::Copy([BitConverter]::GetBytes([UInt32]1), 0, $phdrs, $p + 0, 4)
+                [Array]::Copy([BitConverter]::GetBytes([UInt32]6), 0, $phdrs, $p + 4, 4)
+                [Array]::Copy([BitConverter]::GetBytes([UInt64]$off), 0, $phdrs, $p + 8, 8)
+                [Array]::Copy([BitConverter]::GetBytes([UInt64]0), 0, $phdrs, $p + 16, 8)
+                [Array]::Copy([BitConverter]::GetBytes([UInt64]0), 0, $phdrs, $p + 24, 8)
+                [Array]::Copy([BitConverter]::GetBytes([UInt64]$declared), 0, $phdrs, $p + 32, 8)
+                [Array]::Copy([BitConverter]::GetBytes([UInt64]$declared), 0, $phdrs, $p + 40, 8)
+                [Array]::Copy([BitConverter]::GetBytes([UInt64]0x1000), 0, $phdrs, $p + 48, 8)
+                $off += $SegmentSizes[$i]
+            }
+            $total = 64 + 56 * $phnum
+            foreach ($s in $SegmentSizes) { $total += $s }
+            $file = [byte[]]::new($total)
+            [Array]::Copy($hdr, 0, $file, 0, 64)
+            if ($phnum -gt 0) { [Array]::Copy($phdrs, 0, $file, 64, $phdrs.Length) }
+            if ($TruncateHeader) {
+                $short = [byte[]]::new(32)
+                [Array]::Copy($file, 0, $short, 0, 32)
+                $file = $short
+            }
+            [System.IO.File]::WriteAllBytes($Path, $file)
+            return $Path
+        }
+
+        # Mocked Rizin for the loose-cap and signature tests: the scan
+        # calls Invoke-CleanRizinFile; this stub answers from a script
+        # table instead of a real binary, so the tests prove the scan
+        # examines hits past position 10 without needing a real ELF.
+        # 15 loose hits at 0x1000 apart from 0x10000; the first 14 are
+        # decoys (Arg2 not a canonical kernel address), the 15th is
+        # the real candidate with Arg1=2 -- which the strict search
+        # (Arg1=1) can never find.
+        $script:r24LooseHits = @(0..14 | ForEach-Object { 0x10000 + ($_ * 0x1000) })
+        function Invoke-CleanRizinFile {
+            param(
+                [string] $RizinPath,
+                [string] $FilePath,
+                [string] $Commands,
+                [string] $WorkDir
+            )
+            if ($Commands -match '4b444247') { return '' }
+            if ($Commands -match '5a000000000000000100000000000000') { return '' }
+            if ($Commands -match '5a00000000000000') {
+                return (($script:r24LooseHits | ForEach-Object { ('0x{0:x} 4 hit.bytes.0' -f $_) }) -join "`n")
+            }
+            if ($Commands -match 'pv8 @') {
+                $out = [System.Collections.Generic.List[string]]::new()
+                foreach ($m in [regex]::Matches($Commands, 'pv8 @ 0x([0-9a-fA-F]+)')) {
+                    $addr = [Convert]::ToUInt64($m.Groups[1].Value, 16)
+                    $val = [UInt64]0
+                    foreach ($h in $script:r24LooseHits) {
+                        $off = $addr - $h
+                        if ($off -ge 0 -and $off -le 32 -and ($off % 8) -eq 0) {
+                            $field = [int]($off / 8)
+                            $idx = [int](($h - 0x10000) / 0x1000)
+                            if ($field -eq 0) { $val = 0x5a }
+                            elseif ($field -eq 1) { $val = 2 }
+                            elseif ($field -eq 2) {
+                                if ($idx -eq 14) { $val = [Convert]::ToUInt64('ffffba8f4e9f8c50', 16) } else { $val = 0x1234 }
+                            }
+                            elseif ($field -eq 3) {
+                                if ($idx -eq 14) { $val = [Convert]::ToUInt64('ffffce06bf0caa90', 16) } else { $val = 0x1234 }
+                            }
+                            elseif ($field -eq 4) { $val = [Convert]::ToUInt64('ffffffffc0000428', 16) }
+                            break
+                        }
+                    }
+                    $out.Add(('0x{0:x16}' -f $val))
+                }
+                return ($out -join "`n")
+            }
+            return ''
+        }
+    }
+
+    It 'formats volume contents without touching .Length on directories (round 23 regression)' {
+        # The round 23 failure, reproduced: a freshly formatted NTFS
+        # root always contains "System Volume Information", and the
+        # old inline format read .Length on every entry; under
+        # StrictMode the directory entry threw "The property 'Length'
+        # cannot be found on this object" before the volume-contents
+        # line was written, so the capture died after a successful
+        # attach.
+        $dir = Join-Path $script:r24Work 'vol'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $dir 'System Volume Information') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $dir 'dedicateddumpfile.sys'), 'x')
+        $entries = @(Get-ChildItem -LiteralPath $dir -Force)
+        $out = Format-CleanVolumeContents -Entries $entries
+        $out | Should -Match 'System Volume Information \(directory\)'
+        $out | Should -Match 'dedicateddumpfile\.sys \(1 bytes\)'
+    }
+
+    It 'formats an empty volume listing as an empty string' {
+        (Format-CleanVolumeContents -Entries @()) | Should -Be ''
+    }
+
+    It 'returns the MBR disk signature as a little-endian UInt32' {
+        $mbr = [byte[]]::new(512)
+        $mbr[510] = 0x55; $mbr[511] = 0xAA
+        $mbr[0x1B8] = 0x78; $mbr[0x1B9] = 0x56; $mbr[0x1BA] = 0x34; $mbr[0x1BB] = 0x12
+        (ConvertFrom-CleanMbrSignature -MbrBytes $mbr) | Should -Be 0x12345678
+    }
+
+    It 'returns null for a short or unsigned MBR' {
+        (ConvertFrom-CleanMbrSignature -MbrBytes ([byte[]]::new(100))) | Should -BeNullOrEmpty
+        $mbr = [byte[]]::new(512)
+        (ConvertFrom-CleanMbrSignature -MbrBytes $mbr) | Should -BeNullOrEmpty
+    }
+
+    It 'reads the disk signature from the qcow2 MBR with qemu-img dd' {
+        if ($IsWindows) {
+            Set-ItResult -Skipped -Because 'the fake qemu-img is a Python script with a shebang; it only executes directly on Linux. The success path runs for real on the CI Windows runner with the real qemu-img'
+        }
+        $fake = Join-Path $script:r24Work 'fake-qemu-img.py'
+        Set-Content -LiteralPath $fake -Value @'
+#!/usr/bin/env python3
+import sys
+of = None
+for a in sys.argv[1:]:
+    if a.startswith('of='):
+        of = a[3:]
+if of is None:
+    sys.exit(2)
+mbr = bytearray(512)
+mbr[0x1B8:0x1BC] = bytes([0x78, 0x56, 0x34, 0x12])
+mbr[510] = 0x55
+mbr[511] = 0xAA
+with open(of, 'wb') as f:
+    f.write(mbr)
+'@ -Encoding utf8
+        chmod +x $fake
+        $qcow2 = Join-Path $script:r24Work 'fake.qcow2'
+        New-Item -ItemType File -Path $qcow2 -Force | Out-Null
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $sig = Get-CleanDiskSignature -QemuImgPath $fake -Qcow2Path $qcow2 -WorkDir $script:r24Work -Lines $lines
+        $sig | Should -Be 0x12345678
+        ($lines -join "`n") | Should -Match 'disk MBR signature: 0x12345678'
+        # The temp MBR/out/err files are cleaned up.
+        (Test-Path -LiteralPath (Join-Path $script:r24Work 'micpe-dumpdisk-mbr.bin')) | Should -BeFalse
+    }
+
+    It 'returns 0 when qemu-img dd fails' {
+        # The current pwsh, given qemu-img's argv, exits non-zero on
+        # both platforms (Linux: /usr/bin/dd rejects -f; Windows: dd
+        # is not a command). Probe first: if it ever exits 0 here,
+        # the failure path cannot be observed this way and the test
+        # skips instead of asserting on a platform quirk.
+        $pwsh = (Get-Process -Id $PID).Path
+        $probeOut = Join-Path $script:r24Work 'dd-probe.out'
+        $probeErr = Join-Path $script:r24Work 'dd-probe.err'
+        $probe = Invoke-CleanProcessToFile -FilePath $pwsh `
+            -ArgumentList @('dd', '-f', 'qcow2', '-O', 'raw', 'if=x', ('of={0}' -f (Join-Path $script:r24Work 'dd-probe-y')), 'bs=512', 'count=1') `
+            -OutFile $probeOut -ErrFile $probeErr -TimeoutSec 60
+        if ($probe.ExitCode -eq 0) {
+            Set-ItResult -Skipped -Because 'pwsh exits 0 on the dd argv here, so the dd-failure path cannot be observed; it runs on the CI Windows runner'
+        }
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $sig = Get-CleanDiskSignature -QemuImgPath $pwsh -Qcow2Path (Join-Path $script:r24Work 'nope.qcow2') -WorkDir $script:r24Work -Lines $lines
+        $sig | Should -Be 0
+        ($lines -join "`n") | Should -Match 'qemu-img dd failed'
+    }
+
+    It 'returns 0 when qemu-img cannot start' {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $sig = Get-CleanDiskSignature -QemuImgPath (Join-Path $script:r24Work 'no-such-qemu-img.exe') -Qcow2Path (Join-Path $script:r24Work 'nope.qcow2') -WorkDir $script:r24Work -Lines $lines
+        $sig | Should -Be 0
+        ($lines -join "`n") | Should -Match 'could not read the MBR'
+    }
+
+    It 'validates a well-formed ELF64 core and reports its PT_LOAD segments' {
+        $elf = Join-Path $script:r24Work 'core-valid.elf'
+        New-R24ElfFixture -Path $elf -SegmentSizes @(4096, 8192)
+        $check = Test-CleanElfCore -ElfPath $elf
+        $check.Valid | Should -BeTrue
+        $check.Segments | Should -Be 2
+        $check.MappedBytes | Should -Be 12288
+    }
+
+    It 'reports a 4 GiB declared segment without reading the whole file' {
+        # The parser only reads the header + program-header table, so
+        # a multi-GB dump is cheap to validate; the declared size is
+        # what matters for the "did Rizin cover the whole file"
+        # question. The file itself is ~4 KB.
+        $elf = Join-Path $script:r24Work 'core-huge.elf'
+        New-R24ElfFixture -Path $elf -SegmentSizes @(4096) -DeclaredSizes @(4294967296)
+        $check = Test-CleanElfCore -ElfPath $elf
+        $check.Valid | Should -BeTrue
+        $check.Segments | Should -Be 1
+        $check.MappedBytes | Should -Be 4294967296
+    }
+
+    It 'rejects a bad magic, a non-core type, no PT_LOAD, a truncated file, and a missing file' {
+        $bad = Join-Path $script:r24Work 'core-badmagic.elf'
+        New-R24ElfFixture -Path $bad -BadMagic
+        (Test-CleanElfCore -ElfPath $bad).Valid | Should -BeFalse
+        $exec = Join-Path $script:r24Work 'core-exec.elf'
+        New-R24ElfFixture -Path $exec -NotCore
+        (Test-CleanElfCore -ElfPath $exec).Valid | Should -BeFalse
+        (Test-CleanElfCore -ElfPath $exec).Reason | Should -Match 'ET_CORE'
+        $noload = Join-Path $script:r24Work 'core-noload.elf'
+        New-R24ElfFixture -Path $noload -NoLoad
+        (Test-CleanElfCore -ElfPath $noload).Valid | Should -BeFalse
+        $trunc = Join-Path $script:r24Work 'core-trunc.elf'
+        New-R24ElfFixture -Path $trunc -TruncateHeader
+        (Test-CleanElfCore -ElfPath $trunc).Valid | Should -BeFalse
+        (Test-CleanElfCore -ElfPath (Join-Path $script:r24Work 'does-not-exist.elf')).Valid | Should -BeFalse
+    }
+
+    It 'writes the Get-Volume listing into the report lines' {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        Add-CleanVolumeList -Lines $lines
+        ($lines -join "`n") | Should -Match 'volumes on the runner:'
+        ($lines -join "`n") | Should -Match 'MICPE-DUMP'
+    }
+
+    It 'writes a failure line when the volume listing itself fails' {
+        $script:r24VolThrow = $true
+        try {
+            $lines = [System.Collections.Generic.List[string]]::new()
+            Add-CleanVolumeList -Lines $lines
+            ($lines -join "`n") | Should -Match 'could not list volumes'
+        }
+        finally {
+            $script:r24VolThrow = $false
+        }
+    }
+
+    It 'finds a loose candidate past the old 10-hit cap (Arg1=2, mocked Rizin)' {
+        # Round 23 examined only the first 10 of 125 loose hits; a
+        # real candidate at position 15 was never seen. Here Arg1=2,
+        # so the strict search (which requires Arg1=1) finds nothing
+        # and the loose search must reach hit 15 of 15 to accept it.
+        # The real end-to-end proof is e2e_arg1_2_elf.ps1 with real
+        # Rizin; this test proves the same cap logic in the suite.
+        $elf = Join-Path $script:r24Work 'core-loose.elf'
+        New-R24ElfFixture -Path $elf -SegmentSizes @(65536)
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $result = Invoke-CleanElfBugCheckScan -RizinPath 'C:\fake\rizin.exe' -ElfPath $elf -WorkDir $script:r24Work -Lines $lines
+        $result.BugCheck | Should -Not -BeNullOrEmpty
+        $result.BugCheck.BugCheckCode | Should -Be '0x5a'
+        $result.BugCheck.Arg1 | Should -Be '0x2'
+        $result.BugCheck.Arg2 | Should -Be '0xffffba8f4e9f8c50'
+        ($lines -join "`n") | Should -Match 'ELF core: 1 PT_LOAD segment'
+        ($lines -join "`n") | Should -Match 'strict KiBugCheckData search: 0 hit'
+        ($lines -join "`n") | Should -Match 'loose search: examined 15 of 15 hit\(s\) \(1 accepted, 14 rejected\)'
+        ($lines -join "`n") | Should -Match 'RESULT \(loose, unconfirmed\)'
+    }
+
+    It 'searches guest memory for the dump-disk MBR signature (mocked Rizin)' {
+        $elf = Join-Path $script:r24Work 'core-sig.elf'
+        New-R24ElfFixture -Path $elf -SegmentSizes @(65536)
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $result = Invoke-CleanElfBugCheckScan -RizinPath 'C:\fake\rizin.exe' -ElfPath $elf -WorkDir $script:r24Work -DiskSignature 0x12345678 -Lines $lines
+        $result.DiskSignatureHits | Should -Be 0
+        ($lines -join "`n") | Should -Match 'disk signature 0x12345678: 0 hit'
+        ($lines -join "`n") | Should -Match 'disk signature NOT found in guest memory'
+    }
+
+    It 'scans anyway when the ELF core header is invalid, and says so' {
+        # The validation is diagnostic, not a gate: a truncated or
+        # unmapped dump still gets scanned, because Rizin may still
+        # find hits the header check cannot see.
+        $bad = Join-Path $script:r24Work 'core-scan-bad.elf'
+        New-R24ElfFixture -Path $bad -BadMagic
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $result = Invoke-CleanElfBugCheckScan -RizinPath 'C:\fake\rizin.exe' -ElfPath $bad -WorkDir $script:r24Work -Lines $lines
+        ($lines -join "`n") | Should -Match 'ELF core validation failed'
+        $result.BugCheck | Should -Not -BeNullOrEmpty
+    }
+
+    It 'skips the scan when there is no guest-memory dump file' {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $result = Invoke-CleanElfBugCheckScan -RizinPath 'C:\fake\rizin.exe' -ElfPath (Join-Path $script:r24Work 'no-such.elf') -WorkDir $script:r24Work -Lines $lines
+        $result.BugCheck | Should -BeNullOrEmpty
+        ($lines -join "`n") | Should -Match 'ELF memory scan skipped'
+    }
+
+    It 'lists volume contents without .Length on directories and lists volumes on attach success and in the catch' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $capture = $verify.Substring($verify.IndexOf('function Invoke-CleanCrashDumpCapture'))
+        $capture.Contains('Format-CleanVolumeContents -Entries $volEntries') | Should -BeTrue
+        # The round 23 bug: the old inline format read .Length on
+        # every entry, including directories.
+        $verify.Contains("'{0} ({1:N0} bytes)' -f `$_.Name, `$_.Length") | Should -BeFalse
+        # Add-CleanVolumeList: 3 attach-failure paths + attach success
+        # + catch = 5 call sites (round 22's test asserted >= 3).
+        ([regex]::Matches($verify, 'Add-CleanVolumeList -Lines', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)).Count | Should -BeGreaterOrEqual 5
+        $capture.Contains('if (-not $volumesListed) { Add-CleanVolumeList -Lines $lines }') | Should -BeTrue
+        # The dump-file read is guarded: Test-Path before .Length, so
+        # a missing dump file writes "NO DUMP FILE" instead of throwing.
+        $capture.IndexOf('Test-Path -LiteralPath $dumpFile') | Should -BeLessThan $capture.IndexOf('(Get-Item -LiteralPath $dumpFile).Length')
+        $capture.Contains('RESULT: NO DUMP FILE') | Should -BeTrue
+    }
+
+    It 'reads the MBR signature before converting and passes it to the ELF scan' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $capture = $verify.Substring($verify.IndexOf('function Invoke-CleanCrashDumpCapture'))
+        # The qcow2 is deleted once an image attaches, so the
+        # signature must be read before the conversion. (Match the
+        # call sites, not the bare names: both names also appear in
+        # the header comments above the code.)
+        $capture.IndexOf('$sig = Get-CleanDiskSignature') | Should -BeLessThan $capture.IndexOf('$null = ConvertTo-CleanDeSparseDisk')
+        $capture.Contains('-DiskSignature $diskSignature') | Should -BeTrue
+        # The expected drive letter is stated as a design expectation,
+        # not an observation; the volume listing and the signature
+        # search are the observation that tests it.
+        $capture.Contains('expected drive letter: C:') | Should -BeTrue
+        $scan = $verify.Substring($verify.IndexOf('function Invoke-CleanElfBugCheckScan'))
+        $scan.Contains('DiskSignatureHits') | Should -BeTrue
+        $scan.Contains('disk signature 0x') | Should -BeTrue
+        $scan.Contains('disk signature found in guest memory') | Should -BeTrue
+        $scan.Contains('disk signature NOT found in guest memory') | Should -BeTrue
+    }
+
+    It 'validates the ELF core before scanning and examines more hits' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $scan = $verify.Substring($verify.IndexOf('function Invoke-CleanElfBugCheckScan'))
+        $scan.Contains('Test-CleanElfCore -ElfPath $ElfPath') | Should -BeTrue
+        $scan.Contains('ELF core:') | Should -BeTrue
+        $scan.Contains('ELF core validation failed:') | Should -BeTrue
+        $scan.Contains('[Math]::Min(200, $looseHits.Count)') | Should -BeTrue
+        $scan.Contains('[Math]::Min(50, $strictHits.Count)') | Should -BeTrue
+        $scan.Contains('[Math]::Min(20, $kdbgHits.Count)') | Should -BeTrue
+        $scan.Contains('strict search: examined') | Should -BeTrue
+        $scan.Contains('loose search: examined') | Should -BeTrue
+    }
+}
