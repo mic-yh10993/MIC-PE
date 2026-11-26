@@ -1079,8 +1079,13 @@ Describe 'Round 22 crash-dump capture read-back fix' {
 
     It 'converts the dump disk back to VHDX and falls back to VHD (vpc) when the attach fails' {
         $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
-        $verify | Should -Match 'convert -f qcow2 -O vhdx'
-        $verify | Should -Match "convert -f qcow2 -O vpc"
+        # Round 23: the conversion moved into ConvertTo-CleanDeSparseDisk
+        # (plain copy after convert, so the output is not sparse) and is
+        # parameterised by -Format; the two call sites still try VHDX
+        # first and VHD (vpc) on attach failure.
+        $verify | Should -Match 'convert -f qcow2 -O \$Format'
+        $verify | Should -Match "-Format 'vhdx'"
+        $verify | Should -Match "-Format 'vpc'"
         $verify | Should -Match 'VHDX attach failed; retrying as VHD \(vpc\)'
         $verify | Should -Match 'Invoke-CleanDiskAttach'
     }
@@ -1125,5 +1130,391 @@ Describe 'Round 22 crash-dump capture read-back fix' {
         # log line instead of failing the upload.
         $workflow | Should -Match '1900MB'
         $workflow | Should -Match 'over the ~1\.9 GB Release asset limit'
+    }
+}
+
+Describe 'Round 23 guest-memory ELF scan and de-sparse read-back' {
+    BeforeAll {
+        # Same dot-source pattern as the round 21/22 blocks: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r23Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r23-$(Get-Random)"
+        $script:r23Share = Join-Path $script:r23Dir 'share'
+        New-Item -ItemType Directory -Path $script:r23Share -Force | Out-Null
+        $script:r23Iso = Join-Path $script:r23Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r23Iso -Force | Out-Null
+        $script:r23Work = Join-Path $script:r23Dir 'work'
+        New-Item -ItemType Directory -Path $script:r23Work -Force | Out-Null
+        $script:r23Code = Join-Path $script:r23Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r23Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r23Iso -OvmfPath $script:r23Code -WorkDir $script:r23Work
+
+        # Get-Volume does not exist on the Linux test host, and
+        # Add-CleanVolumeList is the function under test, so stub it
+        # here (same scope the production functions were dot-sourced
+        # into, so the call resolves to this stub). The stub reads
+        # script variables, so each test can pick its volumes or make
+        # it throw.
+        $script:volData = @(
+            [pscustomobject]@{ DriveLetter = 'C'; FileSystemLabel = 'System'; FileSystem = 'NTFS'; Size = 8589417920 }
+            [pscustomobject]@{ DriveLetter = 'D'; FileSystemLabel = ''; FileSystem = 'NTFS'; Size = 107374182400 }
+        )
+        $script:volThrow = $false
+        function Get-Volume {
+            if ($script:volThrow) { throw 'no storage module' }
+            return $script:volData
+        }
+
+        # Hex literals above Int64.MaxValue parse as NEGATIVE Int64 in
+        # PowerShell (0xffffba8f4e9f8c50 becomes -76350314542000) and
+        # cannot bind to a [UInt64] parameter, so build those values
+        # with an explicit parse instead of a literal.
+        function U64([string]$Hex) {
+            [UInt64]::Parse($Hex, [System.Globalization.NumberStyles]::HexNumber)
+        }
+
+        # Loopback TCP from PowerShell is blocked on the sandboxed Linux
+        # dev VM (verified 2026-11-26): TcpClient.Connect "succeeds"
+        # but the connection never reaches the listener -- the sandbox
+        # answers with a policy message instead -- while a Python
+        # client connects fine. The fake-monitor test below therefore
+        # probes first and skips here; it runs for real on the CI
+        # Windows runner, where the QEMU monitor connection happens.
+        function Test-CleanLoopbackTcp {
+            $port = 45200 + (Get-Random -Maximum 2000)
+            $listener = $null
+            $client = $null
+            $serverSide = $null
+            try {
+                $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+                $listener.Start()
+                $acceptTask = $listener.AcceptTcpClientAsync()
+                $client = [System.Net.Sockets.TcpClient]::new()
+                try { $client.Connect('127.0.0.1', $port) } catch { return $false }
+                if (-not $acceptTask.Wait(2000)) { return $false }
+                $serverSide = $acceptTask.Result
+                $writer = [System.IO.StreamWriter]::new($serverSide.GetStream())
+                $writer.AutoFlush = $true
+                $writer.Write('ping')
+                $client.GetStream().ReadTimeout = 2000
+                $buf = [byte[]]::new(16)
+                $n = $client.GetStream().Read($buf, 0, $buf.Length)
+                if ($n -le 0) { return $false }
+                return ([System.Text.Encoding]::ASCII.GetString($buf, 0, $n) -eq 'ping')
+            }
+            catch {
+                return $false
+            }
+            finally {
+                if ($serverSide) { $serverSide.Dispose() }
+                if ($client) { $client.Dispose() }
+                if ($listener) { $listener.Stop() }
+            }
+        }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:r23Dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'lists the runner volumes on every attach failure path, including the diskpart-error path' {
+        # Round 22 lesson: the volume listing only ran on the
+        # poll-timeout path, so the diskpart-error path (the one round
+        # 22 actually hit) wrote no volume listing at all, even though
+        # the RESULT line claimed "the diskpart output and volume
+        # listing above are the evidence".
+        $lines = [System.Collections.Generic.List[string]]::new()
+        Add-CleanVolumeList -Lines $lines
+        ($lines -join "`n") | Should -Match 'volumes on the runner: C: System NTFS'
+        ($lines -join "`n") | Should -Match 'D:  NTFS'
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        # Every failure return in Invoke-CleanDiskAttach must list the
+        # volumes: no free letter, diskpart error, and poll timeout.
+        (@([regex]::Matches($verify, 'Add-CleanVolumeList -Lines \$Lines')).Count) | Should -BeGreaterOrEqual 3
+    }
+
+    It 'writes a diagnostics line instead of throwing when Get-Volume fails' {
+        $script:volThrow = $true
+        try {
+            $lines = [System.Collections.Generic.List[string]]::new()
+            { Add-CleanVolumeList -Lines $lines } | Should -Not -Throw
+            ($lines -join "`n") | Should -Match 'could not list volumes: no storage module'
+        }
+        finally {
+            $script:volThrow = $false
+        }
+    }
+
+    It 'parses real Rizin /x search output into hit addresses, ignoring the ANSI erase-line prefix' {
+        # Captured from Rizin 0.9.1 against the synthetic ELF core
+        # (micpe-r23/fixture-guest-memory.elf): the real KDBG OwnerTag
+        # at 0x102010 and the decoy at 0x108010.
+        $out = "$([char]27)[2K`r0x00102010 4 hit.bytes.0`n0x00108010 4 hit.bytes.1`n"
+        $hits = @(ConvertFrom-CleanRizinSearchHits -Output $out)
+        $hits.Count | Should -Be 2
+        $hits[0] | Should -Be 0x102010
+        $hits[1] | Should -Be 0x108010
+    }
+
+    It 'returns no hits for an empty search output' {
+        @(ConvertFrom-CleanRizinSearchHits -Output '') | Should -BeNullOrEmpty
+        @(ConvertFrom-CleanRizinSearchHits -Output "$([char]27)[2K`r`n") | Should -BeNullOrEmpty
+    }
+
+    It 'parses real Rizin pv8 output into the five bugcheck qwords, in order' {
+        # Captured from Rizin 0.9.1: the planted KiBugCheckData at
+        # 0x104000 (round 21 research example A values).
+        $out = @'
+0x000000000000005a
+0x0000000000000001
+0xffffba8f4e9f8c50
+0xffffce06bf0caa90
+0xffffffffc0000428
+'@
+        $vals = @(ConvertFrom-CleanRizinValues -Output $out)
+        $vals.Count | Should -Be 5
+        $vals[0] | Should -Be 0x5A
+        $vals[1] | Should -Be 1
+        # The three pointers are above Int64.MaxValue: compare their
+        # hex rendering, not a literal (a literal would parse as a
+        # negative Int64 and never equal the UInt64 value).
+        $vals[2].ToString('x16') | Should -Be 'ffffba8f4e9f8c50'
+        $vals[3].ToString('x16') | Should -Be 'ffffce06bf0caa90'
+        $vals[4].ToString('x16') | Should -Be 'ffffffffc0000428'
+    }
+
+    It 'skips non-value lines when parsing pv output' {
+        $out = "WARNING: something`n0x000000000000005a`n`n0x0000000000000001`n"
+        $vals = @(ConvertFrom-CleanRizinValues -Output $out)
+        $vals.Count | Should -Be 2
+        $vals[0] | Should -Be 0x5A
+    }
+
+    It 'accepts the real KiBugCheckData candidate (round 21 example A)' {
+        $c = Test-CleanBugCheckCandidate -Code 0x5A -Arg1 1 `
+            -Arg2 (U64 'ffffba8f4e9f8c50') -Arg3 (U64 'ffffce06bf0caa90') -Arg4 (U64 'ffffffffc0000428')
+        $c.Valid | Should -BeTrue
+    }
+
+    It 'accepts the sign-extended NTSTATUS from the CmBootLastKnownGood example (round 21 example B)' {
+        $c = Test-CleanBugCheckCandidate -Code 0x5A -Arg1 1 `
+            -Arg2 (U64 'ffffdd8d275d1fd0') -Arg3 (U64 'ffffa202e8dfd6c0') -Arg4 (U64 'fffffffc0e90002')
+        $c.Valid | Should -BeTrue
+    }
+
+    It 'rejects the decoy pattern whose pointers are not kernel addresses' {
+        # The synthetic ELF decoy at 0x106000: 0x5A, 1, 0x401000,
+        # 0x402000, 0xC0000428 -- the pointers are user-mode addresses.
+        # (0xC0000428 also needs U64: as a literal it parses as a
+        # negative [int] and cannot bind to [UInt64].)
+        $c = Test-CleanBugCheckCandidate -Code 0x5A -Arg1 1 `
+            -Arg2 0x401000 -Arg3 0x402000 -Arg4 (U64 'c0000428')
+        $c.Valid | Should -BeFalse
+        $c.Reason | Should -Match 'not a canonical kernel address'
+    }
+
+    It 'rejects a candidate with the wrong bugcheck code' {
+        $c = Test-CleanBugCheckCandidate -Code 0x69 -Arg1 1 `
+            -Arg2 (U64 'ffffba8f4e9f8c50') -Arg3 (U64 'ffffce06bf0caa90') -Arg4 (U64 'ffffffffc0000428')
+        $c.Valid | Should -BeFalse
+        $c.Reason | Should -Match 'not 0x5A'
+    }
+
+    It 'accepts a real KDBG (Size 0x3b0, canonical KernBase)' {
+        $c = Test-CleanKdbgCandidate -Size 0x3b0 -KernBase (U64 'fffff80001234000')
+        $c.Valid | Should -BeTrue
+    }
+
+    It 'rejects a KDBG decoy with a non-canonical KernBase' {
+        $c = Test-CleanKdbgCandidate -Size 0x3b0 -KernBase 0x400000
+        $c.Valid | Should -BeFalse
+        $c.Reason | Should -Match 'not a canonical kernel address'
+    }
+
+    It 'rejects a KDBG hit with an implausible Size' {
+        $c = Test-CleanKdbgCandidate -Size 0x10 -KernBase (U64 'fffff80001234000')
+        $c.Valid | Should -BeFalse
+    }
+
+    It 'materializes the converted disk with a plain copy and verifies it is not sparse' {
+        # Round 22: diskpart refused both the VHDX and the VHD with
+        # "must be uncompressed and unencrypted and must not be
+        # sparse" because qemu-img's output is sparse. A plain copy
+        # loses the sparse attribute (Microsoft Q&A); fsutil sparse
+        # setflag 0 on an already-sparse file may corrupt it, so the
+        # copy -- not setflag -- is the fix.
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'ConvertTo-CleanDeSparseDisk'
+        $verify | Should -Match 'Copy-Item -LiteralPath \$tmpPath -Destination \$OutPath'
+        $verify | Should -Match 'fsutil sparse queryflag'
+        $verify | Should -Match "convert: qemu-img convert -f qcow2 -O \{0\}"
+    }
+
+    It 'keeps the .vhdx when falling back to VHD instead of deleting it' {
+        # Round 22 deleted the .vhdx in the fallback branch, so the
+        # artifact and the Release only ever got the .vhd even though
+        # the upload lists both. Scope the check to the capture
+        # function: New-CleanCrashDumpDisk (the creation step) still
+        # deletes ITS .vhdx after converting it to qcow2 for QEMU,
+        # which is correct -- only the capture must keep both.
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $capture = $verify.Substring($verify.IndexOf('function Invoke-CleanCrashDumpCapture'))
+        $capture | Should -Not -Match 'Remove-Item -LiteralPath \$vhdx'
+        $capture | Should -Match 'preserved disk file for upload:'
+    }
+
+    It 'dumps guest memory through the monitor before quitting QEMU on a blue screen' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'Invoke-CleanGuestMemoryDump'
+        $verify | Should -Match 'dump-guest-memory'
+        $verify | Should -Match 'guest-memory\.elf'
+        # The dump must happen before 'quit': once QEMU exits the
+        # memory is gone.
+        $verify.IndexOf('Invoke-CleanGuestMemoryDump') | Should -BeLessThan $verify.IndexOf("Invoke-CleanMonitorCommand -Port `$MonitorPort -Command 'quit'")
+        # ... and only when the guest died on a bugcheck blue screen.
+        $verify | Should -Match 'blueScreenSeen'
+    }
+
+    It 'scans the guest-memory ELF with Rizin when the disk produced no parameters' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'Invoke-CleanElfBugCheckScan'
+        $verify | Should -Match '/x 4b444247'
+        $verify | Should -Match '/x 5a000000000000000100000000000000'
+        $verify | Should -Match 'Invoke-CleanRizinFile'
+        # The ELF is deleted after the scan: 4 GB cannot leave the
+        # runner (Release caps assets at ~1.9 GB).
+        $verify | Should -Match 'guest-memory ELF dump deleted after scan'
+    }
+
+    It 'passes arguments with spaces as single argv entries (no shell splitting)' {
+        # Regression test for the round 23 Rizin failure:
+        # Start-Process -ArgumentList split '/x 4b444247' into two
+        # arguments on Linux, so Rizin failed with "Wrong number of
+        # arguments passed to /x" and the ELF scan found zero hits.
+        # Invoke-CleanProcessToFile must pass each entry as exactly
+        # one argv element: if 'a b' were split, the child would see
+        # 'a|b|c|d|e' instead of 'a b|c d e'. (A -File probe script is
+        # used, not -Command: pwsh -Command joins all following
+        # arguments into the command string, so it cannot observe
+        # argv splitting at all.)
+        $pwsh = (Get-Process -Id $PID).Path
+        $probeScript = Join-Path $script:r23Work 'argv-probe.ps1'
+        Set-Content -LiteralPath $probeScript -Value 'Write-Output ($args -join "|")' -Encoding utf8
+        $outFile = Join-Path $script:r23Work 'argv-out.txt'
+        $errFile = Join-Path $script:r23Work 'argv-err.txt'
+        $run = Invoke-CleanProcessToFile -FilePath $pwsh `
+            -ArgumentList @('-NoProfile', '-File', $probeScript, 'a b', 'c d e') `
+            -OutFile $outFile -ErrFile $errFile -TimeoutSec 60
+        $run.ExitCode | Should -Be 0
+        (Get-Content -LiteralPath $outFile -Raw).Trim() | Should -Be 'a b|c d e'
+    }
+
+    It 'runs Rizin through the exact-argv helper instead of Start-Process' {
+        $verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ci\Invoke-CleanQemuVerify.ps1') -Raw
+        $verify | Should -Match 'Invoke-CleanProcessToFile -FilePath \$RizinPath'
+        $verify | Should -Match 'ArgumentList\.Add'
+        # The QEMU launch still uses Start-Process (its arguments
+        # contain no spaces); only the Rizin calls must not.
+        $verify | Should -Not -Match 'Start-Process -FilePath \$RizinPath'
+    }
+
+    It 'reads the monitor stream until the (qemu) prompt, without any TCP' {
+        # Read-CleanMonitorUntilPrompt takes any [System.IO.Stream], so
+        # the prompt-matching logic is testable on a MemoryStream even
+        # where loopback TCP is blocked (see the probe above).
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes("QEMU 9.2.0 monitor - type 'help' for more information`r`n(qemu) ")
+        $stream = [System.IO.MemoryStream]::new($bytes)
+        $text = Read-CleanMonitorUntilPrompt -Stream $stream -TimeoutSec 5
+        $text | Should -Match '\(qemu\)'
+        $text | Should -Match 'QEMU 9.2.0 monitor'
+    }
+
+    It 'returns what arrived when the monitor goes away without a prompt' {
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes('partial output, no prompt')
+        $stream = [System.IO.MemoryStream]::new($bytes)
+        $text = Read-CleanMonitorUntilPrompt -Stream $stream -TimeoutSec 5
+        $text | Should -Be 'partial output, no prompt'
+    }
+
+    It 'returns an empty string when the stream is already at end-of-stream' {
+        $stream = [System.IO.MemoryStream]::new()
+        $text = Read-CleanMonitorUntilPrompt -Stream $stream -TimeoutSec 5
+        $text | Should -Be ''
+    }
+
+    It 'waits for the monitor prompt instead of returning after the first read gap' {
+        if (-not (Test-CleanLoopbackTcp)) {
+            Set-ItResult -Skipped -Because 'loopback TCP from PowerShell is blocked in this environment (sandbox other_tcp policy); this test runs on the CI Windows runner'
+        }
+        # A fake QEMU human monitor on TCP: banner + prompt, then a
+        # 3 s "dump" before the completion prompt. The old read loop
+        # returned after the first 2 s gap, while QEMU was still
+        # writing the dump; the wait-for-prompt loop must sit through
+        # the silence and return the completion text.
+        $port = 45200 + (Get-Random -Maximum 2000)
+        $job = Start-Job -ScriptBlock {
+            param($Port)
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+            $listener.Start()
+            try {
+                # Accept in a loop: the test probes the port once to
+                # confirm the listener is up, and that probe must not
+                # consume the only accept.
+                $handled = 0
+                while ($handled -lt 5) {
+                    $client = $listener.AcceptTcpClient()
+                    $handled++
+                    try {
+                        $stream = $client.GetStream()
+                        $writer = [System.IO.StreamWriter]::new($stream)
+                        $writer.AutoFlush = $true
+                        $writer.Write("QEMU 9.2.0 monitor - type 'help' for more information`r`n(qemu) ")
+                        $reader = [System.IO.StreamReader]::new($stream)
+                        $line = $reader.ReadLine()
+                        if ([string]::IsNullOrEmpty($line)) { continue }
+                        Start-Sleep -Seconds 3
+                        $writer.Write("dump complete`r`n(qemu) ")
+                        Start-Sleep -Milliseconds 500
+                    }
+                    catch {
+                    }
+                    finally {
+                        $client.Close()
+                    }
+                }
+            }
+            finally {
+                $listener.Stop()
+            }
+        } -ArgumentList $port
+        try {
+            # Wait for the listener before connecting (job start is slow).
+            $up = $false
+            $deadline = (Get-Date).AddSeconds(15)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $probe = [System.Net.Sockets.TcpClient]::new()
+                    $probe.Connect('127.0.0.1', $port)
+                    $probe.Dispose()
+                    $up = $true
+                    break
+                }
+                catch {
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+            $up | Should -BeTrue -Because 'the fake monitor must be listening before the call'
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $reply = Invoke-CleanMonitorCommand -Port "$port" `
+                -Command 'dump-guest-memory "C:/x/guest-memory.elf"' -WaitForPromptSec 30
+            $sw.Stop()
+            $reply | Should -Match 'dump complete'
+            $reply | Should -Match '\(qemu\)'
+            $sw.Elapsed.TotalSeconds | Should -BeGreaterThan 2.5 -Because 'the 3 s dump must have been waited out'
+        }
+        finally {
+            $job | Stop-Job -ErrorAction SilentlyContinue
+            $job | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
     }
 }
