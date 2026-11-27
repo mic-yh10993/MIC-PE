@@ -999,6 +999,21 @@ Describe 'Invoke-CleanGdiPlusCatFixStep (round 36: GdiPlus.dll catalog for smss)
         $script:CleanScriptText | Should -Match 'Invoke-CleanGdiPlusCatFixStep'
     }
 
+    It 'pins AddUpdates = 1 in the clean base step (round 37: serviced 22621.1105 source, not RTM)' {
+        # Rounds 13/14 (cdrom.sys), 35/36 (GdiPlus.dll) and 36
+        # (difxapi.dll) all died on the same skew: the RTM source
+        # lacks the 22621.1105 catalogs the whitelist -- built from
+        # the 22621.1105 reference -- lists (1,167 of 1,911
+        # whitelisted .cats missing from the RTM Professional source
+        # in the round 36 log). AddUpdates=1 makes the source a
+        # serviced 22621.1105 image so the whitelisted catalogs
+        # match it. Build-Micpe.ps1 keeps its own '0' (non-clean
+        # path, untouched by this round); this pin is
+        # Build-CleanPe.ps1 only.
+        $script:CleanScriptText | Should -Match "AddUpdates = '1'"
+        $script:CleanScriptText | Should -Not -Match "AddUpdates = '0'"
+    }
+
     It 'Invoke-CleanGdiPlusCatFixStep injects the covering catalog and writes the diagnosis (seam)' {
         $staging = Join-Path $script:TempRoot ("micpe-gdiplus-staging-{0}" -f [guid]::NewGuid())
         $work = Join-Path $script:TempRoot ("micpe-gdiplus-work-{0}" -f [guid]::NewGuid())
@@ -1018,6 +1033,10 @@ Describe 'Invoke-CleanGdiPlusCatFixStep (round 36: GdiPlus.dll catalog for smss)
             $result = Invoke-CleanGdiPlusCatFixStep -StagingDir $staging -InstallWim (Join-Path $pre 'fake-install.wim') -WorkDir $work -CandidateCats $script:fixtureCats -PreExtractedInstallWimDir $pre
             $result.InjectedCats.Count | Should -Be 1
             $result.InjectedCats[0].Name | Should -Be 'gdiplus-covering.cat'
+            $result.AlreadyCovered | Should -BeFalse
+            $result.CoveringCats.Count | Should -Be 1
+            $result.CoveringCats[0].Name | Should -Be 'gdiplus-covering.cat'
+            $result.CoveringCats[0].Sha256 | Should -Be $result.InjectedCats[0].Sha256
             $result.OfficialMatch | Should -BeTrue
             $result.GdiPlusAuthSha1 | Should -Be $script:fixtureDllSha1
             $result.GdiPlusAuthSha256 | Should -Be $script:fixtureDllSha256
@@ -1036,6 +1055,45 @@ Describe 'Invoke-CleanGdiPlusCatFixStep (round 36: GdiPlus.dll catalog for smss)
             $diag | Should -Match 'COVERS the file'
             $diag | Should -Match 'does NOT cover the file'
             $diag | Should -Match 'KnownDLLs'
+        }
+        finally {
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $pre -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Invoke-CleanGdiPlusCatFixStep returns early when the staged CatRoot already covers the file (round 37 coverage-first)' {
+        $staging = Join-Path $script:TempRoot ("micpe-gdiplus-covered-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-gdiplus-coveredwork-{0}" -f [guid]::NewGuid())
+        $pre = Join-Path $script:TempRoot ("micpe-gdiplus-coveredpre-{0}" -f [guid]::NewGuid())
+        try {
+            $stagingDllDir = Join-Path $staging 'Windows\System32'
+            New-Item -ItemType Directory -Path $stagingDllDir -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-fixture.dll') -Destination (Join-Path $stagingDllDir 'GdiPlus.dll') -Force
+            # The staged CatRoot already holds the covering catalog
+            # (this is what the whitelist copy delivers after the
+            # round 37 AddUpdates flip); the sha1-only one must NOT
+            # count as covering.
+            $stagedCatDir = Join-Path $staging 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}'
+            New-Item -ItemType Directory -Path $stagedCatDir -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-covering.cat') -Destination (Join-Path $stagedCatDir 'gdiplus-covering.cat') -Force
+            Copy-Item -LiteralPath (Join-Path $script:fixtures 'gdiplus-sha1only.cat') -Destination (Join-Path $stagedCatDir 'gdiplus-sha1only.cat') -Force
+            # The pre-extracted "install.wim" dir is EMPTY -- no
+            # GdiPlus.dll, no catalogs: if the step touched it at
+            # all, the official comparison would fail. The early
+            # return must skip it entirely.
+            New-Item -ItemType Directory -Path $pre -Force | Out-Null
+            $result = Invoke-CleanGdiPlusCatFixStep -StagingDir $staging -InstallWim (Join-Path $pre 'fake-install.wim') -WorkDir $work -CandidateCats $script:fixtureCats -PreExtractedInstallWimDir $pre
+            $result.AlreadyCovered | Should -BeTrue
+            $result.InjectedCats.Count | Should -Be 0
+            $result.CoveringCats.Count | Should -Be 1
+            $result.CoveringCats[0].Name | Should -Be 'gdiplus-covering.cat'
+            $result.OfficialMatch | Should -BeNull
+            $diag = Get-Content -LiteralPath $result.DiagPath -Raw
+            $diag | Should -Match 'already covers the file'
+            $diag | Should -Match 'KnownDLLs'
+            $diag | Should -Match '0 \(none needed'
         }
         finally {
             Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
@@ -1077,7 +1135,7 @@ Describe 'Invoke-CleanGdiPlusCatFixStep (round 36: GdiPlus.dll catalog for smss)
         $dispatch = ($script:CleanScriptText -split '# Dispatch')[1]
         $dispatch.IndexOf('Invoke-CleanGdiPlusCatFixStep') | Should -BeGreaterThan $dispatch.IndexOf('Invoke-CleanCatFixStep')
         $dispatch.IndexOf('Invoke-CleanGdiPlusCatFixStep') | Should -BeLessThan $dispatch.IndexOf('Invoke-CleanCaptureStep')
-        $dispatch | Should -Match 'gdiPlusFix\.InjectedCats'
+        $dispatch | Should -Match 'gdiPlusFix\.CoveringCats'
         $dispatch | Should -Match 'micpe-gdiplus-diag\.txt'
     }
 

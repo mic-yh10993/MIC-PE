@@ -23,11 +23,13 @@
                   on from the official UUP dump 22621.900 build (KB5020044,
                   user decision 2026-11-25 scheme 2) and inject them into
                   the staging CatRoot; SHA256-verified, and each .cat must
-                  contain the cdrom.sys Authenticode hash. The RTM
-                  install.wim does not carry them (round 12 root cause),
-                  so the whitelist alone can never bring them in.
-                  Read back after capture: both files must be in boot.wim
-                  with matching SHA256, or the build fails here.
+                  contain the cdrom.sys Authenticode hash. Round 37
+                  flipped AddUpdates to 1, so the serviced source now
+                  carries them and the whitelist copy brings them in;
+                  the fetch stays as a pinned safety net (it re-injects
+                  identical bytes). Read back after capture: both files
+                  must be in boot.wim with matching SHA256, or the
+                  build fails here.
       3. shell    read shell.zip (StartAllBack + Start11, user-supplied,
                   in-repo src/build/data/shell.zip, SHA256-pinned) and lay it
                   out under Windows\System32\MICPE\ (StartAllBack and
@@ -196,7 +198,27 @@ function Invoke-CleanBaseStep {
     # is governed by the media, not the base images, and the iso step drops
     # the media's install.wim anyway (user decision 2026-11-17 15:09).
     $config = Set-ConvertConfig -IniPath $iniPath -Overrides @{
-        AddUpdates = '0'
+        # Round 37: AddUpdates is 1 -- the source install.wim is a
+        # serviced 22621.1105 image, not the RTM 22621.1 base. The
+        # whitelist was built from the 22621.1105 reference PE, and
+        # three rounds died on the skew between the two: cdrom.sys
+        # (round 13/14, its hash only in 22621.900 .cats the RTM
+        # source lacks), GdiPlus.dll (round 35/36, RTM file covered
+        # by no .cat in the image), difxapi.dll (round 36, same
+        # class -- its hash is covered in the reference only by
+        # 22621.1105 Package05111 and by Pnp-merged 22621.1, neither
+        # of which the RTM Professional source carries; the file
+        # itself is byte-identical RTM in both images, no embedded
+        # signature, so only a catalog can vouch for it). With
+        # AddUpdates=1 the whitelisted 22621.1105 .cats match the
+        # source, the GdiPlus step below becomes a coverage safety
+        # net instead of the only fix, and the image's files are
+        # the reference's versions. Cost: the conversion integrates
+        # the updates (longer; the job timeout is 360 minutes).
+        # AddUpdates=1 is also the UUP converter's own default; the
+        # '0' was the framework's initial choice, never a reaction
+        # to a failed flip (no such attempt on record).
+        AddUpdates = '1'
         Cleanup    = '1'
         ResetBase  = '0'
         SkipApps   = '0'
@@ -371,18 +393,26 @@ function Invoke-CleanExtractStep {
 # files all carry ~9.5 KB). Winload verifies it through the system
 # catalogs, and its Authenticode hash lives only in these two 22621.900
 # catalog files. Both are in the 9,405-path whitelist, but the RTM
-# install.wim (22621.1, AddUpdates=0) does not carry them, so the extract
-# step silently skips them (--nullglob) and the captured boot.wim has no
-# catalog vouching for cdrom.sys -> winload reports 0xc0000428 ("the hash
-# for the image cannot be found in the system catalogs", [MS-ERREF]).
+# install.wim (22621.1, AddUpdates=0 -- the setting before round 37)
+# does not carry them, so the extract step silently skips them
+# (--nullglob) and the captured boot.wim has no catalog vouching for
+# cdrom.sys -> winload reports 0xc0000428 ("the hash for the image
+# cannot be found in the system catalogs", [MS-ERREF]).
 #
 # Fix (user decision 2026-11-25 10:33, scheme 2): fetch the two files from
 # the official UUP dump 22621.900 build (KB5020044, uuid
 # 5d5ef944-1ba0-436b-b7d3-571d59a15cbb) and inject them into the staging
 # CatRoot. Ramos is comparison only, never a source (the user: many Ramos
-# files were tampered with). AddUpdates stays 0; the local machine cannot
-# fetch the files (the POST is blocked), so the fetch happens in CI, where
-# the base step already does the same get.php POST.
+# files were tampered with). Round 37 flipped AddUpdates to 1 (see
+# Invoke-CleanBaseStep): the serviced source now carries these two
+# .cats itself, so the whitelist copy brings them in and this fetch
+# re-injects identical bytes -- it stays as a pinned safety net, not
+# the only source. The local machine cannot fetch the files (the POST
+# is blocked), so the fetch happens in CI, where the base step already
+# does the same get.php POST. cdrom.sys itself is unchanged by the
+# flip: it is byte-identical between the RTM image and the 22621.1105
+# reference (SHA256 3912fc71..., verified round 12), so the pinned
+# hashes below still hold.
 
 function Find-ByteSequence {
     # Raw byte search: returns $true when $Needle occurs in $Bytes. Used
@@ -521,10 +551,13 @@ function Test-CleanCatHasAuthenticodeHash {
 function Test-CleanCatHasCdromHash {
     # True when the catalog file contains the cdrom.sys Authenticode hash
     # (both SHA1 and SHA256, as raw bytes). The hashes are pinned: they
-    # belong to the RTM cdrom.sys the build always extracts (SHA256
+    # belong to the cdrom.sys the build always extracts (SHA256
     # 3912fc71...), computed with the section-based Authenticode algorithm
     # (see ~/workspace/micpe-catfix/authenticode_hash.py -- the naive
-    # "whole file minus CheckSum" hash is wrong).
+    # "whole file minus CheckSum" hash is wrong). The file is
+    # byte-identical between the RTM image and the 22621.1105 reference
+    # (verified round 12), so the AddUpdates=1 flip in round 37 does
+    # not move it and this pin still holds.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -839,11 +872,14 @@ function Invoke-CleanGdiPlusCatFixStep {
     # covered by the two 22621.1105 catalogs that ARE in the whitelist
     # but never made it into the image: the image has 731 x 22621.1
     # .cats + the 2 injected 22621.900 ones, ZERO 22621.1105 ones).
-    # Root cause of the skew: the UUP converter runs with
-    # AddUpdates = '0' (Invoke-CleanBaseStep), so the source
+    # Root cause of the skew: the UUP converter ran with
+    # AddUpdates 0 (Invoke-CleanBaseStep) before round 37, so the source
     # install.wim is the RTM 22621.1 base -- every file the reference
     # updated is present in RTM form, and its 22621.1105 catalog is
-    # silently skipped by the whitelist copy (warn-only). KnownDLLs
+    # silently skipped by the whitelist copy (warn-only). Round 37
+    # flipped AddUpdates to '1', so this skew is gone for new
+    # builds; the step below now only injects when the staged
+    # CatRoot still does not cover the file. KnownDLLs
     # is NOT the problem: `gdiplus` -> `gdiplus.dll` is present in
     # both the r111 and the reference SYSTEM hives (verified locally
     # with regipy; the .cat injection does not touch the registry,
@@ -862,18 +898,34 @@ function Invoke-CleanGdiPlusCatFixStep {
     # the catalog lives elsewhere -- do NOT silently inject a
     # non-covering catalog, and do NOT guess another package).
     #
-    # Caveat (whack-a-mole): GdiPlus.dll is only the FIRST uncovered
-    # RTM file the boot hits (smss loads it early). Other files the
-    # reference updated may fail the same way later in boot; each one
-    # gets the same treatment. If that recurs, the structural fix is
-    # flipping AddUpdates to '1' (a real 22621.1105 source) or copying
-    # the whole source CatRoot -- both are bigger decisions for a
-    # later round, not this one.
+    # Caveat (whack-a-mole, closed round 37): GdiPlus.dll was only
+    # the FIRST uncovered RTM file the boot hit (smss loads it early);
+    # round 36 immediately hit the next one, difxapi.dll, the same
+    # way. The structural fix landed in round 37: AddUpdates is now
+    # '1' (Invoke-CleanBaseStep), so the source is a serviced
+    # 22621.1105 image and the whitelisted 22621.1105 catalogs match
+    # it. This step stays as the coverage safety net, and is now
+    # coverage-FIRST: it checks whether the staged CatRoot already
+    # covers the file (the normal case after the flip) and only
+    # injects RTM candidates from the source install.wim when it
+    # does not. The full-source-CatRoot alternative was evaluated
+    # and rejected in round 37: the RTM Professional source lacks
+    # both catalogs covering difxapi.dll (Package05111 22621.1105
+    # and Pnp-merged 22621.1 are both absent from it), so copying
+    # its CatRoot could not be shown to cover the next file --
+    # only the serviced source can, because the reference proves
+    # its catalogs cover these files.
     #
     # The diagnosis is written to micpe-gdiplus-diag.txt (WorkDir)
     # and to the step log: file hash + version, official comparison
     # (staging file vs install.wim file), per-candidate .cat verdict,
-    # injected list. -PreExtractedInstallWimDir is a test seam: when
+    # injected list. Round 37: coverage is checked FIRST -- if the
+    # staged CatRoot already covers the file the step returns early
+    # (AlreadyCovered, no install.wim extraction, no injection) and
+    # CoveringCats names the catalog(s); otherwise it injects from
+    # the source and CoveringCats is the injected list. Either way
+    # the dispatch read-back verifies the covering catalog(s) are in
+    # boot.wim. -PreExtractedInstallWimDir is a test seam: when
     # given, the wimlib extraction from install.wim is skipped and
     # the supplied directory stands in for the extracted content.
     [CmdletBinding()]
@@ -925,6 +977,51 @@ function Invoke-CleanGdiPlusCatFixStep {
     Write-SubStep ("GdiPlus.dll in staging: version {0}, SHA256 {1}" -f $stagingVersion, $stagingSha256)
     Write-SubStep ("GdiPlus.dll Authenticode SHA1 {0} / SHA256 {1}" -f $stagingAuth.Sha1, $stagingAuth.Sha256)
 
+    # 1b. Coverage first (round 37: AddUpdates=1, the source is a
+    # serviced 22621.1105 image, so the whitelist copy normally
+    # already covers the file -- the 22621.1105 Package0518 /
+    # WinPE-SKU-Foundation-merged catalogs are in the whitelist).
+    # Scan the STAGED CatRoot for a catalog containing both
+    # Authenticode hashes; if one covers the file there is nothing
+    # to inject -- record it and return early, without extracting
+    # anything from install.wim. The covering catalog still goes
+    # into CoveringCats so the read-back after capture verifies it
+    # survived. A missing CatRoot directory is simply "not covered"
+    # (fresh staging in the tests), never an error here.
+    $catRootDir = Join-Path $StagingDir $CatRootRel
+    $covering = [System.Collections.Generic.List[pscustomobject]]::new()
+    if (Test-Path -LiteralPath $catRootDir) {
+        foreach ($catFile in @(Get-ChildItem -LiteralPath $catRootDir -Filter '*.cat' -File -ErrorAction SilentlyContinue)) {
+            if (Test-CleanCatHasAuthenticodeHash -CatPath $catFile.FullName -Sha1 $stagingAuth.Sha1 -Sha256 $stagingAuth.Sha256) {
+                $covering.Add([pscustomobject]@{
+                    Name   = $catFile.Name
+                    Size   = $catFile.Length
+                    Sha256 = (Get-FileHash -LiteralPath $catFile.FullName -Algorithm SHA256).Hash.ToLower()
+                })
+            }
+        }
+    }
+    if ($covering.Count -gt 0) {
+        $diag.Add(('staged CatRoot already covers the file: {0}' -f (($covering | ForEach-Object { $_.Name }) -join ', ')))
+        $diag.Add('catalogs injected: 0 (none needed -- already covered by the whitelist copy)')
+        $diag.Add('KnownDLLs: `gdiplus` -> `gdiplus.dll` verified present in both the r111 and the reference SYSTEM hives (local regipy check 2026-11-27, against the real r111 boot.wim); the .cat injection does not touch the registry, so no CI re-check is needed.')
+        $diag.Add('VERDICT: already covered by the staged CatRoot (whitelist copy) -- the round 35 CI failure (GdiPlus.dll not signed) should be gone; the read-back after capture verifies the covering catalog is in boot.wim.')
+        $diag | Set-Content -LiteralPath $diagPath -Encoding ASCII
+        Write-SubStep ("GdiPlus.dll already covered by staged catalog(s): {0} -- no injection needed" -f (($covering | ForEach-Object { $_.Name }) -join ', '))
+        Write-SubStep ("GdiPlus.dll diagnosis written to {0}" -f $diagPath)
+        return [pscustomobject]@{
+            DiagPath           = $diagPath
+            GdiPlusVersion     = $stagingVersion
+            GdiPlusSha256      = $stagingSha256
+            GdiPlusAuthSha1    = $stagingAuth.Sha1
+            GdiPlusAuthSha256  = $stagingAuth.Sha256
+            OfficialMatch      = $null
+            AlreadyCovered     = $true
+            InjectedCats       = @()
+            CoveringCats       = @($covering.ToArray())
+        }
+    }
+
     # 2. The same file from the official source install.wim: the
     # staging copy must be byte-identical to it (the build must not
     # have modified the file -- if it did, no catalog from the source
@@ -958,11 +1055,11 @@ function Invoke-CleanGdiPlusCatFixStep {
         Write-SubStep '!!! GdiPlus.dll not found in the source install.wim (cannot compare against official)'
     }
 
-    # 3. Per-candidate catalog verdict: only a catalog that contains
-    # BOTH Authenticode hashes covers the file. A candidate missing
-    # from the source install.wim is a warning, not a failure --
-    # the RTM source may legitimately lack one variant.
-    $catRootDir = Join-Path $StagingDir $CatRootRel
+    # 3. Per-candidate catalog verdict (only reached when the staged
+    # CatRoot does NOT already cover the file): only a catalog that
+    # contains BOTH Authenticode hashes covers the file. A candidate
+    # missing from the source install.wim is a warning, not a
+    # failure -- the RTM source may legitimately lack one variant.
     if (-not (Test-Path -LiteralPath $catRootDir)) {
         New-Item -ItemType Directory -Path $catRootDir -Force | Out-Null
     }
@@ -1014,7 +1111,9 @@ function Invoke-CleanGdiPlusCatFixStep {
         GdiPlusAuthSha1    = $stagingAuth.Sha1
         GdiPlusAuthSha256  = $stagingAuth.Sha256
         OfficialMatch      = $officialMatch
+        AlreadyCovered     = $false
         InjectedCats       = @($injected.ToArray())
+        CoveringCats       = @($injected.ToArray())
     }
 }
 
@@ -1698,12 +1797,16 @@ Assert-CleanRegistry -AppNames $apps.Names
 Invoke-CleanWimBootStep -StagingDir $paths.Staging -PeDonorWim $base.BootWim -WimlibPath $WimlibPath
 Assert-BootCritical -ImageRoot $paths.Staging
 $capturedBootWim = Invoke-CleanCaptureStep
-# Round 36: the read-back now covers the GdiPlus catalogs too --
+# Round 36/37: the read-back now covers the GdiPlus catalogs too --
 # Assert-CleanCatFilesInBootWim takes the combined list (cdrom cats
-# from round 13/14 + GdiPlus cats injected above, each with its
+# from round 13/14 + the GdiPlus covering catalogs, each with its
 # measured size/SHA256), so a catalog that failed to survive capture
-# fails the build here instead of wasting the QEMU run.
-Assert-CleanCatFilesInBootWim -BootWim $capturedBootWim -ExpectedCats (@($catFix.ExpectedCats) + @($gdiPlusFix.InjectedCats)) -WimlibPath $WimlibPath
+# fails the build here instead of wasting the QEMU run. CoveringCats
+# is the injected catalog when the step injected one, or the
+# already-covering catalog the whitelist copy brought in (round 37:
+# AddUpdates=1, the normal case) -- either way it is the catalog
+# that must be in boot.wim.
+Assert-CleanCatFilesInBootWim -BootWim $capturedBootWim -ExpectedCats (@($catFix.ExpectedCats) + @($gdiPlusFix.CoveringCats)) -WimlibPath $WimlibPath
 $result = Invoke-CleanIsoStep -BootWim $capturedBootWim
 
 Write-Step 'done'
