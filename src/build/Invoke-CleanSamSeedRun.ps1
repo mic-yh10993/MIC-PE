@@ -17,7 +17,9 @@
          (same calls as Invoke-CleanBaseStep, AddUpdates=1 serviced
          22621.1105 -- the same source the clean build uses).
       2. DISM-apply it to a VHD, bcdboot the EFI partition, drop in
-         sam-seed-unattend.xml (specialize + OOBE).
+         sam-seed-unattend.xml (specialize + OOBE). bcdboot runs from
+         the applied image's own System32 (round 42: the host 26100
+         bcdboot failed on the 22621 image with exit 193).
       3. Boot the VHD in QEMU (TCG, like the clean verify) and wait
          for the desktop: specialize has run, OOBE has created the
          MICPE administrator (blank password, Administrators group)
@@ -184,6 +186,164 @@ function Invoke-SeedDiskpart {
     if ($LASTEXITCODE -ne 0) {
         throw [System.InvalidOperationException]::new(
             "diskpart failed while $Label (exit code $LASTEXITCODE)")
+    }
+}
+
+function Assert-SeedBcdbootPrerequisites {
+    # Pre-bcdboot gate (round 42: run 45988904072 died at bcdboot --
+    # the host bcdboot 26100 failed on the 22621 image with
+    # "Failure when attempting to copy boot files.", exit 193
+    # ERROR_BAD_EXE_FORMAT). The failed run's log proves the disk
+    # layout (GPT, EFI FAT32 on S:, NTFS on V:, DISM 100%) but proves
+    # nothing about S: at bcdboot time -- no step ever read S: before
+    # bcdboot, so "mounted but unreadable" was never excluded. Every
+    # probe below logs OK/FAIL first, so the CI log shows the full
+    # state even when the gate throws; the throw then names every
+    # failed check. In particular it answers, in the log, the user's
+    # question "is the EFI partition actually attached": S: must be a
+    # live FAT32 volume, an EFI System Partition by GPT type, and
+    # readable (Test-Path + dir) at this exact moment.
+    # Uses Write-Host only (no Write-Step / lib helpers), so the
+    # function stays testable in isolation.
+    [CmdletBinding()]
+    param()
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $sReadable = $false
+    $sFileSystem = ''
+    $sGptType = ''
+    $bootmgfwExists = $false
+    $bcdTemplateExists = $false
+    $imageBcdbootExists = $false
+
+    # 1. S: volume exists, FAT32, healthy.
+    $volS = $null
+    try { $volS = Get-Volume -DriveLetter S -ErrorAction Stop } catch { $volS = $null }
+    if ($null -eq $volS) {
+        Write-Host 'bcdboot prereq [FAIL] S: volume: Get-Volume -DriveLetter S found no volume'
+        $failures.Add('S: volume not found')
+    }
+    elseif ($volS.FileSystem -ne 'FAT32') {
+        Write-Host ("bcdboot prereq [FAIL] S: volume: file system is {0}, expected FAT32" -f $volS.FileSystem)
+        $failures.Add(("S: file system is {0}, expected FAT32" -f $volS.FileSystem))
+    }
+    else {
+        $sFileSystem = 'FAT32'
+        Write-Host ("bcdboot prereq [OK  ] S: volume: FAT32, {0:N0} MB, health {1}" -f ($volS.Size / 1MB), $volS.HealthStatus)
+    }
+
+    # 2. S: is the EFI System Partition by GPT type.
+    $espGuid = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+    $partS = $null
+    try { $partS = Get-Partition -DriveLetter S -ErrorAction Stop } catch { $partS = $null }
+    if ($null -eq $partS) {
+        Write-Host 'bcdboot prereq [FAIL] S: GPT type: Get-Partition -DriveLetter S found no partition'
+        $failures.Add('S: partition not found')
+    }
+    elseif ($partS.GptType -ne $espGuid) {
+        Write-Host ("bcdboot prereq [FAIL] S: GPT type: {0}, expected EFI System Partition {1}" -f $partS.GptType, $espGuid)
+        $failures.Add(("S: GPT type is {0}, expected EFI System Partition" -f $partS.GptType))
+    }
+    else {
+        $sGptType = $espGuid
+        Write-Host ("bcdboot prereq [OK  ] S: GPT type: EFI System Partition (partition {0})" -f $partS.PartitionNumber)
+    }
+
+    # 3. S: is readable RIGHT NOW -- the user's question: is the EFI
+    # partition actually attached? Assigned in diskpart is not proof;
+    # a live Test-Path + dir at this exact moment is.
+    $rootOk = $false
+    try { $rootOk = Test-Path -LiteralPath 'S:\' -ErrorAction Stop } catch { $rootOk = $false }
+    if (-not $rootOk) {
+        Write-Host 'bcdboot prereq [FAIL] S: readable: Test-Path S:\ failed -- the EFI partition is NOT readable at bcdboot time'
+        $failures.Add('S:\ is not readable (EFI partition not attached or not accessible)')
+    }
+    else {
+        $listing = $null
+        try { $listing = @(Get-ChildItem -LiteralPath 'S:\' -Force -ErrorAction Stop) } catch { $listing = $null }
+        if ($null -eq $listing) {
+            Write-Host 'bcdboot prereq [FAIL] S: readable: Test-Path S:\ passed but dir S:\ failed'
+            $failures.Add('dir S:\ failed after Test-Path passed')
+        }
+        else {
+            $sReadable = $true
+            $names = ($listing | ForEach-Object { $_.Name }) -join ', '
+            Write-Host ("bcdboot prereq [OK  ] S: readable: S:\ is attached and readable right now, {0} entr(ies) before bcdboot: {1}" -f $listing.Count, $names)
+        }
+    }
+
+    # 4. fsutil agrees S: is FAT32 (independent confirmation from the OS).
+    $fsutilLines = @()
+    try { $fsutilLines = @( & fsutil.exe fsinfo volumeinfo S: 2>&1 ) } catch { $fsutilLines = @() }
+    $fsutilText = ($fsutilLines -join "`n")
+    $fsMatch = [regex]::Match($fsutilText, 'File System Name\s*:\s*(\S+)')
+    if (-not $fsMatch.Success) {
+        Write-Host 'bcdboot prereq [FAIL] S: fsutil: fsutil fsinfo volumeinfo S: returned no File System Name'
+        $failures.Add('fsutil fsinfo volumeinfo S: returned no File System Name')
+    }
+    elseif ($fsMatch.Groups[1].Value -ne 'FAT32') {
+        Write-Host ("bcdboot prereq [FAIL] S: fsutil: File System Name is {0}, expected FAT32" -f $fsMatch.Groups[1].Value)
+        $failures.Add(("fsutil reports S: file system {0}, expected FAT32" -f $fsMatch.Groups[1].Value))
+    }
+    else {
+        Write-Host 'bcdboot prereq [OK  ] S: fsutil: File System Name FAT32'
+    }
+
+    # 5. V: volume exists, NTFS, and holds the applied Windows.
+    $volV = $null
+    try { $volV = Get-Volume -DriveLetter V -ErrorAction Stop } catch { $volV = $null }
+    if ($null -eq $volV) {
+        Write-Host 'bcdboot prereq [FAIL] V: volume: Get-Volume -DriveLetter V found no volume'
+        $failures.Add('V: volume not found')
+    }
+    elseif ($volV.FileSystem -ne 'NTFS') {
+        Write-Host ("bcdboot prereq [FAIL] V: volume: file system is {0}, expected NTFS" -f $volV.FileSystem)
+        $failures.Add(("V: file system is {0}, expected NTFS" -f $volV.FileSystem))
+    }
+    else {
+        Write-Host ("bcdboot prereq [OK  ] V: volume: NTFS, {0:N0} MB, health {1}" -f ($volV.Size / 1MB), $volV.HealthStatus)
+    }
+    if (-not (Test-Path -LiteralPath 'V:\Windows')) {
+        Write-Host 'bcdboot prereq [FAIL] V:\Windows: missing -- DISM did not apply the image to V:'
+        $failures.Add('V:\Windows is missing')
+    }
+    else {
+        Write-Host 'bcdboot prereq [OK  ] V:\Windows: present (DISM apply landed on V:)'
+    }
+
+    # 6. The source boot files bcdboot needs to copy, plus the image's
+    # own bcdboot.exe (the fix runs that one, not the host's).
+    foreach ($bootFile in @(
+        'V:\Windows\Boot\EFI\bootmgfw.efi'
+        'V:\Windows\System32\config\BCD-Template'
+        'V:\Windows\System32\bcdboot.exe'
+    )) {
+        if (Test-Path -LiteralPath $bootFile) {
+            $sizeText = ''
+            try { $sizeText = (" ({0:N0} bytes)" -f (Get-Item -LiteralPath $bootFile).Length) } catch { $sizeText = '' }
+            Write-Host ("bcdboot prereq [OK  ] source file present: {0}{1}" -f $bootFile, $sizeText)
+            if ($bootFile -like '*bootmgfw.efi') { $bootmgfwExists = $true }
+            elseif ($bootFile -like '*BCD-Template') { $bcdTemplateExists = $true }
+            elseif ($bootFile -like '*bcdboot.exe') { $imageBcdbootExists = $true }
+        }
+        else {
+            Write-Host ("bcdboot prereq [FAIL] source file missing: {0}" -f $bootFile)
+            $failures.Add(("source file missing: {0}" -f $bootFile))
+        }
+    }
+
+    if ($failures.Count -gt 0) {
+        throw [System.InvalidOperationException]::new(
+            ("bcdboot prerequisites failed ({0}): {1}" -f $failures.Count, ($failures -join '; ')))
+    }
+    Write-Host 'bcdboot prereq [OK  ] all checks passed -- S: IS attached (FAT32, EFI System Partition, readable right now); V:\Windows boot files are present'
+    return [pscustomobject]@{
+        SReadable          = $sReadable
+        SFileSystem        = $sFileSystem
+        SGptType           = $sGptType
+        BootmgfwExists     = $bootmgfwExists
+        BcdTemplateExists  = $bcdTemplateExists
+        ImageBcdbootExists = $imageBcdbootExists
     }
 }
 
@@ -457,11 +617,25 @@ try {
             "dism /Apply-Image failed with exit code $LASTEXITCODE")
     }
 
-    Write-Step 'writing the EFI bootloader (bcdboot)'
-    & bcdboot.exe V:\Windows /s S: /f UEFI | Out-Host
+    # Gate: prove the bcdboot prerequisites in the log before running
+    # bcdboot (round 42: run 45988904072 died here -- the host
+    # bcdboot 26100 failed on the 22621 image, exit 193; the log
+    # proved the layout but never proved S: was readable).
+    Assert-SeedBcdbootPrerequisites
+
+    Write-Step 'writing the EFI bootloader (bcdboot from the applied image)'
+    # Run the applied image's own bcdboot (22621), not the host's
+    # (26100, Server 2025): Microsoft's Capture-and-Apply sample runs
+    # W:\Windows\System32\bcdboot, and the Win11 install guide
+    # documents the image's own bcdboot as the remedy for exactly
+    # "Failure when attempting to copy boot files". The image's
+    # bcdboot copies the image's own boot files, so no host/image
+    # version skew can enter. /f UEFI is unchanged (OVMF + GPT).
+    $imageBcdboot = 'V:\Windows\System32\bcdboot.exe'
+    & $imageBcdboot V:\Windows /s S: /f UEFI | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw [System.InvalidOperationException]::new(
-            "bcdboot failed with exit code $LASTEXITCODE")
+            "bcdboot (from the applied image) failed with exit code $LASTEXITCODE")
     }
 
     Write-Step 'dropping in the seed unattend (specialize + OOBE)'
