@@ -467,15 +467,28 @@ function Test-CleanScreenshot {
         encoder already proved this approach works there. Reads the PPM
         raster, samples a grid of pixels, and classifies:
 
-          Recovery  >= 50% of sampled pixels are bright blue, and the
-                    mean red of those blue pixels is above 16: the
-                    Windows Recovery screen, (32,103,178), fills 99%
-                    of the frame in round 10. A dark LogonUI background
-                    does not trip this: its blue is dark (B < 100)
-                    and desaturated.
-          BlueScreen >= 50% of sampled pixels are bright blue, and the
-                    mean red of those blue pixels is 16 or below: a
-                    bugcheck blue screen. The classic BSOD blue is
+          Recovery  >= 50% of sampled pixels are bright blue, AND the
+                    blue pixels are FLAT (uniformity >= 0.90: the
+                    fraction of blue pixels within +-8 per channel of
+                    the blue mean): the Windows Recovery screen,
+                    (32,103,178), fills 99% of the frame in round 10
+                    with one color. A dark LogonUI background does
+                    not trip this: its blue is dark (B < 100) and
+                    desaturated. Round 42 rerun 8 lesson: the Windows
+                    11 welcome screen is ALSO blue-dominant (Bloom
+                    wallpaper, blue 57%) but TEXTURED (uniformity
+                    0.20), and the desktop is blue 89% with
+                    uniformity 0.00 -- the old blue-fraction-only
+                    rule called the welcome screen Recovery and threw
+                    60 s before the desktop would have loaded. A flat
+                    blue is a failure screen; a textured blue is a
+                    wallpaper (welcome screen or desktop) and must
+                    not fail the run. Real Recovery/BSOD frames
+                    measure uniformity 0.985-1.000 (text included),
+                    so the 0.90 threshold has margin on both sides.
+          BlueScreen >= 50% of sampled pixels are bright blue, AND
+                    the blue pixels are flat (same uniformity rule):
+                    a bugcheck blue screen. The classic BSOD blue is
                     (0,120,215); round 14 rendered it as (0,61,146)
                     in QEMU, mean red ~1. Both have red 0, while the
                     Recovery blue has red 32, so the midpoint 16
@@ -489,8 +502,11 @@ function Test-CleanScreenshot {
           Other     anything else (LogonUI, desktop, Start menu).
 
         Returns a [pscustomobject] with Classification, BlueFraction,
-        BlackFraction, BlueMeanR/G/B, Sampled and Path. Throws on an
-        unreadable or malformed PPM; the caller treats that as unknown,
+        BlackFraction, BlueMeanR/G/B, BlueUniform (fraction of blue
+        pixels within +-8 per channel of the blue mean; 1.0 for a flat
+        failure blue, ~0.2 for the welcome screen, 0.0 for the
+        desktop), Sampled and Path. Throws on an unreadable or
+        malformed PPM; the caller treats that as unknown,
         not a failure.
     #>
     [CmdletBinding()]
@@ -541,6 +557,10 @@ function Test-CleanScreenshot {
     $blueSumR = 0
     $blueSumG = 0
     $blueSumB = 0
+    # Keep the blue pixels for the uniformity pass below: a flat
+    # failure blue has (nearly) identical blue pixels, a wallpaper
+    # blue does not. At most 40x40 samples, so the list is tiny.
+    $bluePixels = [System.Collections.Generic.List[int[]]]::new()
     for ($y = 0; $y -lt $height; $y += $stepY) {
         for ($x = 0; $x -lt $width; $x += $stepX) {
             $off = $rasterStart + ($y * $width + $x) * 3
@@ -553,6 +573,7 @@ function Test-CleanScreenshot {
                 $blueSumR += $r
                 $blueSumG += $g
                 $blueSumB += $b
+                $bluePixels.Add(@($r, $g, $b))
             }
             if ($r -lt 16 -and $g -lt 16 -and $b -lt 16) { $black++ }
         }
@@ -562,8 +583,21 @@ function Test-CleanScreenshot {
     $blueMeanR = if ($blue -gt 0) { $blueSumR / $blue } else { 0 }
     $blueMeanG = if ($blue -gt 0) { $blueSumG / $blue } else { 0 }
     $blueMeanB = if ($blue -gt 0) { $blueSumB / $blue } else { 0 }
+    # Uniformity of the blue pixels: the fraction within +-8 per
+    # channel of the blue mean. A real Recovery screen or BSOD is one
+    # flat color (0.985-1.000, text included); the welcome screen's
+    # Bloom wallpaper is 0.20 and the desktop's is 0.00. Only a flat
+    # blue may be called a failure screen.
+    $blueUniform = 0
+    if ($blue -gt 0) {
+        $within = 0
+        foreach ($px in $bluePixels) {
+            if ([Math]::Abs($px[0] - $blueMeanR) -le 8 -and [Math]::Abs($px[1] - $blueMeanG) -le 8 -and [Math]::Abs($px[2] - $blueMeanB) -le 8) { $within++ }
+        }
+        $blueUniform = $within / $blue
+    }
     $classification = 'Other'
-    if ($blueFraction -ge 0.5) {
+    if ($blueFraction -ge 0.5 -and $blueUniform -ge 0.9) {
         # Recovery blue (32,103,178) has red 32; both BSOD blues --
         # classic (0,120,215) and round-14 QEMU (0,61,146) -- have red 0.
         # The midpoint 16 separates them; white text / QR pixels are not
@@ -581,6 +615,7 @@ function Test-CleanScreenshot {
         BlueMeanR     = $blueMeanR
         BlueMeanG     = $blueMeanG
         BlueMeanB     = $blueMeanB
+        BlueUniform   = $blueUniform
         Sampled       = $sampled
     }
 }

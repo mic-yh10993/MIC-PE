@@ -149,7 +149,12 @@ function Get-SeedQemuArgList {
         # empty for exactly this reason). guest_errors makes the log
         # real -- guest errors during specialize/OOBE are the useful
         # signal; a still-empty file then means "no guest errors",
-        # not "logging was off".
+        # not "logging was off". Proven in run 46066624370: with -d
+        # guest_errors enabled the log still stayed 0 bytes across a
+        # healthy 69-minute boot -- there were simply no guest errors
+        # to log, so an empty file is the expected outcome, not a
+        # logging failure. The stdout/stderr logs are likewise 0 bytes
+        # by design (QEMU runs -display none with -serial none).
         '-d', 'guest_errors'
         '-D', $QemuLogPath
     )
@@ -1000,6 +1005,13 @@ try {
     # screens pass the color rule (Other, black 14-18%) and fooled
     # three polls in run 46051050523, so the detail check (texture
     # plus no central white text) is the second gate.
+    # Round 42 rerun 8 lesson: the Windows 11 welcome screen is
+    # blue-dominant too (Bloom wallpaper, blue 57%) but TEXTURED, so
+    # the classifier now only calls a FLAT blue a failure screen
+    # (uniformity >= 0.90); a textured blue (welcome screen or
+    # desktop) classifies as Other, which only resets the streak and
+    # keeps polling -- it must never throw. The welcome screen is
+    # progress (MICPE created, auto-logon in progress), not a failure.
     $streak = 0
     $shotIndex = 0
     $deadline = (Get-Date).AddMinutes($SpecializeTimeoutMin)

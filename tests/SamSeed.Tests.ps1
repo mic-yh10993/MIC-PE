@@ -785,3 +785,104 @@ Describe 'seed QEMU log actually records guest errors (round 42 rerun 7)' {
         $args | Should -Contain '-D'
     }
 }
+
+Describe 'seed classifier must not mistake the welcome screen for Recovery (round 42 rerun 8)' {
+    # Run 46066624370: shot-46 is the Windows 11 welcome screen (Bloom
+    # wallpaper, avatar, "MICPE", spinner, "欢迎") -- MICPE created,
+    # auto-logon reached the welcome screen, the furthest the seed has
+    # ever got. The old classifier called it Recovery on blue fraction
+    # alone (blue 57%) and the poll loop threw at line 1022, about 60 s
+    # before the desktop would have loaded. A blue screen is only a
+    # failure screen when the blue is FLAT: real Recovery (32,103,178)
+    # and BSOD blues fill the frame with one color (uniformity
+    # 0.985-1.000, measured on the real round-10 Recovery and round-14
+    # BSOD frames, text included); the welcome screen's Bloom wallpaper
+    # is textured (uniformity 0.20) and the desktop's is 0.00. The 0.90
+    # threshold has margin on both sides.
+    BeforeAll {
+        $script:WelcomeFixtures = Join-Path $PSScriptRoot 'fixtures'
+        function Expand-SeedFixtureGzip {
+            param([string] $Source, [string] $Destination)
+            $inStream = [System.IO.File]::OpenRead($Source)
+            try {
+                $outStream = [System.IO.File]::Create($Destination)
+                try {
+                    $gzip = [System.IO.Compression.GZipStream]::new($inStream, [System.IO.Compression.CompressionMode]::Decompress)
+                    try { $gzip.CopyTo($outStream) } finally { $gzip.Dispose() }
+                } finally { $outStream.Dispose() }
+            } finally { $inStream.Dispose() }
+        }
+        $script:SeedWelcome46 = Join-Path $TestDrive 'shot-46.ppm'
+        $script:SeedTiano45 = Join-Path $TestDrive 'shot-45.ppm'
+        $script:SeedDesktopWelcome = Join-Path $TestDrive 'seed-desktop-welcome.ppm'
+        Expand-SeedFixtureGzip -Source (Join-Path $script:WelcomeFixtures 'seed-welcome-shot-46.ppm.gz') -Destination $script:SeedWelcome46
+        Expand-SeedFixtureGzip -Source (Join-Path $script:WelcomeFixtures 'seed-tianocore-shot-45.ppm.gz') -Destination $script:SeedTiano45
+        Expand-SeedFixtureGzip -Source (Join-Path $script:WelcomeFixtures 'seed-desktop-reconstructed.ppm.gz') -Destination $script:SeedDesktopWelcome
+        # Extract the real Test-CleanScreenshot from the verifier (same
+        # brace-matching extraction as the round-8 OOBE tests).
+        $start = $script:VerifyScriptText.IndexOf('function Test-CleanScreenshot')
+        $open = $script:VerifyScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:VerifyScriptText.Length; $i++) {
+            $ch = $script:VerifyScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        . ([scriptblock]::Create($script:VerifyScriptText.Substring($start, $end - $start + 1)))
+    }
+
+    It 'pins the confuser: shot-46 is blue-dominant (blue 57%) -- the fact that tripped the old rule' {
+        $class = Test-CleanScreenshot -Path $script:SeedWelcome46
+        $class.BlueFraction | Should -BeGreaterThan 0.5
+        $class.BlackFraction | Should -BeLessThan 0.1
+    }
+
+    It 'rejects shot-46 as a failure screen: the welcome screen is progress, not Recovery' {
+        $class = Test-CleanScreenshot -Path $script:SeedWelcome46
+        $class.Classification | Should -Be 'Other'
+        $class.BlueUniform | Should -BeLessThan 0.9
+    }
+
+    It 'treats shot-46 as progress: the poll loop fail-fast condition does not fire on it' {
+        $class = Test-CleanScreenshot -Path $script:SeedWelcome46
+        ($class.Classification -eq 'BlueScreen' -or $class.Classification -eq 'Recovery') | Should -BeFalse
+    }
+
+    It 'the poll loop still fails fast on a real blue failure screen (the throw is conditioned on the classification, not deleted)' {
+        $script:VerifyScriptText | Should -Match 'BlueUniform'
+        $script:SeedScriptText | Should -Match "if \(\`$class\.Classification -eq 'BlueScreen' -or \`$class\.Classification -eq 'Recovery'\)"
+        $script:SeedScriptText | Should -Match 'specialize failed: guest shows'
+    }
+
+    It 'still classifies shot-45 (TianoCore) as Boot' {
+        $class = Test-CleanScreenshot -Path $script:SeedTiano45
+        $class.Classification | Should -Be 'Boot'
+        $class.BlackFraction | Should -BeGreaterThan 0.9
+        $class.BlueFraction | Should -Be 0
+    }
+
+    It 'still classifies the real round-10 Recovery screen as Recovery (flat blue is still a failure)' {
+        $class = Test-CleanScreenshot -Path (Join-Path $script:WelcomeFixtures 'r84-shot-04-recovery.ppm')
+        $class.Classification | Should -Be 'Recovery'
+        $class.BlueFraction | Should -BeGreaterThan 0.9
+        $class.BlueUniform | Should -BeGreaterOrEqual 0.9
+    }
+
+    It 'still classifies the real round-14 BSOD as BlueScreen (flat blue is still a failure)' {
+        $class = Test-CleanScreenshot -Path (Join-Path $script:WelcomeFixtures 'r90-shot-02-bsod.ppm')
+        $class.Classification | Should -Be 'BlueScreen'
+        $class.BlueFraction | Should -BeGreaterThan 0.9
+        $class.BlueUniform | Should -BeGreaterOrEqual 0.9
+    }
+
+    It 'the reconstructed desktop is not a failure screen either (blue 0.89, uniformity 0.00 -- the old rule would have killed the run at the desktop too)' {
+        $class = Test-CleanScreenshot -Path $script:SeedDesktopWelcome
+        $class.Classification | Should -Be 'Other'
+        $class.BlueFraction | Should -BeGreaterThan 0.5
+        $class.BlueUniform | Should -BeLessThan 0.9
+    }
+}
