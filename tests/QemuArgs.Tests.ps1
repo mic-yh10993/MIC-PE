@@ -3606,3 +3606,49 @@ kd> g
         $script:cleanVerify | Should -Match 'not a black-screen boot stall'
     }
 }
+
+Describe 'Round 41 black-screen re-capture' {
+    BeforeAll {
+        # Same dot-source pattern as the round 36 block: the clean
+        # verifier launches QEMU on load, so dot-source it with
+        # -ParseOnly and hand it real temp files for the mandatory paths.
+        $script:r41Dir = Join-Path ([System.IO.Path]::GetTempPath()) "clean-r41-$(Get-Random)"
+        $script:r41Share = Join-Path $script:r41Dir 'share'
+        New-Item -ItemType Directory -Path $script:r41Share -Force | Out-Null
+        $script:r41Iso = Join-Path $script:r41Dir 'test.iso'
+        New-Item -ItemType File -Path $script:r41Iso -Force | Out-Null
+        $script:r41Work = Join-Path $script:r41Dir 'work'
+        New-Item -ItemType Directory -Path $script:r41Work -Force | Out-Null
+        $script:r41Code = Join-Path $script:r41Share 'edk2-x86_64-code.fd'
+        [System.IO.File]::WriteAllBytes($script:r41Code, (New-Object byte[] 3653632))
+        . "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -ParseOnly -IsoPath $script:r41Iso -OvmfPath $script:r41Code -WorkDir $script:r41Work
+        $script:r41Verify = Get-Content -LiteralPath "$PSScriptRoot/../src/ci/Invoke-CleanQemuVerify.ps1" -Raw
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:r41Dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 're-captures only when the last shot is a black screen and QEMU is still running' {
+        # Round 40 control pass: shot-07 pure black, no BSOD captured,
+        # 0x5A unconfirmable -- one more shot after a wait is the fix.
+        Test-CleanBlackScreenRecapture -LastClassification 'Boot' -QemuRunning $true | Should -BeTrue
+        Test-CleanBlackScreenRecapture -LastClassification 'BlueScreen' -QemuRunning $true | Should -BeFalse
+        Test-CleanBlackScreenRecapture -LastClassification 'Recovery' -QemuRunning $true | Should -BeFalse
+        Test-CleanBlackScreenRecapture -LastClassification 'LogonUI' -QemuRunning $true | Should -BeFalse
+        Test-CleanBlackScreenRecapture -LastClassification 'Other' -QemuRunning $true | Should -BeFalse
+        Test-CleanBlackScreenRecapture -LastClassification '' -QemuRunning $true | Should -BeFalse
+        # QEMU exited: the monitor is dead, a re-capture cannot work.
+        Test-CleanBlackScreenRecapture -LastClassification 'Boot' -QemuRunning $false | Should -BeFalse
+    }
+
+    It 'wires the re-capture into the verify flow after shot-07 (round 41)' {
+        # The call site classifies shot-07, decides with the pure
+        # function, and captures shot-08 after a 30 s wait; the
+        # classification loop below picks it up automatically.
+        $script:r41Verify | Should -Match 'Test-CleanBlackScreenRecapture'
+        $script:r41Verify | Should -Match 're-capture after black screen'
+        $script:r41Verify | Should -Match 'last shot is a black screen; waiting 30 s'
+        $script:r41Verify | Should -Match 'Test-CleanScreenshot -Path \$lastShotPath'
+    }
+}

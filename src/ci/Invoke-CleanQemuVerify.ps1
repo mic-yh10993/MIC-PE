@@ -2973,6 +2973,29 @@ function Test-CleanKdBugcheckCaptured {
     return ($parsed.Connected -and ($parsed.BrokeIn -or ($null -ne $parsed.BugCheck)))
 }
 
+function Test-CleanBlackScreenRecapture {
+    # Round 41: decide whether the last screenshot deserves one more
+    # capture. Pure function so the decision is unit-testable.
+    # - The last shot is 'Boot' (pure black) AND QEMU is still running:
+    #   re-capture once after a short wait -- round 40's control pass
+    #   ended on a pure-black shot-07 with no BSOD captured, so the
+    #   failure mode was unconfirmable from screenshots alone (and the
+    #   round 40 report could not say whether 0x5A was still there).
+    # - Anything else rendered (BSOD, desktop, LogonUI, TianoCore with
+    #   content): no re-capture -- the evidence is already there.
+    # - QEMU exited: the monitor is dead, a re-capture cannot work.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $LastClassification,
+
+        [bool] $QemuRunning = $true
+    )
+
+    return ($LastClassification -eq 'Boot') -and $QemuRunning
+}
+
 function Get-CleanBlackScreenGateError {
     # Round 36: the black-screen gate's verdict, as a pure
     # function so the exemption is unit-testable. Returns $null
@@ -3760,6 +3783,33 @@ try {
     Start-Sleep -Seconds 5
     $shotIndex++
     if (Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $shotIndex -Label 'desktop after Start menu') { $shotsTaken++ }
+
+    # Round 41: if the last shot is a pure black screen, the guest may
+    # have died after the last capture (round 40 control pass: shot-07
+    # pure black, no BSOD captured, 0x5A unconfirmable). Give it one
+    # more chance: wait 30 s and capture shot-08, which the
+    # classification loop below picks up automatically (ShotsExpected
+    # is $shotIndex, so the count adapts). Only when the last shot is
+    # black -- a BSOD or desktop needs no re-capture. Best-effort: a
+    # missing/unreadable shot-07 or a dead monitor means no re-capture,
+    # never a throw here.
+    $recaptureBlackScreen = $false
+    try {
+        $lastShotPath = Join-Path $shotDir ("shot-{0:d2}.ppm" -f $shotIndex)
+        if (Test-Path -LiteralPath $lastShotPath) {
+            $lastClassification = (Test-CleanScreenshot -Path $lastShotPath).Classification
+            $recaptureBlackScreen = Test-CleanBlackScreenRecapture -LastClassification $lastClassification -QemuRunning (-not $qemu.HasExited)
+        }
+    }
+    catch {
+        Write-Host ("!!! black-screen re-capture check failed ($($_.Exception.Message)); continuing without it")
+    }
+    if ($recaptureBlackScreen) {
+        Write-Host 'last shot is a black screen; waiting 30 s and capturing one more (shot-08)'
+        Start-Sleep -Seconds 30
+        $shotIndex++
+        if (Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $shotIndex -Label 're-capture after black screen') { $shotsTaken++ }
+    }
 
     Write-Host ("clean QEMU verify: {0} of {1} screenshots captured in {2}" -f $shotsTaken, $shotIndex, $shotDir)
     if ($shotsTaken -eq 0) {

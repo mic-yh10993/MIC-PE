@@ -175,13 +175,16 @@ Describe 'Build-CleanPe.ps1 pipeline' {
     It 'does not fail the build on an empty staging SAM (install.wim ships one by design)' {
         # Run 45390017855: the official install.wim SAM is an EMPTY hive
         # (8 KB, no subkeys, no Administrator record) -- verified against
-        # the exact UUP source (professional_zh-cn.esd image 3). The SAM
-        # service creates the built-in accounts at boot, so the offline
-        # enable step is skipped, not fatal.
+        # the exact UUP source (professional_zh-cn.esd image 3). Round 41
+        # corrected the old assumption: the SAM service does NOT create
+        # the built-in accounts at boot (round 40: 0xc00002e3 SAM
+        # initialization failed on the empty hive), so the offline enable
+        # step is skipped until the SAM/SECURITY databases are seeded.
         $script:CleanScriptText | Should -Match 'Set-OfflineAdminState'
         $script:CleanScriptText | Should -Not -Match 'the file-list extract lost it'
         $script:CleanScriptText | Should -Match 'empty hive'
-        $script:CleanScriptText | Should -Match 'SAM service creates the built-in accounts at boot'
+        $script:CleanScriptText | Should -Match 'SAM service does NOT create the built-in accounts at boot'
+        $script:CleanScriptText | Should -Not -Match 'the SAM service creates the built-in accounts at boot, so the offline enable step is skipped'
     }
 
     It 'relaxes the registry read-back to warnings (early debugging: a failed check must not block QEMU)' {
@@ -345,6 +348,22 @@ Describe 'clean .reg patches' {
         $text | Should -Match '"Shell"="explorer\.exe"'
         $text | Should -Match '"AutoRestartShell"=dword:00000001'
         $text | Should -Match '"SystemRoot"="X:\\\\Windows"'
+    }
+
+    It '10-clean-boot.reg lifts the blank-password restriction (round 41)' {
+        # Round 41 SAM research: the reference PE has
+        # Control\Lsa\LimitBlankPasswordUse = 0; the serviced install.wim
+        # source carries 1, and no .reg in the clean rebuild line ever
+        # changed it (the old Build-CleanPe.ps1 comment claiming this
+        # file already lifted it was wrong -- the file had no LSA key).
+        # The built-in Administrator logs on with an empty password, so
+        # the restriction must be off or LogonUI refuses the logon even
+        # once SAM works. This is the second hurdle after the SAM
+        # database, not the 0xc00002e3 fix.
+        $text = $script:RegTexts['10-clean-boot.reg']
+        $text | Should -Match 'PE-SYS\\ControlSet001\\Control\\Lsa'
+        $lsa = ($text -split 'ControlSet001\\Control\\Lsa')[1]
+        $lsa | Should -Match '\"LimitBlankPasswordUse\"=dword:00000000'
     }
 
     It '10-clean-boot.reg sets cdrom and exfat to boot-start (Start=0, round 10)' {

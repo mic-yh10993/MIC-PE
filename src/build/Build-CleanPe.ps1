@@ -1444,13 +1444,22 @@ function Invoke-CleanRegistryStep {
         # minimal). The extraction is faithful (wimlib extract of the
         # reference PE SAM is byte-identical), and no build step touches
         # SAM between extraction and here, so an empty hive is expected,
-        # not a lost extract. The SAM service creates the built-in accounts
-        # (including Administrator RID 500) when it starts -- the reference
-        # PE proves it: it boots to LogonUI with a working Administrator
-        # even though the image it was built from had an empty SAM, and
-        # 10-clean-boot.reg already lifts the blank-password restriction.
-        # Skip the offline enable and let the boot-time SAM service do it.
-        Write-Warn 'staging SAM is an empty hive (no Administrator record): expected for an install.wim source; the SAM service creates the built-in accounts at boot, so the offline enable step is skipped'
+        # not a lost extract.
+        # CORRECTION (round 41, run 45958292187): the old claim that "the
+        # SAM service creates the built-in accounts when it starts" is
+        # DISPROVED -- r116 booted with this empty SAM and died on
+        # 0xc00002e3 SAM initialization failed. The reference PE is a
+        # captured live system whose SAM was built during its own
+        # install/specialize flow; it proves a complete SAM boots, not
+        # that an empty SAM self-creates at LogonUI time. The SAM and
+        # SECURITY databases must be seeded before the image can log on
+        # (round 42, user-approved Scheme A: seed from a specialize run of the official image -- see
+        # hidden_files/round41-sam-research.md). The offline enable step
+        # below is a no-op until the databases exist.
+        # Also corrected: 10-clean-boot.reg never lifted the
+        # blank-password restriction (it had no LSA key); round 41 adds
+        # LimitBlankPasswordUse=0 there.
+        Write-Warn 'staging SAM is an empty hive (no Administrator record): expected for an install.wim source; the SAM service does NOT create the built-in accounts at boot (round 40: 0xc00002e3), so the offline enable step is skipped until the SAM/SECURITY databases are seeded'
     }
 
     # The reference's unattend.xml (windowsPE pass only: ComputerName
