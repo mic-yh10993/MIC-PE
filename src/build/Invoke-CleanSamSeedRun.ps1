@@ -203,10 +203,32 @@ function Assert-SeedBcdbootPrerequisites {
     # question "is the EFI partition actually attached": S: must be a
     # live FAT32 volume, an EFI System Partition by GPT type, and
     # readable (Test-Path + dir) at this exact moment.
+    # Run 46004055968 false-positive fix: the first version of this
+    # gate used the Get-Volume / Get-Partition drive-letter lookups
+    # for S:, and both returned nothing -- while Test-Path, dir and
+    # fsutil proved S: was live and FAT32 in the same session, and
+    # the Get-Volume lookup for V: worked fine on the same disk.
+    # That is expected Windows behavior, not a broken layout: per
+    # Microsoft Learn (VDS CREATE_PARTITION_PARAMETERS), only
+    # basic-data partitions can be assigned drive letters and be
+    # enumerated by FindFirstVolume / FindNextVolume; the ESP is a
+    # system partition, so its letter exists only at the Win32
+    # mount-manager level (Test-Path, fsutil see it) and never in
+    # the Storage provider's (MSFT_Volume / MSFT_Partition) view --
+    # which is exactly why -DriveLetter S finds nothing while
+    # -DriveLetter V (basic data) works. So the S: checks below
+    # never ask the Storage provider by drive letter: the volume
+    # verdict comes from Win32_Volume with a Test-Path fallback,
+    # and the GPT type comes from diskpart `detail partition` on
+    # partition 1 of the seed VHD (the EFI partition is created
+    # first, so it is always partition 1).
     # Uses Write-Host only (no Write-Step / lib helpers), so the
     # function stays testable in isolation.
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $VhdPath
+    )
 
     $failures = [System.Collections.Generic.List[string]]::new()
     $sReadable = $false
@@ -216,37 +238,72 @@ function Assert-SeedBcdbootPrerequisites {
     $bcdTemplateExists = $false
     $imageBcdbootExists = $false
 
-    # 1. S: volume exists, FAT32, healthy.
+    # 1. S: volume exists and is FAT32. Ask the WMI volume provider
+    #    (Win32_Volume enumerates mounted volumes) first; the Storage
+    #    provider is blind to ESP drive letters (see header). If
+    #    Win32_Volume also misses S:, fall back to the filesystem-
+    #    level proof (Test-Path) -- the file system itself is pinned
+    #    by the fsutil check below, so the gate as a whole still
+    #    proves FAT32; a genuinely unmounted S: fails both paths.
     $volS = $null
-    try { $volS = Get-Volume -DriveLetter S -ErrorAction Stop } catch { $volS = $null }
-    if ($null -eq $volS) {
-        Write-Host 'bcdboot prereq [FAIL] S: volume: Get-Volume -DriveLetter S found no volume'
-        $failures.Add('S: volume not found')
+    try { $volS = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter='S:'" -ErrorAction Stop } catch { $volS = $null }
+    if ($null -ne $volS -and $volS.FileSystem -eq 'FAT32') {
+        $sFileSystem = 'FAT32'
+        Write-Host ("bcdboot prereq [OK  ] S: volume: FAT32 (Win32_Volume), {0:N0} MB" -f ($volS.Capacity / 1MB))
     }
-    elseif ($volS.FileSystem -ne 'FAT32') {
+    elseif ($null -ne $volS) {
         Write-Host ("bcdboot prereq [FAIL] S: volume: file system is {0}, expected FAT32" -f $volS.FileSystem)
         $failures.Add(("S: file system is {0}, expected FAT32" -f $volS.FileSystem))
     }
     else {
-        $sFileSystem = 'FAT32'
-        Write-Host ("bcdboot prereq [OK  ] S: volume: FAT32, {0:N0} MB, health {1}" -f ($volS.Size / 1MB), $volS.HealthStatus)
+        Write-Host 'bcdboot prereq [INFO] S: volume: Win32_Volume did not list S: (the volume providers are blind to ESP drive letters -- run 46004055968); falling back to Test-Path'
+        $rootProbe = $false
+        try { $rootProbe = Test-Path -LiteralPath 'S:\' -ErrorAction Stop } catch { $rootProbe = $false }
+        if (-not $rootProbe) {
+            Write-Host 'bcdboot prereq [FAIL] S: volume: S: is not readable (Win32_Volume did not list S: and Test-Path S:\ failed -- the EFI partition is not attached)'
+            $failures.Add('S: is not readable (EFI partition not attached or not accessible)')
+        }
+        else {
+            Write-Host 'bcdboot prereq [OK  ] S: volume: live (Test-Path S:\ passed; file system pinned by the fsutil check below)'
+        }
     }
 
-    # 2. S: is the EFI System Partition by GPT type.
+    # 2. S: is the EFI System Partition by GPT type. Get-Partition
+    #    -DriveLetter S is blind to the ESP for the same VDS reason
+    #    as check 1 (run 46004055968), so ask diskpart -- the tool
+    #    that built this layout -- for partition 1 of the seed VHD.
+    #    The EFI partition is created first in the diskpart script,
+    #    so it is always partition 1; `detail partition` prints its
+    #    GPT type GUID (and the volume line: letter, FS, size).
+    #    `select vdisk` on the still-attached VHD is the same select
+    #    the detach step uses, so it is proven to work here.
     $espGuid = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
-    $partS = $null
-    try { $partS = Get-Partition -DriveLetter S -ErrorAction Stop } catch { $partS = $null }
-    if ($null -eq $partS) {
-        Write-Host 'bcdboot prereq [FAIL] S: GPT type: Get-Partition -DriveLetter S found no partition'
-        $failures.Add('S: partition not found')
+    $detailLines = @()
+    try {
+        # Parenthesised join (the file-wide convention since the
+        # run 45981633632 binding bug): a trailing `) -join` at a
+        # call site parses as a -join parameter, so the join is
+        # always written ($array -join "`n") in parentheses.
+        $detailCommands = @(
+            "select vdisk file=`"$VhdPath`""
+            'select partition 1'
+            'detail partition'
+        )
+        $detailLines = @( ($detailCommands -join "`n") | diskpart 2>&1 | ForEach-Object { "$_" } )
+    } catch { $detailLines = @() }
+    $detailText = ($detailLines -join "`n")
+    $typeMatch = [regex]::Match($detailText, '(?m)^\s*Type\s*:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
+    if (-not $typeMatch.Success) {
+        Write-Host 'bcdboot prereq [FAIL] S: GPT type: diskpart detail partition returned no Type GUID -- cannot confirm partition 1 is the EFI System Partition'
+        $failures.Add('S: GPT type could not be confirmed (diskpart detail partition returned no Type GUID)')
     }
-    elseif ($partS.GptType -ne $espGuid) {
-        Write-Host ("bcdboot prereq [FAIL] S: GPT type: {0}, expected EFI System Partition {1}" -f $partS.GptType, $espGuid)
-        $failures.Add(("S: GPT type is {0}, expected EFI System Partition" -f $partS.GptType))
+    elseif ($typeMatch.Groups[1].Value -ieq 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b') {
+        $sGptType = $espGuid
+        Write-Host 'bcdboot prereq [OK  ] S: GPT type: EFI System Partition (diskpart detail partition, partition 1)'
     }
     else {
-        $sGptType = $espGuid
-        Write-Host ("bcdboot prereq [OK  ] S: GPT type: EFI System Partition (partition {0})" -f $partS.PartitionNumber)
+        Write-Host ("bcdboot prereq [FAIL] S: GPT type: {0}, expected EFI System Partition {1}" -f $typeMatch.Groups[1].Value, $espGuid)
+        $failures.Add(("S: GPT type is {0}, expected EFI System Partition" -f $typeMatch.Groups[1].Value))
     }
 
     # 3. S: is readable RIGHT NOW -- the user's question: is the EFI
@@ -286,6 +343,7 @@ function Assert-SeedBcdbootPrerequisites {
         $failures.Add(("fsutil reports S: file system {0}, expected FAT32" -f $fsMatch.Groups[1].Value))
     }
     else {
+        $sFileSystem = 'FAT32'
         Write-Host 'bcdboot prereq [OK  ] S: fsutil: File System Name FAT32'
     }
 
@@ -621,7 +679,7 @@ try {
     # bcdboot (round 42: run 45988904072 died here -- the host
     # bcdboot 26100 failed on the 22621 image, exit 193; the log
     # proved the layout but never proved S: was readable).
-    Assert-SeedBcdbootPrerequisites
+    Assert-SeedBcdbootPrerequisites -VhdPath $vhdx
 
     Write-Step 'writing the EFI bootloader (bcdboot from the applied image)'
     # Run the applied image's own bcdboot (22621), not the host's

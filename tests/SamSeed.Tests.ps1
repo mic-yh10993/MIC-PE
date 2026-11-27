@@ -229,20 +229,37 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
         $script:SeedBcdbootPrereqFuncText = $script:SeedScriptText.Substring($start, $end - $start + 1)
         . ([scriptblock]::Create($script:SeedBcdbootPrereqFuncText))
 
-        # Mock the Windows-only probes (Storage cmdlets, fsutil) with
-        # global functions shadowing the real commands; state lives in
-        # globals so each test can break exactly one thing. The mocks
-        # are (re)defined by every behavior test itself: AfterEach
-        # removes them after each test, so defining them once in
-        # BeforeAll would leave the later tests unmocked.
+        # Mock the Windows-only probes (Storage cmdlets, CIM, diskpart,
+        # fsutil) with global functions shadowing the real commands;
+        # state lives in globals so each test can break exactly one
+        # thing. The mocks are (re)defined by every behavior test
+        # itself: AfterEach removes them after each test, so defining
+        # them once in BeforeAll would leave the later tests unmocked.
+        # Run 46004055968: the gate no longer asks Get-Volume /
+        # Get-Partition -DriveLetter S (the Storage provider is blind
+        # to ESP drive letters) -- S: is proven via Win32_Volume with
+        # a Test-Path fallback, and the GPT type via diskpart `detail
+        # partition`. The default mocks reproduce the CI state:
+        # Win32_Volume does NOT list S: (empty MockSeedCimVolumes),
+        # so the default pass path is the Test-Path fallback + the
+        # diskpart detail parse.
         function Set-SeedBcdbootMocksOk {
             $global:MockSeedVolumes = @{
                 S = [pscustomobject]@{ DriveLetter = 'S'; FileSystem = 'FAT32'; HealthStatus = 'Healthy'; Size = 272629760 }
                 V = [pscustomobject]@{ DriveLetter = 'V'; FileSystem = 'NTFS'; HealthStatus = 'Healthy'; Size = 34359738368 }
             }
-            $global:MockSeedPartitions = @{
-                S = [pscustomobject]@{ DriveLetter = 'S'; PartitionNumber = 1; GptType = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' }
-            }
+            $global:MockSeedCimVolumes = @{}
+            $global:MockSeedDiskpartDetail = @(
+                'Partition 1'
+                'Type    : c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
+                'Hidden  : No'
+                'Required: No'
+                'Attribute : 0000000000000000'
+                'Offset in Bytes: 1048576'
+                '  Volume ###  Ltr  Label        Fs     Type        Size     Status     Info'
+                '  ----------  ---  -----------  -----  ----------  -------  ---------  --------'
+                '* Volume 3     S  SYSTEM       FAT32  Partition    260 MB  Healthy    Hidden'
+            )
             $global:MockSeedPaths = @{
                 'S:\'                                      = $true
                 'V:\Windows'                               = $true
@@ -256,11 +273,20 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
                 if ($global:MockSeedVolumes.ContainsKey($DriveLetter)) { return $global:MockSeedVolumes[$DriveLetter] }
                 throw "No MSFT_Volume objects found with property 'DriveLetter' equal to '$DriveLetter'"
             }
-            function global:Get-Partition {
+            function global:Get-CimInstance {
                 [CmdletBinding()]
-                param([string] $DriveLetter)
-                if ($global:MockSeedPartitions.ContainsKey($DriveLetter)) { return $global:MockSeedPartitions[$DriveLetter] }
-                throw "No MSFT_Partition objects found with property 'DriveLetter' equal to '$DriveLetter'"
+                param([string] $ClassName, [string] $Filter)
+                if ($ClassName -eq 'Win32_Volume' -and $Filter -like "*DriveLetter='S:'*" -and $global:MockSeedCimVolumes.ContainsKey('S')) {
+                    return $global:MockSeedCimVolumes['S']
+                }
+                return $null
+            }
+            function global:diskpart {
+                [CmdletBinding()]
+                param([Parameter(ValueFromPipeline = $true)] $InputObject)
+                begin { }
+                process { }
+                end { return $global:MockSeedDiskpartDetail }
             }
             function global:Test-Path {
                 [CmdletBinding()]
@@ -284,7 +310,8 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
 
     AfterEach {
         Remove-Item function:Get-Volume -ErrorAction SilentlyContinue
-        Remove-Item function:Get-Partition -ErrorAction SilentlyContinue
+        Remove-Item function:Get-CimInstance -ErrorAction SilentlyContinue
+        Remove-Item function:diskpart -ErrorAction SilentlyContinue
         Remove-Item function:Test-Path -ErrorAction SilentlyContinue
         Remove-Item function:Get-ChildItem -ErrorAction SilentlyContinue
         Remove-Item function:fsutil.exe -ErrorAction SilentlyContinue
@@ -294,7 +321,7 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
         $script:SeedScriptText | Should -Match 'function Assert-SeedBcdbootPrerequisites'
         $dism = $script:SeedScriptText.IndexOf('dism.exe /Apply-Image')
         $dism | Should -BeGreaterThan 0
-        $gateCall = [regex]::Match($script:SeedScriptText, '(?m)^\s+Assert-SeedBcdbootPrerequisites\s*$')
+        $gateCall = [regex]::Match($script:SeedScriptText, '(?m)^\s+Assert-SeedBcdbootPrerequisites -VhdPath \$vhdx\s*$')
         $gateCall.Success | Should -BeTrue
         $gateCall.Index | Should -BeGreaterThan $dism
         $boot = $script:SeedScriptText.IndexOf('& $imageBcdboot V:\Windows /s S: /f UEFI')
@@ -304,7 +331,7 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
 
     It 'checks S: readability explicitly (user question: is the EFI partition attached?)' {
         $script:SeedBcdbootPrereqFuncText | Should -Match "Test-Path -LiteralPath 'S:\\'"
-        $script:SeedBcdbootPrereqFuncText | Should -Match 'Get-Volume -DriveLetter S'
+        $script:SeedBcdbootPrereqFuncText | Should -Match 'Win32_Volume'
         $script:SeedBcdbootPrereqFuncText | Should -Match "Get-ChildItem -LiteralPath 'S:\\'"
         $script:SeedBcdbootPrereqFuncText | Should -Match 'fsutil\.exe fsinfo volumeinfo S:'
         $script:SeedBcdbootPrereqFuncText | Should -Match 'is the EFI partition actually attached'
@@ -312,7 +339,13 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
 
     It 'checks the S: GPT type is the EFI System Partition' {
         $script:SeedBcdbootPrereqFuncText | Should -Match 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
-        $script:SeedBcdbootPrereqFuncText | Should -Match 'Get-Partition -DriveLetter S'
+        $script:SeedBcdbootPrereqFuncText | Should -Match 'detail partition'
+        $script:SeedBcdbootPrereqFuncText | Should -Match 'select partition 1'
+    }
+
+    It 'never asks the Storage provider by drive letter for S: (run 46004055968: blind to the ESP)' {
+        $script:SeedBcdbootPrereqFuncText | Should -Not -Match 'Get-Volume -DriveLetter S'
+        $script:SeedBcdbootPrereqFuncText | Should -Not -Match 'Get-Partition -DriveLetter S'
     }
 
     It 'checks the source boot files including the image bcdboot.exe' {
@@ -322,42 +355,75 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
     }
 
     It 'runs the applied image bcdboot, not the host bcdboot (round 42: host 26100 failed on the 22621 image, exit 193)' {
-        $script:SeedScriptText | Should -Match "\$imageBcdboot = 'V:\\Windows\\System32\\bcdboot\.exe'"
+        $script:SeedScriptText | Should -Match '\$imageBcdboot = ''V:\\Windows\\System32\\bcdboot\.exe'''
         $script:SeedScriptText | Should -Match '& \$imageBcdboot V:\\Windows /s S: /f UEFI'
         $script:SeedScriptText | Should -Not -Match '& bcdboot\.exe V:\\Windows /s S: /f UEFI'
     }
 
     It 'passes when everything is present (S: attached, FAT32, ESP, readable; boot files present)' {
         Set-SeedBcdbootMocksOk
-        $result = Assert-SeedBcdbootPrerequisites
+        $result = Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx'
         $result.SReadable | Should -BeTrue
         $result.SFileSystem | Should -Be 'FAT32'
+        $result.SGptType | Should -Be '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
         $result.BootmgfwExists | Should -BeTrue
         $result.BcdTemplateExists | Should -BeTrue
         $result.ImageBcdbootExists | Should -BeTrue
     }
 
+    It 'passes when the volume providers are blind to S: (run 46004055968 repro: Win32_Volume lists nothing, Test-Path + fsutil + diskpart detail prove S:)' {
+        Set-SeedBcdbootMocksOk
+        # Default mocks already reproduce the CI state: Win32_Volume
+        # has no S: entry (empty MockSeedCimVolumes), while Test-Path
+        # S:\, fsutil FAT32 and the diskpart detail ESP parse all
+        # pass. The old gate threw here (S: volume not found; S:
+        # partition not found); the fixed gate must pass.
+        $global:MockSeedCimVolumes = @{}
+        $result = Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx'
+        $result.SReadable | Should -BeTrue
+        $result.SFileSystem | Should -Be 'FAT32'
+        $result.SGptType | Should -Be '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+    }
+
+    It 'passes via Win32_Volume when it does list S: (primary path, FAT32)' {
+        Set-SeedBcdbootMocksOk
+        $global:MockSeedCimVolumes['S'] = [pscustomobject]@{ DriveLetter = 'S'; FileSystem = 'FAT32'; Capacity = 272629760 }
+        $result = Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx'
+        $result.SFileSystem | Should -Be 'FAT32'
+        $result.SGptType | Should -Be '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+    }
+
     It 'fails naming S: when the EFI partition is not readable at bcdboot time' {
         Set-SeedBcdbootMocksOk
         $global:MockSeedPaths['S:\'] = $false
-        { Assert-SeedBcdbootPrerequisites } | Should -Throw '*S:*readable*'
+        { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*S:*readable*'
     }
 
     It 'fails naming the GPT type when S: is not an EFI System Partition' {
         Set-SeedBcdbootMocksOk
-        $global:MockSeedPartitions['S'].GptType = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'
-        { Assert-SeedBcdbootPrerequisites } | Should -Throw '*GPT type*'
+        $global:MockSeedDiskpartDetail = @(
+            'Partition 1'
+            'Type    : ebd0a0a2-b9e5-4433-87c0-68b6b72699c7'
+            'Hidden  : No'
+        )
+        { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*GPT type*'
+    }
+
+    It 'fails naming the GPT type when diskpart detail returns no Type GUID' {
+        Set-SeedBcdbootMocksOk
+        $global:MockSeedDiskpartDetail = @('Partition 1', 'Hidden  : No')
+        { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*GPT type*'
     }
 
     It 'fails naming the file when bootmgfw.efi is missing' {
         Set-SeedBcdbootMocksOk
         $global:MockSeedPaths['V:\Windows\Boot\EFI\bootmgfw.efi'] = $false
-        { Assert-SeedBcdbootPrerequisites } | Should -Throw '*bootmgfw.efi*'
+        { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*bootmgfw.efi*'
     }
 
     It 'fails naming the file when the image bcdboot.exe is missing' {
         Set-SeedBcdbootMocksOk
         $global:MockSeedPaths['V:\Windows\System32\bcdboot.exe'] = $false
-        { Assert-SeedBcdbootPrerequisites } | Should -Throw '*bcdboot.exe*'
+        { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*bcdboot.exe*'
     }
 }
