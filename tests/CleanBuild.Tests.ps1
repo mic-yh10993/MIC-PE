@@ -126,6 +126,29 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $gdiPlusCallPos | Should -BeGreaterThan $catFixCallPos
     }
 
+    It 'probes the CatRoot GUID subdir right after the grant, before any .cat injection (round 39)' {
+        # Round 38: the CatRoot grant printed cleanly and the first
+        # .cat copy was still denied ten seconds later -- takeown was
+        # not recursive, icacls failed on the GUID subdir under /C,
+        # and nothing checked. The base step must probe the GUID
+        # directory with -AssertWritable right after the grants, so a
+        # grant that did not take fails the build at the grant instead
+        # of at Copy-Item.
+        $probePos = $script:CleanScriptText.IndexOf('CatRoot GUID subdir (after grant)')
+        $probePos | Should -BeGreaterThan 0
+        $probeLine = ($script:CleanScriptText -split "`n" | Where-Object { $_ -match 'CatRoot GUID subdir \(after grant\)' })
+        $probeLine | Should -HaveCount 1
+        $probeLine | Should -Match 'Show-StagingWriteState'
+        $probeLine | Should -Match '\{F750E6C3-38EE-11D1-85E5-00C04FC295EE\}'
+        $probeLine | Should -Match '-AssertWritable'
+        $grantCallPos = $script:CleanScriptText.IndexOf('Grant-StagingWriteAccess -Path')
+        $probePos | Should -BeGreaterThan $grantCallPos
+        # Runtime order: base step (grant + probe) runs before either
+        # .cat step.
+        $catFixCallPos = $script:CleanScriptText.IndexOf('$catFix = Invoke-CleanCatFixStep')
+        $probePos | Should -BeLessThan $catFixCallPos
+    }
+
     It 'asserts the critical staged files (boot loader, shell, hives)' {
         foreach ($critical in 'winload\.exe', 'explorer\.exe', 'config\\SYSTEM', 'config\\SOFTWARE', 'config\\DEFAULT', 'config\\SAM', 'config\\SECURITY') {
             $script:CleanScriptText | Should -Match $critical

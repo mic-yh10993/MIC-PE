@@ -375,6 +375,16 @@ function Invoke-CleanExtractStep {
         Grant-StagingWriteAccess -Path (Join-Path $paths.Staging $writeTarget)
     }
 
+    # Round 39: prove the grant took before any .cat copy runs. The
+    # CatRoot grant printed cleanly in round 38 and the first .cat
+    # copy was still denied ten seconds later (takeown was not
+    # recursive, icacls failed on the GUID subdir under /C, and
+    # nothing checked). The probe fails the build here, at the grant,
+    # instead of at Copy-Item with a misleading error. The GUID must
+    # match the $CatRootRel used by Invoke-CleanCatFixStep and
+    # Invoke-CleanGdiPlusCatFixStep.
+    Show-StagingWriteState -Path (Join-Path $paths.Staging 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}') -Label 'CatRoot GUID subdir (after grant)' -AssertWritable
+
     # Critical files: without these the image cannot boot, log on, or show
     # a shell. (winload.exe is the boot loader, explorer.exe the shell,
     # the config hives carry the registry the next step patches.)

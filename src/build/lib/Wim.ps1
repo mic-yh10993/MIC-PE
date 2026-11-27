@@ -250,14 +250,19 @@ function Grant-StagingWriteAccess {
         already holds and the cmd tools enable by themselves. The ACE
         goes to BUILTIN\Administrators, never to "Everyone".
 
-        Takes ownership of the path itself (takeown is not recursive
-        here, matching Grant-FolderWriteAccess), then grants
+        Takes ownership recursively for a directory (takeown /R /D Y
+        -- /D Y answers the prompt takeown shows for a directory it
+        cannot list while recursing, so a non-interactive run never
+        waits), of the file itself for a file, then grants
         Administrators full control -- recursive for a directory
-        (icacls /T does not follow junctions), on the file itself for
-        a file. A missing path is a no-op, like Grant-FolderWriteAccess.
-        Failures are not thrown: the diagnostic step
-        (Show-StagingWriteState) reports whether the grant took, and
-        the copy that follows is the real test.
+        (icacls /T does not follow junctions). A missing path is a
+        no-op, like Grant-FolderWriteAccess. The tools' output is
+        written to the log and their exit codes are checked: a failed
+        takeown throws here, and a non-zero icacls only warns -- its
+        exit code is noisy on big trees, so the write probe
+        (Show-StagingWriteState -AssertWritable, run by the base step
+        on the CatRoot GUID directory) is the arbiter of whether the
+        grant actually took.
     #>
     [CmdletBinding()]
     param(
@@ -275,13 +280,47 @@ function Grant-StagingWriteAccess {
 
     $isFile = -not (Test-Path -LiteralPath $Path -PathType Container)
     Write-SubStep "granting write access on $Path"
-    $null = & $TakeownPath /F $Path /A 2>&1
+    # Round 39: takeown must be recursive for directories. The
+    # non-recursive form only changed the owner of the directory
+    # itself; the GUID subdirectories and .cat files underneath stayed
+    # owned by TrustedInstaller, so the icacls /T grant below could not
+    # add ACEs to them (it needs WRITE_DAC on each child) and failed
+    # silently under /C. Round 38 died on exactly this: the CatRoot
+    # grant printed cleanly and the first .cat copy was still denied.
+    # /D Y answers the prompt takeown shows when it meets a directory
+    # it cannot list while recursing, so the non-interactive CI run
+    # never waits on it. Files have no children, so they keep the
+    # non-recursive form.
+    $takeownArgs = @('/F', $Path, '/A')
+    if (-not $isFile) { $takeownArgs += @('/R', '/D', 'Y') }
+    # $LASTEXITCODE is only set by native commands; initialise it so
+    # the check below also works in a fresh session (same pattern as
+    # Clear-StagingReadOnly). The output is logged, not discarded:
+    # round 38 proved a clean-looking grant line is worth nothing
+    # when the tools failed underneath it.
+    $LASTEXITCODE = 0
+    $takeownOut = & $TakeownPath @takeownArgs 2>&1
+    $takeownCode = $LASTEXITCODE
+    if ($takeownOut) { $takeownOut | Out-Host }
+    Assert-True -Condition ($takeownCode -eq 0) -Message "takeown failed with exit code $takeownCode for $Path"
+    # icacls exit codes are noisy on big trees (junctions, files it
+    # cannot touch), so a non-zero code only warns here -- the write
+    # probe after the grant is the arbiter of whether the grant took.
+    $grantAce = if ($isFile) { '*S-1-5-32-544:F' } else { '*S-1-5-32-544:(OI)(CI)F' }
+    $icaclsArgs = @($Path, '/Grant', $grantAce)
+    if (-not $isFile) { $icaclsArgs += '/T' }
+    $icaclsArgs += '/C'
+    $LASTEXITCODE = 0
+    $icaclsOut = & $IcaclsPath @icaclsArgs 2>&1
+    $icaclsCode = $LASTEXITCODE
+    if ($icaclsOut) { $icaclsOut | Out-Host }
+    if ($icaclsCode -ne 0) {
+        Write-Warn "icacls exited $icaclsCode for $Path (grant may be partial; the write probe after the grant is the arbiter)"
+    }
     if ($isFile) {
-        $null = & $IcaclsPath $Path /Grant '*S-1-5-32-544:F' /C 2>&1
         $null = & $AttribPath -R $Path 2>&1
     }
     else {
-        $null = & $IcaclsPath $Path /Grant '*S-1-5-32-544:(OI)(CI)F' /T /C 2>&1
         $null = & $AttribPath -R "$Path\*.*" /S /D 2>&1
     }
 }
@@ -301,7 +340,11 @@ function Show-StagingWriteState {
         copy was still denied, so the log must show the real state
         instead of assuming the fix worked. The probe file is deleted
         immediately and never reaches the captured image. A missing
-        path is reported, not an error.
+        path is reported, not an error. With -AssertWritable the
+        function throws when the path is missing or the probe is
+        denied (round 39: the base step probes the CatRoot GUID
+        directory right after the grant, so a grant that did not take
+        fails the build at the grant instead of at the .cat copy).
     #>
     [CmdletBinding()]
     param(
@@ -312,6 +355,8 @@ function Show-StagingWriteState {
 
         [switch] $ShowContents,
 
+        [switch] $AssertWritable,
+
         [string] $AttribPath = 'attrib.exe',
 
         [string] $IcaclsPath = 'icacls.exe'
@@ -319,6 +364,9 @@ function Show-StagingWriteState {
 
     if (-not (Test-Path -LiteralPath $Path)) {
         Write-SubStep "write state of $Label ($Path): path does not exist"
+        if ($AssertWritable) {
+            Assert-True -Condition $false -Message "write probe: $Label ($Path) does not exist, cannot write into it"
+        }
         return
     }
     Write-SubStep "write state of $Label ($Path)"
@@ -330,13 +378,18 @@ function Show-StagingWriteState {
     Write-Host "--- icacls $Path ---"
     & $IcaclsPath $Path 2>&1 | Out-Host
     $probe = Join-Path $Path 'micpe-write-probe.tmp'
+    $probeOk = $false
     try {
         [System.IO.File]::WriteAllText($probe, 'probe')
         try { Remove-Item -LiteralPath $probe -Force -ErrorAction Stop } catch { }
         Write-Host '--- write probe: OK (created and deleted micpe-write-probe.tmp) ---'
+        $probeOk = $true
     }
     catch {
         Write-Host "--- write probe: DENIED ($($_.Exception.Message)) ---"
+    }
+    if ($AssertWritable) {
+        Assert-True -Condition $probeOk -Message "write probe denied for $Label ($Path): the grant did not take, see the icacls output above"
     }
 }
 

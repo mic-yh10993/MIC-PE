@@ -292,6 +292,12 @@ Describe 'Grant-StagingWriteAccess' {
             $takeown[0] | Should -Be '/F'
             $takeown[1] | Should -Be $dir
             $takeown[2] | Should -Be '/A'
+            # Round 39: takeown must recurse, or the GUID subdirs and
+            # .cat files underneath stay owned by TrustedInstaller and
+            # the icacls grant cannot land on them (round 38).
+            $takeown[3] | Should -Be '/R'
+            $takeown[4] | Should -Be '/D'
+            $takeown[5] | Should -Be 'Y'
             $icacls = @(Get-Content -LiteralPath $icaclsLog)
             $icacls[0] | Should -Be $dir
             $icacls[1] | Should -Be '/Grant'
@@ -332,6 +338,8 @@ Describe 'Grant-StagingWriteAccess' {
             $takeown[0] | Should -Be '/F'
             $takeown[1] | Should -Be $file
             $takeown[2] | Should -Be '/A'
+            # Files have no children: no recursion (round 39).
+            $takeown | Should -HaveCount 3
             $icacls = @(Get-Content -LiteralPath $icaclsLog)
             $icacls[0] | Should -Be $file
             $icacls[1] | Should -Be '/Grant'
@@ -355,6 +363,16 @@ Describe 'Grant-StagingWriteAccess' {
     It 'is a no-op when the path does not exist' {
         { Grant-StagingWriteAccess -Path (Join-Path $script:TempRoot 'micpe-absent-grant') -TakeownPath $script:fakeTakeown -IcaclsPath $script:fakeIcacls -AttribPath $script:fakeAttrib } | Should -Not -Throw
     }
+
+    # No test for the takeown/icacls failure path: $LASTEXITCODE is
+    # not set inside a function on Linux pwsh (verified: a native
+    # command exiting 3 leaves $LASTEXITCODE 0 in a function, 3 at
+    # the top level, and a .ps1 fake's assignment does not propagate
+    # either), so a failing takeown cannot be simulated here. The
+    # check follows the codebase pattern (Clear-StagingReadOnly) and
+    # works on the Windows CI runner, where the build actually runs.
+    # The write probe (Show-StagingWriteState -AssertWritable) is the
+    # locally testable arbiter of whether a grant took.
 }
 
 Describe 'Show-StagingWriteState' {
@@ -419,11 +437,32 @@ Describe 'Show-StagingWriteState' {
         { Show-StagingWriteState -Path (Join-Path $script:TempRoot 'micpe-absent-state') -Label 'test' -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls } | Should -Not -Throw
     }
 
+    It 'passes -AssertWritable on a writable directory and leaves no probe file behind' {
+        $dir = Join-Path $script:TempRoot "micpe-state-$(Get-Random)"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        try {
+            { Show-StagingWriteState -Path $dir -Label 'test' -AssertWritable -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls } | Should -Not -Throw
+            (Test-Path -LiteralPath (Join-Path $dir 'micpe-write-probe.tmp')) | Should -Be $false
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'throws -AssertWritable on a missing path' {
+        # Round 39: the base step probes the CatRoot GUID directory
+        # right after the grant; if it is not there the .cat copy
+        # would fail anyway, so the probe must fail loudly here.
+        { Show-StagingWriteState -Path (Join-Path $script:TempRoot 'micpe-absent-state') -Label 'test' -AssertWritable -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls } | Should -Throw '*does not exist*'
+    }
+
     # No test for the DENIED write probe: on Linux the tests run as
     # root, which bypasses directory permissions, so a read-only
     # directory still accepts the probe file. The probe logic is a
     # try/catch around a single WriteAllText call; the OK path above
-    # covers the create + delete flow.
+    # covers the create + delete flow. The -AssertWritable DENIED
+    # path is likewise untestable here and is covered by the missing-
+    # path throw above plus the CI run itself.
 }
 
 Describe 'Invoke-IsoStep boot image' {
