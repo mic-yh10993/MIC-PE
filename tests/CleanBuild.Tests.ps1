@@ -714,6 +714,8 @@ Describe 'Invoke-CleanCatFixStep (round 13: the two 22621.900 .cat files for cdr
     BeforeAll {
         $script:fake7z = Join-Path $PSScriptRoot 'Fake-7z.ps1'
         $script:fakeWimlib = Join-Path $PSScriptRoot 'Fake-Wimlib.ps1'
+        $script:fakeAttrib = Join-Path $PSScriptRoot 'Fake-Attrib.ps1'
+        $script:fakeIcacls = Join-Path $PSScriptRoot 'Fake-Icacls.ps1'
         $script:fixtures = Join-Path $PSScriptRoot 'fixtures'
         . "$PSScriptRoot/../src/build/lib/BaseImage.ps1"
         # Pull the catalog-fix functions out of Build-CleanPe.ps1 via the
@@ -926,6 +928,144 @@ https://download.windowsupdate.com/x/windows11.0-kb5020044-x64_bbbb.cab
             Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It 'Invoke-CleanCatFixStep skips a catalog already staged with matching SHA256 (round 40)' {
+        # Round 39 rerun: the serviced image already ships the
+        # Package0110 22621.900 .cat, so the copy overwrites an
+        # existing file -- and three rounds died on exactly that
+        # overwrite. Same bytes means no copy is needed: skip only
+        # that file, never the whole step.
+        $staging = Join-Path $script:TempRoot ("micpe-catfix-skip-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-catfix-skipwork-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $catRootDir = Join-Path $staging 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}'
+        New-Item -ItemType Directory -Path $catRootDir -Force | Out-Null
+        $staged0110 = Join-Path $catRootDir $script:fixtureCats[0].Name
+        Copy-Item -LiteralPath (Join-Path $script:fixtures $script:fixtureCats[0].Name) -Destination $staged0110 -Force
+        $zipPath = Join-Path $work 'filelist.zip'
+        Compress-Archive -LiteralPath (Join-Path $script:fixtures 'catfix-aria2.txt') -DestinationPath $zipPath -Force
+        $cabPath = Join-Path $work 'windows11.0-kb5020044-x64_0123456789abcdef.cab'
+        Set-Content -LiteralPath $cabPath -Value 'FAKE-CAB' -NoNewline
+        $attribLog = Join-Path $script:TempRoot "micpe-attrib-$(Get-Random).log"
+        $icaclsLog = Join-Path $script:TempRoot "micpe-icacls-$(Get-Random).log"
+        $env:MICPE_FAKE_ATTRIB_LOG = $attribLog
+        $env:MICPE_FAKE_ICACLS_LOG = $icaclsLog
+        try {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $script:fixtures
+            $result = Invoke-CleanCatFixStep -StagingDir $staging -WorkDir (Join-Path $work 'catfix') -FileListZipPath $zipPath -CabPath $cabPath -SevenZipPath $script:fake7z -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls -ExpectedCats $script:fixtureCats
+            $result.Skipped | Should -Contain $script:fixtureCats[0].Name
+            $result.Injected.Count | Should -Be 1
+            $result.Injected | Should -Contain $script:fixtureCats[1].Name
+            # The skipped file is untouched (same bytes as before).
+            (Get-FileHash -LiteralPath $staged0110 -Algorithm SHA256).Hash | Should -Be $script:fixtureCats[0].Sha256
+            # The diagnostic ran on the staged file, but no -R: a skip
+            # never touches the target.
+            $attrib = @(Get-Content -LiteralPath $attribLog)
+            $attrib[0] | Should -Be $staged0110
+            $attrib | Should -Not -Contain '-R'
+            $icacls = @(Get-Content -LiteralPath $icaclsLog)
+            $icacls[0] | Should -Be $staged0110
+        }
+        finally {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $null
+            Remove-Item Env:MICPE_FAKE_ATTRIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ICACLS_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $attribLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $icaclsLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Invoke-CleanCatFixStep clears the read-only flag before overwriting a staged catalog with different bytes (round 40)' {
+        # Round 39 rerun prime hypothesis: the staged .cat carries the
+        # read-only attribute from the WIM extract and Copy-Item
+        # -Force is denied on the overwrite. The step must clear the
+        # flag on the target itself (attrib -R, not Remove-Item: a
+        # failed remove+copy would leave staging without a .cat the
+        # serviced source shipped).
+        $staging = Join-Path $script:TempRoot ("micpe-catfix-ro-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-catfix-rowork-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $catRootDir = Join-Path $staging 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}'
+        New-Item -ItemType Directory -Path $catRootDir -Force | Out-Null
+        $stagedMerged = Join-Path $catRootDir $script:fixtureCats[1].Name
+        Set-Content -LiteralPath $stagedMerged -Value 'NOT-THE-REAL-CATALOG' -NoNewline
+        (Get-Item -LiteralPath $stagedMerged -Force).Attributes = [IO.FileAttributes]::ReadOnly
+        $zipPath = Join-Path $work 'filelist.zip'
+        Compress-Archive -LiteralPath (Join-Path $script:fixtures 'catfix-aria2.txt') -DestinationPath $zipPath -Force
+        $cabPath = Join-Path $work 'windows11.0-kb5020044-x64_0123456789abcdef.cab'
+        Set-Content -LiteralPath $cabPath -Value 'FAKE-CAB' -NoNewline
+        $attribLog = Join-Path $script:TempRoot "micpe-attrib-$(Get-Random).log"
+        $icaclsLog = Join-Path $script:TempRoot "micpe-icacls-$(Get-Random).log"
+        $env:MICPE_FAKE_ATTRIB_LOG = $attribLog
+        $env:MICPE_FAKE_ICACLS_LOG = $icaclsLog
+        try {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $script:fixtures
+            $result = Invoke-CleanCatFixStep -StagingDir $staging -WorkDir (Join-Path $work 'catfix') -FileListZipPath $zipPath -CabPath $cabPath -SevenZipPath $script:fake7z -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls -ExpectedCats $script:fixtureCats
+            $result.Injected.Count | Should -Be 2
+            $result.Skipped.Count | Should -Be 0
+            # Overwritten with the fixture bytes, flag cleared.
+            (Get-FileHash -LiteralPath $stagedMerged -Algorithm SHA256).Hash | Should -Be $script:fixtureCats[1].Sha256
+            ((Get-Item -LiteralPath $stagedMerged -Force).Attributes -band [IO.FileAttributes]::ReadOnly) | Should -Be 0
+            # Diagnostic first, then the -R clear, both on the target.
+            $attrib = @(Get-Content -LiteralPath $attribLog)
+            $attrib[0] | Should -Be $stagedMerged
+            $attrib[1] | Should -Be '-R'
+            $attrib[2] | Should -Be $stagedMerged
+            $icacls = @(Get-Content -LiteralPath $icaclsLog)
+            $icacls[0] | Should -Be $stagedMerged
+        }
+        finally {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $null
+            Remove-Item Env:MICPE_FAKE_ATTRIB_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:MICPE_FAKE_ICACLS_LOG -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $attribLog -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $icaclsLog -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'Invoke-CleanCatFixStep throws loudly when attrib -R fails (round 40)' {
+        # The -R clear is the fix for the round 39 rerun overwrite
+        # denial: if it fails, the copy would fail anyway, so the
+        # step must fail here with the target file in the message,
+        # not at Copy-Item.
+        $staging = Join-Path $script:TempRoot ("micpe-catfix-attribfail-{0}" -f [guid]::NewGuid())
+        $work = Join-Path $script:TempRoot ("micpe-catfix-attribfailwork-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $catRootDir = Join-Path $staging 'Windows\System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}'
+        New-Item -ItemType Directory -Path $catRootDir -Force | Out-Null
+        $stagedMerged = Join-Path $catRootDir $script:fixtureCats[1].Name
+        Set-Content -LiteralPath $stagedMerged -Value 'NOT-THE-REAL-CATALOG' -NoNewline
+        $zipPath = Join-Path $work 'filelist.zip'
+        Compress-Archive -LiteralPath (Join-Path $script:fixtures 'catfix-aria2.txt') -DestinationPath $zipPath -Force
+        $cabPath = Join-Path $work 'windows11.0-kb5020044-x64_0123456789abcdef.cab'
+        Set-Content -LiteralPath $cabPath -Value 'FAKE-CAB' -NoNewline
+        try {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $script:fixtures
+            $env:MICPE_FAKE_ATTRIB_FAIL = '1'
+            { Invoke-CleanCatFixStep -StagingDir $staging -WorkDir (Join-Path $work 'catfix') -FileListZipPath $zipPath -CabPath $cabPath -SevenZipPath $script:fake7z -AttribPath $script:fakeAttrib -IcaclsPath $script:fakeIcacls -ExpectedCats $script:fixtureCats } | Should -Throw '*attrib -R failed*'
+        }
+        finally {
+            $env:MICPE_FAKE_7Z_SOURCE_DIR = $null
+            $env:MICPE_FAKE_ATTRIB_FAIL = $null
+            $global:LASTEXITCODE = 0
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'the catalog step prints the target file state before overwriting, clears read-only, and skips hash-matching targets (round 40)' {
+        $script:CleanScriptText | Should -Match 'target state for'
+        $script:CleanScriptText | Should -Match 'already present with matching SHA256'
+        $script:CleanScriptText | Should -Match 'attrib -R failed with exit code'
+        $script:CleanScriptText | Should -Match 'Skipped\s+= @\(\$skipped'
     }
 
     It 'Invoke-CleanCatFixStep throws loudly when 7z fails (must not silently proceed)' {

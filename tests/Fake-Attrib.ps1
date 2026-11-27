@@ -10,6 +10,16 @@ if ($env:MICPE_FAKE_ATTRIB_LOG) {
     ($args -join "`n") | Add-Content -LiteralPath $env:MICPE_FAKE_ATTRIB_LOG
 }
 
+# MICPE_FAKE_ATTRIB_FAIL=1: simulate a failing attrib (e.g. the target
+# file's ACL denies the change). Sets the caller's exit code via
+# $global:LASTEXITCODE -- callers that do NOT initialise $LASTEXITCODE
+# see this value, like Fake-7z's MICPE_FAKE_7Z_FAIL. Clears nothing.
+if ($env:MICPE_FAKE_ATTRIB_FAIL -eq '1') {
+    Write-Output 'Access denied'
+    $global:LASTEXITCODE = 1
+    return
+}
+
 # Simulate `attrib -R`: clear ReadOnly on the target and everything
 # under it, so the test can assert the tree is writable after
 # Clear-StagingReadOnly runs. Args are: -R <path> /D, or

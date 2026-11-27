@@ -755,6 +755,10 @@ function Invoke-CleanCatFixStep {
 
         [string] $SevenZipPath = '7z',
 
+        [string] $AttribPath = 'attrib.exe',
+
+        [string] $IcaclsPath = 'icacls.exe',
+
         [string] $Lang = 'zh-cn',
 
         [string] $Edition = 'professional',
@@ -846,6 +850,7 @@ function Invoke-CleanCatFixStep {
         New-Item -ItemType Directory -Path $catRootDir -Force | Out-Null
     }
     $injected = [System.Collections.Generic.List[string]]::new()
+    $skipped = [System.Collections.Generic.List[string]]::new()
     foreach ($cat in $ExpectedCats) {
         $found = @(Get-ChildItem -LiteralPath $extractDir -Filter $cat.Name -Recurse -File -ErrorAction SilentlyContinue)
         Assert-True -Condition ($found.Count -eq 1) -Message (
@@ -860,8 +865,55 @@ function Invoke-CleanCatFixStep {
         $hasHash = Test-CleanCatHasCdromHash -CatPath $catPath -Sha1 $CdromSha1 -Sha256 $CdromSha256
         Assert-True -Condition $hasHash -Message (
             "$($cat.Name) does not contain the cdrom.sys Authenticode hash -- wrong catalog file")
-        Copy-Item -LiteralPath $catPath -Destination (Join-Path $catRootDir $cat.Name) -Force
-        Assert-PathExists -Path (Join-Path $catRootDir $cat.Name) -Label "staged $($cat.Name)"
+        $dest = Join-Path $catRootDir $cat.Name
+        if (Test-Path -LiteralPath $dest) {
+            # Round 40: the serviced image already ships the Package0110
+            # 22621.900 .cat (round 39 rerun), so this copy overwrites
+            # an existing file -- and three rounds died on exactly that
+            # overwrite with Access denied. Print the target file's own
+            # attrib + ACL before touching it, so the next failure
+            # carries the evidence: a directory write probe only proves
+            # new files can be created, not that this file can be
+            # replaced.
+            Write-SubStep "target state for $($cat.Name) (already staged)"
+            Write-Host "--- attrib $dest ---"
+            & $AttribPath $dest 2>&1 | Out-Host
+            Write-Host "--- icacls $dest ---"
+            & $IcaclsPath $dest 2>&1 | Out-Host
+            # Same bytes, no copy: the staged file is already the file
+            # this step would inject. Skip only this file, never the
+            # whole step -- Common-Drivers-merged is not in staging and
+            # must still be injected.
+            $stagedHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLower()
+            if ($stagedHash -eq $cat.Sha256.ToLower()) {
+                Write-SubStep "already present with matching SHA256, skipping $($cat.Name)"
+                $skipped.Add($cat.Name)
+                continue
+            }
+            # Round 40: clear the read-only flag on the target itself
+            # before the overwrite. WIM-extracted files carry it, and
+            # the round 39 rerun report's prime hypothesis is that the
+            # flag is what denies the overwrite. attrib -R (not
+            # Remove-Item) is deliberate: if the copy then still fails,
+            # the staged file is still there -- a failed remove+copy
+            # would leave staging without a .cat the serviced source
+            # shipped. Note: a local probe (pwsh 7.4.6, Linux) shows
+            # Copy-Item -Force does clear a read-only destination and
+            # succeed, so if this copy still fails the blocker is in
+            # the file's ACL (e.g. a DENY ACE) or a lock -- and the
+            # attrib/icacls dump above is the evidence for it.
+            # Do NOT initialise $LASTEXITCODE here: a plain assignment
+            # creates a function-local that shadows the real value (a
+            # native attrib exit code, or the fake's
+            # $global:LASTEXITCODE, would never reach the check below).
+            # Same no-init pattern as the 7z call above.
+            $clearOut = & $AttribPath -R $dest 2>&1
+            $clearCode = $LASTEXITCODE
+            if ($clearOut) { $clearOut | Out-Host }
+            Assert-True -Condition ($clearCode -eq 0) -Message "attrib -R failed with exit code $clearCode for $dest (read-only target could not be cleared before overwrite)"
+        }
+        Copy-Item -LiteralPath $catPath -Destination $dest -Force
+        Assert-PathExists -Path $dest -Label "staged $($cat.Name)"
         $injected.Add($cat.Name)
         Write-SubStep ("injected {0} ({1} bytes, SHA256 verified, cdrom.sys hash present)" -f $cat.Name, $actualSize)
     }
@@ -878,6 +930,7 @@ function Invoke-CleanCatFixStep {
         ExpectedCats = $ExpectedCats
         CatRootRel   = $CatRootRel
         Injected     = @($injected.ToArray())
+        Skipped      = @($skipped.ToArray())
     }
 }
 

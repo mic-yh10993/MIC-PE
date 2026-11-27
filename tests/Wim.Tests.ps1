@@ -364,6 +364,21 @@ Describe 'Grant-StagingWriteAccess' {
         { Grant-StagingWriteAccess -Path (Join-Path $script:TempRoot 'micpe-absent-grant') -TakeownPath $script:fakeTakeown -IcaclsPath $script:fakeIcacls -AttribPath $script:fakeAttrib } | Should -Not -Throw
     }
 
+    It 'logs the post-grant attrib output and throws on a non-zero exit (round 40)' {
+        # Round 39 rerun: the grant's own attrib -R should have
+        # cleared the read-only flag on the .cat the copy overwrites,
+        # but its output was discarded and its exit code never
+        # checked. The failure path cannot be executed locally (see
+        # the note below); the static guard pins the check in place --
+        # it matches the $attribCode variable, not the
+        # Clear-StagingReadOnly message (which uses $LASTEXITCODE
+        # inline), so it only passes with the new post-grant check.
+        # The functional part -- attrib still runs with the same
+        # arguments -- is covered by the tests above.
+        $wimText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../src/build/lib/Wim.ps1') -Raw
+        $wimText | Should -Match 'attrib -R failed with exit code \$attribCode'
+    }
+
     # No test for the takeown/icacls failure path: $LASTEXITCODE is
     # not set inside a function on Linux pwsh (verified: a native
     # command exiting 3 leaves $LASTEXITCODE 0 in a function, 3 at
@@ -372,7 +387,8 @@ Describe 'Grant-StagingWriteAccess' {
     # check follows the codebase pattern (Clear-StagingReadOnly) and
     # works on the Windows CI runner, where the build actually runs.
     # The write probe (Show-StagingWriteState -AssertWritable) is the
-    # locally testable arbiter of whether a grant took.
+    # locally testable arbiter of whether a grant took. The same holds
+    # for the post-grant attrib exit-code check (round 40).
 }
 
 Describe 'Show-StagingWriteState' {

@@ -262,7 +262,12 @@ function Grant-StagingWriteAccess {
         exit code is noisy on big trees, so the write probe
         (Show-StagingWriteState -AssertWritable, run by the base step
         on the CatRoot GUID directory) is the arbiter of whether the
-        grant actually took.
+        grant actually took. The post-grant attrib -R is likewise
+        logged and throws on a non-zero exit (round 40: it clears the
+        read-only flag on files a later copy will overwrite, and
+        round 39 rerun proved a swallowed attrib is worth nothing --
+        the grant printed cleanly while the first .cat copy was still
+        denied).
     #>
     [CmdletBinding()]
     param(
@@ -317,12 +322,27 @@ function Grant-StagingWriteAccess {
     if ($icaclsCode -ne 0) {
         Write-Warn "icacls exited $icaclsCode for $Path (grant may be partial; the write probe after the grant is the arbiter)"
     }
+    # Round 40: the post-grant attrib is no longer fire-and-forget.
+    # The first .cat copy overwrites a file the serviced image already
+    # ships (round 39 rerun), and this attrib -R is the step that
+    # should have cleared that file's read-only flag -- but its output
+    # was discarded and its exit code never checked, so there is no
+    # record of whether it ran. Log the output and throw on a non-zero
+    # exit, like takeown above. ($LASTEXITCODE is only set by native
+    # commands; initialise it so the check also works in a fresh
+    # session -- same pattern as Clear-StagingReadOnly. No test for the
+    # failure path: on Linux pwsh $LASTEXITCODE is not set inside a
+    # function, see the note at the end of this Describe block.)
+    $LASTEXITCODE = 0
     if ($isFile) {
-        $null = & $AttribPath -R $Path 2>&1
+        $attribOut = & $AttribPath -R $Path 2>&1
     }
     else {
-        $null = & $AttribPath -R "$Path\*.*" /S /D 2>&1
+        $attribOut = & $AttribPath -R "$Path\*.*" /S /D 2>&1
     }
+    $attribCode = $LASTEXITCODE
+    if ($attribOut) { $attribOut | Out-Host }
+    Assert-True -Condition ($attribCode -eq 0) -Message "attrib -R failed with exit code $attribCode for $Path"
 }
 
 function Show-StagingWriteState {
