@@ -17,23 +17,30 @@
          (same calls as Invoke-CleanBaseStep, AddUpdates=1 serviced
          22621.1105 -- the same source the clean build uses).
       2. DISM-apply it to a VHD, bcdboot the EFI partition, drop in
-         sam-seed-unattend.xml (specialize + Reseal Mode=Audit).
+         sam-seed-unattend.xml (specialize + OOBE).
       3. Boot the VHD in QEMU (TCG, like the clean verify) and wait
-         for the audit-mode desktop: specialize has run, the SAM and
-         SECURITY databases exist, and the machine auto-logged on as
-         Administrator with a blank password -- the desktop screenshot
+         for the desktop: specialize has run, OOBE has created the
+         MICPE administrator (blank password, Administrators group)
+         and AutoLogon has signed it in -- the desktop screenshot
          is itself the blank-password proof.
       4. Power the VM off cleanly, harvest SAM + SECURITY from the
-         VHD, verify their structure with reg.exe (Administrator in
-         SAM\Domains\Account\Users\Names, SECURITY\Policy\Accounts
+         VHD, verify their structure with reg.exe (MICPE in
+         SAM\Domains\Account\Users\Names, RID 1000 enabled and in
+         the Administrators alias, SECURITY\Policy\Accounts
          populated), and write micpe-seed-verify.txt with sizes,
          SHA256 and the observed structure.
 
     The harvested hives are then committed to the repo as build inputs
     (src/build/data/sam-seed/) -- see the README there for the privacy
     note (repo is temporarily public). The main build seeds them into
-    staging via Invoke-CleanSamSeedStep and enables RID 500 offline
-    with the existing Set-OfflineAdminState.
+    staging via Invoke-CleanSamSeedStep and enables MICPE (RID 1000)
+    offline with the existing Set-OfflineAdminState.
+
+    The seed VM has NO network (-nic none): with a NIC, Windows
+    Update can stall the specialize/OOBE flow for a long time, and
+    the seed needs no network at all. The QEMU used by the clean
+    verify keeps its e1000 NIC (kdnet needs it); only the seed VM
+    goes offline.
 
     Windows-only (DISM, bcdboot, diskpart, reg.exe). Local runs are
     not expected: the local VM has no KVM and a full Windows specialize
@@ -51,12 +58,12 @@ param(
 
     [string] $OvmfPath = '',
 
-    # Specialize under TCG is slow: a full Windows boot to the audit
+    # Specialize under TCG is slow: a full Windows boot to the OOBE
     # desktop can take 20-40 minutes. 75 minutes is the ceiling; the
     # loop fails fast on a blue screen instead of burning it.
     [int] $SpecializeTimeoutMin = 75,
 
-    # Seconds to let the audit desktop settle before powering off
+    # Seconds to let the desktop settle before powering off
     # (lets specialize finish writing the hives).
     [int] $DesktopSettleSec = 120,
 
@@ -93,12 +100,14 @@ function Write-VerifyLine {
 
 function Get-SeedQemuArgList {
     # Pure function (no process, no files): the exact QEMU argv for the
-    # seed VM. Modeled on Get-CleanQemuArgList (round 35) with two
+    # seed VM. Modeled on Get-CleanQemuArgList (round 35) with three
     # deliberate differences: the VM boots from its disk (-boot c, the
-    # applied image on ide index 0) instead of a CD-ROM, and there is
-    # NO -no-reboot (specialize reboots once into audit mode) and NO
+    # applied image on ide index 0) instead of a CD-ROM, there is
+    # NO -no-reboot (specialize reboots once into OOBE) and NO
     # -no-shutdown (a clean guest shutdown must let QEMU exit, which
-    # is the signal the run is done).
+    # is the signal the run is done), and there is NO network
+    # (-nic none: with a NIC, Windows Update can stall specialize /
+    # OOBE for a long time, and the seed needs no network at all).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -126,7 +135,7 @@ function Get-SeedQemuArgList {
         '-display', 'none'
         '-rtc', 'base=localtime'
         '-monitor', "tcp:127.0.0.1:$MonitorPort,server,nowait"
-        '-nic', 'user,model=e1000'
+        '-nic', 'none'
         '-serial', 'none'
         '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$OvmfCodePath"
         '-drive', "if=pflash,format=raw,unit=1,file=$VarsPath"
@@ -137,8 +146,8 @@ function Get-SeedQemuArgList {
 }
 
 function Test-SeedScreenshotIsDesktop {
-    # Pure function: is this screenshot an arrived desktop? The audit
-    # desktop is a bright GUI (low black fraction); the firmware screen,
+    # Pure function: is this screenshot an arrived desktop? The desktop
+    # is a bright GUI (low black fraction); the firmware screen,
     # the boot spinner and the specialize progress screens are all
     # mostly black. One 'Other' shot is not enough -- specialize shows
     # GUI progress screens too -- so the caller requires three in a
@@ -199,10 +208,12 @@ function Get-SeedHiveVerification {
     $samHash = (Get-FileHash -LiteralPath $SamPath -Algorithm SHA256).Hash.ToLower()
     $secHash = (Get-FileHash -LiteralPath $SecurityPath -Algorithm SHA256).Hash.ToLower()
 
-    # SAM: Administrator must exist under Users\Names, and RID 500
-    # (000001F4) must carry an 80-byte F value. reg query /s lists the
+    # SAM: MICPE must exist under Users\Names, and RID 1000
+    # (000003E8) must carry an 80-byte F value. reg query /s lists the
     # whole subtree; the child names are the lines that extend the
-    # queried key by exactly one segment.
+    # queried key by exactly one segment. The built-in Administrator
+    # (RID 500) stays disabled in a UserAccounts-built image; the
+    # logon account is MICPE, so only RID 1000 is checked here.
     $samKey = "MICPE_SEED_SAM_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     $samLoaded = $false
     $names = @()
@@ -225,20 +236,20 @@ function Get-SeedHiveVerification {
         $names = @($namesOut -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($namesPrefix, [StringComparison]::OrdinalIgnoreCase) } |
             ForEach-Object { $_.Substring($namesPrefix.Length).Split('\')[0] } |
             Where-Object { $_ } | Select-Object -Unique)
-        if ($names -notcontains 'Administrator') {
+        if ($names -notcontains 'MICPE') {
             throw [System.InvalidOperationException]::new(
-                "harvested SAM Users\Names has no Administrator (found: $($names -join ', '))")
+                "harvested SAM Users\Names has no MICPE (found: $($names -join ', '))")
         }
         $LASTEXITCODE = 0
-        $fOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Account\Users\000001F4" 2>&1 | Out-String
+        $fOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Account\Users\000003E8" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
             throw [System.InvalidOperationException]::new(
-                "reg query failed for SAM Users\000001F4 (exit code $LASTEXITCODE): no Administrator record")
+                "reg query failed for SAM Users\000003E8 (exit code $LASTEXITCODE): no MICPE record")
         }
         $fMatch = [regex]::Match($fOut, '^\s*F\s+REG_BINARY\s+([0-9a-fA-F]+)\s*$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
         if (-not $fMatch.Success -or $fMatch.Groups[1].Value.Length -lt 160) {
             throw [System.InvalidOperationException]::new(
-                'harvested SAM Users\000001F4 has no 80-byte F value')
+                'harvested SAM Users\000003E8 has no 80-byte F value')
         }
         $fHex = $fMatch.Groups[1].Value
         $fBytes = [byte[]]::new($fHex.Length / 2)
@@ -246,14 +257,33 @@ function Get-SeedHiveVerification {
             $fBytes[$i] = [Convert]::ToByte($fHex.Substring($i * 2, 2), 16)
         }
         # ACB flags: DWORD at offset 0x38, ACB_DISABLED = 0x0001.
-        # A fresh specialize leaves Administrator DISABLED (0x0211 =
-        # ACB_NORMAL | ACB_PWNOEXP | ACB_DISABLED); audit mode leaves
-        # it enabled (0x0210). Either is fine -- the build clears the
-        # bit offline with Set-OfflineAdminState. Only the flag VALUE
-        # is recorded here; the blank-password proof is the audit
-        # desktop screenshot (the machine auto-logged on as
-        # Administrator with no password).
+        # A UserAccounts-created admin is enabled by construction
+        # (0x0210 = ACB_NORMAL | ACB_PWNOEXP). The build still runs
+        # Set-OfflineAdminState on MICPE as a belt-and-braces step,
+        # but a disabled MICPE here means the unattend did not do
+        # what it was supposed to -- fail loudly instead of
+        # harvesting a database that cannot log on. The
+        # blank-password proof is the desktop screenshot (the machine
+        # auto-logged on as MICPE with no password).
         $samFlags = [BitConverter]::ToUInt32($fBytes, 0x38)
+        if (($samFlags -band 0x1) -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                ("harvested SAM MICPE is flagged disabled (F flags 0x{0:X8}): the unattend UserAccounts step did not enable it" -f $samFlags))
+        }
+        # Administrators alias (00000220) must list MICPE (RID 1000)
+        # as a member: the unattend puts it in the Administrators
+        # group, and the PE logon needs an admin account. The member
+        # SIDs are the value names under the alias Members key.
+        $LASTEXITCODE = 0
+        $membersOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Builtin\Aliases\00000220\Members" /s 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "reg query failed for SAM Builtin Aliases\00000220\Members (exit code $LASTEXITCODE): cannot confirm MICPE is in the Administrators group")
+        }
+        if ($membersOut -notmatch '-1000') {
+            throw [System.InvalidOperationException]::new(
+                "harvested SAM Administrators alias has no RID 1000 member (MICPE is not in the Administrators group): $membersOut")
+        }
     }
     finally {
         if ($samLoaded) {
@@ -428,7 +458,7 @@ try {
             "bcdboot failed with exit code $LASTEXITCODE")
     }
 
-    Write-Step 'dropping in the seed unattend (specialize + audit mode)'
+    Write-Step 'dropping in the seed unattend (specialize + OOBE)'
     $pantherDir = 'V:\Windows\Panther'
     if (-not (Test-Path -LiteralPath $pantherDir)) {
         New-Item -ItemType Directory -Path $pantherDir -Force | Out-Null
@@ -455,7 +485,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Boot in QEMU, wait for the audit-mode desktop
+# 3. Boot in QEMU, wait for the OOBE desktop (MICPE auto-logged on)
 # ---------------------------------------------------------------------------
 
 if (-not $OvmfPath) {
@@ -507,18 +537,18 @@ try {
     if (-not $monitorUp) { throw 'QEMU monitor never came up within 120 s' }
     Write-Host 'QEMU monitor is up; specialize is running'
 
-    # Poll screenshots until the audit desktop is stable: three
+    # Poll screenshots until the desktop is stable: three
     # consecutive desktop-like shots, 90 s apart. Specialize
-    # reboots once (specialize -> audit mode), so TianoCore may
-    # reappear mid-run -- that only resets the streak, it never
-    # fails the run. A blue screen at any point fails fast: the
-    # specialize itself is broken, and waiting would waste the job.
+    # reboots once (specialize -> OOBE -> AutoLogon desktop), so
+    # TianoCore may reappear mid-run -- that only resets the streak,
+    # it never fails the run. A blue screen at any point fails fast:
+    # the specialize itself is broken, and waiting would waste the job.
     $streak = 0
     $shotIndex = 0
     $deadline = (Get-Date).AddMinutes($SpecializeTimeoutMin)
     while ((Get-Date) -lt $deadline) {
         if ($qemu.HasExited) {
-            throw "QEMU exited before the audit desktop appeared (exit $($qemu.ExitCode)); see $qemuLog"
+            throw "QEMU exited before the desktop appeared (exit $($qemu.ExitCode)); see $qemuLog"
         }
         $shotIndex++
         $took = Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $shotIndex -Label ("specialize poll {0}" -f $shotIndex)
@@ -549,12 +579,12 @@ try {
         Start-Sleep -Seconds 90
     }
     if (-not $desktopReached) {
-        throw "audit desktop not reached within $SpecializeTimeoutMin minutes (last shot $shotIndex); see $shotDir"
+        throw "OOBE desktop not reached within $SpecializeTimeoutMin minutes (last shot $shotIndex); see $shotDir"
     }
-    Write-Host ("audit desktop reached (shot {0}); letting it settle {1} s" -f $lastShotIndex, $DesktopSettleSec)
+    Write-Host ("desktop reached (shot {0}); letting it settle {1} s" -f $lastShotIndex, $DesktopSettleSec)
     Start-Sleep -Seconds $DesktopSettleSec
     $lastShotIndex++
-    $null = Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $lastShotIndex -Label 'audit desktop final'
+    $null = Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $lastShotIndex -Label 'desktop final'
 }
 finally {
     # Clean shutdown: the hives are only trustworthy if the guest
@@ -599,7 +629,7 @@ finally {
 }
 
 if (-not $desktopReached) {
-    throw 'audit desktop was never reached; no hives to harvest'
+    throw 'OOBE desktop was never reached; no hives to harvest'
 }
 
 # ---------------------------------------------------------------------------
@@ -639,9 +669,9 @@ $observed = Get-SeedHiveVerification -SamPath $samOut -SecurityPath $secOut
 Write-VerifyLine ("harvested SAM: {0:N0} bytes, SHA256 {1}" -f $observed.SamSize, $observed.SamSha256)
 Write-VerifyLine ("harvested SECURITY: {0:N0} bytes, SHA256 {1}" -f $observed.SecuritySize, $observed.SecuritySha256)
 Write-VerifyLine ("SAM Users\Names: {0}" -f ($observed.SamNames -join ', '))
-Write-VerifyLine ("SAM Administrator F flags: 0x{0:X8} (ACB_DISABLED bit is $(if (($observed.SamFlags -band 0x1) -ne 0) { 'SET -- the build clears it offline' } else { 'CLEAR' }))" -f $observed.SamFlags)
+Write-VerifyLine ("SAM MICPE (RID 1000) F flags: 0x{0:X8} (ACB_DISABLED bit is CLEAR -- the build still clears it offline as a belt-and-braces step)" -f $observed.SamFlags)
 Write-VerifyLine ("SECURITY Policy\Accounts: {0} account(s): {1}" -f $observed.SecurityAccounts.Count, ($observed.SecurityAccounts -join ', '))
-Write-VerifyLine ("blank-password proof: the audit desktop screenshot (shot-{0:d2}.ppm) shows the machine auto-logged on as Administrator with no password" -f $lastShotIndex)
+Write-VerifyLine ("blank-password proof: the desktop screenshot (shot-{0:d2}.ppm) shows the machine auto-logged on as MICPE with no password (AutoLogon, blank password)" -f $lastShotIndex)
 Write-VerifyLine 'seed hives verified: SAM + SECURITY are populated databases, ready to commit as build inputs'
 
 $verifyLines | Set-Content -LiteralPath $seedVerifyPath -Encoding UTF8

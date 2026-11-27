@@ -12,7 +12,7 @@
     review:
 
       shot-01..03  boot progress -> LogonUI (native login, no winpeshl)
-      shot-04..05  desktop after pressing Enter at LogonUI (Administrator,
+      shot-04..05  desktop after pressing Enter at LogonUI (MICPE,
                    blank password, single user tile -> logs straight in)
       shot-06      Start menu after pressing the Windows key (StartAllBack /
                    Start11 must be rendering it)
@@ -25,9 +25,11 @@
     when the screenshots were captured; it exits 1 only when QEMU never
     came up or no screenshot was produced at all.
 
-    Login assumption: a single Administrator user with a blank password,
+    Login assumption: a single MICPE user with a blank password,
     whose tile is focused by default at LogonUI, so a bare Enter logs in.
-    If the LogonUI layout ever needs a click instead, shot-04 will show
+    (Round 42: the logon account is MICPE, RID 1000, created by the
+    seed unattend UserAccounts step; the built-in Administrator stays
+    disabled.) If the LogonUI layout ever needs a click instead, shot-04 will show
     the login screen still up and the reviewer retries interactively.
 #>
 
@@ -3765,8 +3767,8 @@ try {
     $shotIndex++
     if (Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $shotIndex -Label 'LogonUI expected') { $shotsTaken++ }
 
-    # Log in as Administrator (blank password, single user tile).
-    $null = Send-CleanKey -Port $MonitorPort -Key 'ret' -Label 'Enter at LogonUI (log in as Administrator)'
+    # Log in as MICPE (blank password, single user tile).
+    $null = Send-CleanKey -Port $MonitorPort -Key 'ret' -Label 'Enter at LogonUI (log in as MICPE)'
     Start-Sleep -Seconds $LoginWaitSec
     $shotIndex++
     if (Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $shotIndex -Label 'desktop after login') { $shotsTaken++ }

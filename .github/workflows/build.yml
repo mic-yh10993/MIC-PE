@@ -738,7 +738,8 @@ jobs:
 
   # Round 42, Scheme A (user-approved 2026-11-27): one-off SAM/SECURITY
   # seeding -- run the official Professional install.wim through
-  # specialize once, in audit mode, and harvest the SAM + SECURITY
+  # specialize once, then through OOBE (UserAccounts creates MICPE,
+  # AutoLogon signs it in, no network), and harvest the SAM + SECURITY
   # databases it generates. NOT run per build: the harvested hives are
   # committed to the repo as build inputs (src/build/data/sam-seed/)
   # and the main build seeds them into staging. Re-run only if the

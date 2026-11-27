@@ -14,6 +14,12 @@
     Only SYSTEM can write the SAM key, so the read-modify-write runs as
     SYSTEM through a one-shot scheduled task - the same mechanism
     Invoke-RegImportAsSystem uses in Registry.ps1.
+
+    The account is addressed by its RID hex (Users\<RID>), not by name:
+    the F value lives on the RID key. The default is the built-in
+    Administrator (RID 500, 000001F4); the clean rebuild seeds its SAM
+    from a specialize run whose logon account is MICPE (RID 1000,
+    000003E8), so the build passes that RID explicitly.
 #>
 
 function Set-OfflineAdminState {
@@ -24,6 +30,10 @@ function Set-OfflineAdminState {
         [string] $SamPath,
 
         [string] $AccountName = 'Administrator',
+
+        # RID hex of the account to enable (000001F4 = built-in
+        # Administrator, 000003E8 = first UserAccounts admin, MICPE).
+        [string] $RidHex = '000001F4',
 
         [int] $TimeoutSeconds = 120
     )
@@ -62,7 +72,7 @@ function Set-OfflineAdminState {
 
         $body = @'
 $ErrorActionPreference = 'Stop'
-$key = 'Registry::HKEY_LOCAL_MACHINE\__HIVE__\SAM\Domains\Account\Users\000001F4'
+$key = 'Registry::HKEY_LOCAL_MACHINE\__HIVE__\SAM\Domains\Account\Users\__RID__'
 $out = @()
 try {
     if (-not (Test-Path -LiteralPath $key)) {
@@ -93,7 +103,7 @@ catch {
 }
 $out | Set-Content -LiteralPath '__LOG__' -Encoding ascii
 '@
-        $body = $body.Replace('__HIVE__', $hiveKey).Replace('__LOG__', $logFile)
+        $body = $body.Replace('__HIVE__', $hiveKey).Replace('__LOG__', $logFile).Replace('__RID__', $RidHex)
         Set-Content -LiteralPath $loader -Value $body -Encoding utf8
 
         @(
@@ -134,14 +144,14 @@ $out | Set-Content -LiteralPath '__LOG__' -Encoding ascii
                 "offline admin-enable failed (HKLM\$hiveKey): $err")
         }
         if ($lines -notcontains 'found=1') {
-            # MEASURED: the WinPE boot.wim SAM is an EMPTY hive (8 KB, no
-            # subkeys at all). Its built-in accounts are created by the SAM
-            # service when it starts, so there is nothing to flip offline -
-            # and the account is therefore enabled by whatever default the
-            # service applies. Not fatal: the logon UI reports the account
-            # state, and 26-native-logon.reg already lifted the blank-password
-            # restriction that would block an empty-password logon.
-            Write-Warn "the image SAM is an empty hive (no $AccountName record): the built-in accounts are created by the SAM service at boot, so the offline enable step is a no-op"
+            # MEASURED (round 41): the install.wim SAM is an EMPTY hive
+            # (8 KB, no subkeys at all) -- and the SAM service does NOT
+            # create the built-in accounts at boot (r116 died on
+            # 0xc00002e3). An empty hive here means the seed step did
+            # not populate staging; the caller treats that as fatal.
+            # (The old comment claiming the service creates the
+            # accounts was disproved by round 41 and is removed.)
+            Write-Warn "the image SAM is an empty hive (no $AccountName record): the SAM service does NOT create accounts at boot -- the seed step must have populated it"
             return [pscustomobject]@{
                 Found     = $false
                 FlagsLine = 'empty SAM hive'
@@ -157,7 +167,7 @@ $out | Set-Content -LiteralPath '__LOG__' -Encoding ascii
         $value = [Convert]::ToUInt32(($newFlagsLine -replace '^newflags=', ''), 16)
         if (($value -band 0x1) -ne 0) {
             throw [System.InvalidOperationException]::new(
-                "the offline Administrator is still flagged disabled ($newFlagsLine)")
+                "the offline $AccountName is still flagged disabled ($newFlagsLine)")
         }
 
         Write-SubStep "$AccountName enabled in the offline SAM ($($lines -join ', '))"

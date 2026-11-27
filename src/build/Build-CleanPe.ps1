@@ -1402,6 +1402,88 @@ function Invoke-CleanAppStep {
     return [pscustomobject]@{ RegFiles = @($appRegFiles.ToArray()); Names = @($appNames.ToArray()) }
 }
 
+function Invoke-CleanSamSeedStep {
+    # Seed the staging SAM + SECURITY from the harvested databases
+    # (round 42, Scheme A): the official install.wim ships EMPTY
+    # SAM/SECURITY hives (8 KB, no subkeys), and round 41 proved the
+    # SAM service does NOT create the built-in accounts at boot
+    # (r116 died on 0xc00002e3). The databases come from a specialize
+    # run of the same official image (Invoke-CleanSamSeedRun.ps1) and
+    # are committed as build inputs under src/build/data/sam-seed/
+    # with a manifest carrying their SHA256. The step verifies the
+    # manifest hashes, copies both hives over the empty staging
+    # ones, and confirms MICPE is present in Users\Names -- the
+    # registry step then enables MICPE (RID 1000) offline.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $StagingDir
+    )
+
+    $seedDir = Join-Path $repoRoot 'src\build\data\sam-seed'
+    $samSeed = Join-Path $seedDir 'SAM'
+    $secSeed = Join-Path $seedDir 'SECURITY'
+    $manifestPath = Join-Path $seedDir 'manifest.json'
+    if (-not (Test-Path -LiteralPath $samSeed) -or -not (Test-Path -LiteralPath $secSeed) -or -not (Test-Path -LiteralPath $manifestPath)) {
+        throw [System.InvalidOperationException]::new(
+            "SAM/SECURITY seed inputs are not present in $seedDir (need SAM, SECURITY and manifest.json) -- run the seed job first: gh workflow run build.yml --ref seed/sam-seed-r42 -f seed=true")
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $samHash = (Get-FileHash -LiteralPath $samSeed -Algorithm SHA256).Hash.ToLower()
+    $secHash = (Get-FileHash -LiteralPath $secSeed -Algorithm SHA256).Hash.ToLower()
+    Assert-True -Condition ($samHash -eq $manifest.sam.sha256.ToLower()) -Message "seed SAM SHA256 mismatch: manifest says $($manifest.sam.sha256), file is $samHash"
+    Assert-True -Condition ($secHash -eq $manifest.security.sha256.ToLower()) -Message "seed SECURITY SHA256 mismatch: manifest says $($manifest.security.sha256), file is $secHash"
+    $configDir = Join-Path $StagingDir 'Windows\System32\config'
+    Copy-Item -LiteralPath $samSeed -Destination (Join-Path $configDir 'SAM') -Force
+    Copy-Item -LiteralPath $secSeed -Destination (Join-Path $configDir 'SECURITY') -Force
+    $stagedSam = Join-Path $configDir 'SAM'
+    $stagedSize = (Get-Item -LiteralPath $stagedSam).Length
+    Assert-True -Condition ($stagedSize -gt 8192) -Message "seeded staging SAM is still an empty hive ($stagedSize bytes)"
+
+    # Confirm MICPE landed in the staged SAM (reg.exe only -- never
+    # the PowerShell provider: round 19 proved the provider holds an
+    # open handle and a later reg unload fails).
+    $samKey = "MICPE_BUILD_SAM_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $samLoaded = $false
+    $names = @()
+    try {
+        $LASTEXITCODE = 0
+        $null = & reg.exe load "HKLM\$samKey" $stagedSam 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "reg load failed for staged SAM $stagedSam (exit code $LASTEXITCODE)")
+        }
+        $samLoaded = $true
+        $LASTEXITCODE = 0
+        $namesOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Account\Users\Names" /s 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "reg query failed for staged SAM Users\Names (exit code $LASTEXITCODE): the seeded SAM has no account database")
+        }
+        $namesPrefix = "HKEY_LOCAL_MACHINE\$samKey\SAM\Domains\Account\Users\Names\"
+        $names = @($namesOut -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($namesPrefix, [StringComparison]::OrdinalIgnoreCase) } |
+            ForEach-Object { $_.Substring($namesPrefix.Length).Split('\')[0] } |
+            Where-Object { $_ } | Select-Object -Unique)
+        Assert-True -Condition ($names -contains 'MICPE') -Message "seeded staging SAM Users\Names has no MICPE (found: $($names -join ', '))"
+    }
+    finally {
+        if ($samLoaded) {
+            $null = & reg.exe unload "HKLM\$samKey" 2>&1
+        }
+    }
+
+    Write-Step 'seeded SAM + SECURITY into staging (round 42 Scheme A)'
+    Write-SubStep ("seed SAM: {0} bytes, SHA256 {1}" -f (Get-Item -LiteralPath $stagedSam).Length, $samHash)
+    Write-SubStep ("seed SECURITY: {0} bytes, SHA256 {1}" -f (Get-Item -LiteralPath (Join-Path $configDir 'SECURITY')).Length, $secHash)
+    Write-SubStep ("seed SAM Users\Names: {0}" -f ($names -join ', '))
+
+    return [pscustomobject]@{
+        SamSha256      = $samHash
+        SecuritySha256 = $secHash
+        SamNames       = $names
+    }
+}
+
 function Invoke-CleanRegistryStep {
     # Mount the staging hives and import the clean .reg patches at CI
     # build time (user decision 2026-11-17 23:43: never inside the PE),
@@ -1430,9 +1512,9 @@ function Invoke-CleanRegistryStep {
     Write-Step 'importing the clean registry patches into the staging hives'
     Invoke-RegistryScript -MountDir $paths.Staging -RegFiles $allRegFiles
 
-    Write-Step 'enabling built-in Administrator in the staging SAM'
+    Write-Step 'enabling MICPE (RID 1000) in the staging SAM'
     $samPath = Join-Path $paths.Staging 'Windows\System32\config\SAM'
-    $admin = Set-OfflineAdminState -SamPath $samPath
+    $admin = Set-OfflineAdminState -SamPath $samPath -AccountName 'MICPE' -RidHex '000003E8'
     if (-not $admin.Found) {
         # MEASURED (2026-11-24, run 45390017855): the official install.wim
         # SAM is an EMPTY hive by design -- 8,192 bytes, valid regf, no
@@ -1454,12 +1536,15 @@ function Invoke-CleanRegistryStep {
         # that an empty SAM self-creates at LogonUI time. The SAM and
         # SECURITY databases must be seeded before the image can log on
         # (round 42, user-approved Scheme A: seed from a specialize run of the official image -- see
-        # hidden_files/round41-sam-research.md). The offline enable step
-        # below is a no-op until the databases exist.
+        # hidden_files/round41-sam-research.md). The seed step runs just
+        # before this step and guarantees a populated SAM, so reaching
+        # here with an empty hive means the seed did not land -- fail
+        # fast instead of building another ISO that dies on 0xc00002e3.
         # Also corrected: 10-clean-boot.reg never lifted the
         # blank-password restriction (it had no LSA key); round 41 adds
         # LimitBlankPasswordUse=0 there.
-        Write-Warn 'staging SAM is an empty hive (no Administrator record): expected for an install.wim source; the SAM service does NOT create the built-in accounts at boot (round 40: 0xc00002e3), so the offline enable step is skipped until the SAM/SECURITY databases are seeded'
+        throw [System.InvalidOperationException]::new(
+            'staging SAM is still empty after the seed step (no MICPE record): the SAM service does NOT create the built-in accounts at boot (round 40: 0xc00002e3) -- the seed step must have populated it')
     }
 
     # The reference's unattend.xml (windowsPE pass only: ComputerName
@@ -1877,6 +1962,7 @@ $gdiPlusFix = Invoke-CleanGdiPlusCatFixStep -StagingDir $paths.Staging -InstallW
 Copy-Item -LiteralPath $gdiPlusFix.DiagPath -Destination (Join-Path $repoRoot 'micpe-gdiplus-diag.txt') -Force
 Invoke-CleanShellStep
 $apps = Invoke-CleanAppStep
+$seed = Invoke-CleanSamSeedStep -StagingDir $paths.Staging
 Invoke-CleanRegistryStep -AppRegFiles $apps.RegFiles
 Assert-CleanRegistry -AppNames $apps.Names
 Invoke-CleanWimBootStep -StagingDir $paths.Staging -PeDonorWim $base.BootWim -WimlibPath $WimlibPath

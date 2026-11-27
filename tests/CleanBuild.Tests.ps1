@@ -163,27 +163,32 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $script:CleanScriptText | Should -Match 'Start11Config\.exe'
     }
 
-    It 'imports the four clean .reg patches and enables Administrator in the staging SAM' {
+    It 'imports the four clean .reg patches and enables MICPE in the staging SAM (round 42: the logon account is MICPE, RID 1000)' {
         foreach ($reg in '10-clean-boot\.reg', '20-clean-start11\.reg', '30-clean-author\.reg', '40-clean-startallback\.reg') {
             $script:CleanScriptText | Should -Match $reg
         }
         $script:CleanScriptText | Should -Match 'Invoke-RegistryScript'
         $script:CleanScriptText | Should -Match 'Set-OfflineAdminState'
+        $script:CleanScriptText | Should -Match "-AccountName 'MICPE'"
+        $script:CleanScriptText | Should -Match "-RidHex '000003E8'"
         $script:CleanScriptText | Should -Match 'Assert-CleanRegistry'
     }
 
-    It 'does not fail the build on an empty staging SAM (install.wim ships one by design)' {
+    It 'fails the build if the staging SAM is still empty after the seed step (round 42: the seed step guarantees a populated SAM)' {
         # Run 45390017855: the official install.wim SAM is an EMPTY hive
         # (8 KB, no subkeys, no Administrator record) -- verified against
         # the exact UUP source (professional_zh-cn.esd image 3). Round 41
         # corrected the old assumption: the SAM service does NOT create
         # the built-in accounts at boot (round 40: 0xc00002e3 SAM
-        # initialization failed on the empty hive), so the offline enable
-        # step is skipped until the SAM/SECURITY databases are seeded.
+        # initialization failed on the empty hive). Round 42 seeds the
+        # databases before the registry step, so an empty SAM here means
+        # the seed step did not land -- fail fast instead of building
+        # another ISO that dies on 0xc00002e3.
         $script:CleanScriptText | Should -Match 'Set-OfflineAdminState'
         $script:CleanScriptText | Should -Not -Match 'the file-list extract lost it'
         $script:CleanScriptText | Should -Match 'empty hive'
         $script:CleanScriptText | Should -Match 'SAM service does NOT create the built-in accounts at boot'
+        $script:CleanScriptText | Should -Match 'still empty after the seed step'
         $script:CleanScriptText | Should -Not -Match 'the SAM service creates the built-in accounts at boot, so the offline enable step is skipped'
     }
 
