@@ -189,6 +189,49 @@ function Invoke-SeedDiskpart {
     }
 }
 
+function Get-SeedDiskpartVolumeNumber {
+    # Run diskpart `list disk` + `list volume` and return the volume
+    # number of the volume whose drive letter (or label) matches.
+    # Prints the raw output first, so the CI log shows the disk and
+    # volume layout even when the parse below finds nothing. Returns
+    # $null when no volume matches. Used by the bcdboot gate (find
+    # the S: volume) and by the harvest attach (find the SEED
+    # volume): both must select by letter/label, never by partition
+    # number -- run 46017835896 proved `convert gpt` auto-creates a
+    # Microsoft Reserved Partition as partition 1 (16 MB on Win10/11;
+    # Microsoft Learn, "Establish and boot to GPT mirrors": after
+    # Convert GPT, List partition shows "Partition 1 Reserved"), so
+    # the EFI partition is partition 2 and the primary partition is
+    # partition 3, and any hard-coded partition number is wrong.
+    # Uses Write-Host only (no Write-Step / lib helpers), so the
+    # function stays testable in isolation.
+    [CmdletBinding()]
+    param(
+        [string] $DriveLetter,
+
+        [string] $Label
+    )
+    if (-not $DriveLetter -and -not $Label) {
+        throw [System.ArgumentException]::new('Get-SeedDiskpartVolumeNumber needs -DriveLetter or -Label')
+    }
+    $lines = @()
+    try {
+        $listCommands = @('list disk', 'list volume')
+        $lines = @( (($listCommands -join "`n") | diskpart 2>&1 | ForEach-Object { "$_" }) )
+    } catch { $lines = @() }
+    Write-Host 'seed diskpart [INFO] list disk / list volume:'
+    $lines | ForEach-Object { Write-Host ("    {0}" -f $_) }
+    $text = ($lines -join "`n")
+    if ($DriveLetter) {
+        $match = [regex]::Match($text, ('(?m)^\s*Volume\s+(\d+)\s+' + [regex]::Escape($DriveLetter) + '\s+\S+'))
+    }
+    else {
+        $match = [regex]::Match($text, ('(?m)^\s*Volume\s+(\d+)\s+(?:[A-Za-z]\s+)?' + [regex]::Escape($Label) + '\s+'))
+    }
+    if (-not $match.Success) { return $null }
+    return $match.Groups[1].Value
+}
+
 function Assert-SeedBcdbootPrerequisites {
     # Pre-bcdboot gate (round 42: run 45988904072 died at bcdboot --
     # the host bcdboot 26100 failed on the 22621 image with
@@ -220,8 +263,23 @@ function Assert-SeedBcdbootPrerequisites {
     # never ask the Storage provider by drive letter: the volume
     # verdict comes from Win32_Volume with a Test-Path fallback,
     # and the GPT type comes from diskpart `detail partition` on
-    # partition 1 of the seed VHD (the EFI partition is created
-    # first, so it is always partition 1).
+    # the S: volume itself (selected by letter, never by
+    # partition number -- see check 2).
+    # Run 46017835896 false-positive fix: the gate used to hard-code
+    # partition 1, assuming the EFI partition is created first and
+    # is therefore partition 1. It is not: `convert gpt`
+    # auto-creates a Microsoft Reserved Partition as partition 1
+    # (16 MB on Win10/11; Microsoft Learn, "Establish and boot to
+    # GPT mirrors": after Convert GPT, List partition shows
+    # "Partition 1 Reserved"), so on the seed VHD partition 1 is
+    # the MSR, partition 2 is the EFI partition (S:), and partition
+    # 3 is the primary (V:). The gate read the MSR's GPT type
+    # (e3c9e316-...) and failed a layout that is correct -- the
+    # V: size in the same run's log proves it: 32,491 MB =
+    # 32768 - 260 (ESP) - 16 (MSR) - ~1 overhead. The same wrong
+    # assumption also lived in the harvest attach (a fixed partition
+    # number for the primary); both are fixed here by selecting
+    # volumes by letter/label instead of partitions by number.
     # Uses Write-Host only (no Write-Step / lib helpers), so the
     # function stays testable in isolation.
     [CmdletBinding()]
@@ -234,6 +292,7 @@ function Assert-SeedBcdbootPrerequisites {
     $sReadable = $false
     $sFileSystem = ''
     $sGptType = ''
+    $sVolumeNumber = $null
     $bootmgfwExists = $false
     $bcdTemplateExists = $false
     $imageBcdbootExists = $false
@@ -271,39 +330,60 @@ function Assert-SeedBcdbootPrerequisites {
     # 2. S: is the EFI System Partition by GPT type. Get-Partition
     #    -DriveLetter S is blind to the ESP for the same VDS reason
     #    as check 1 (run 46004055968), so ask diskpart -- the tool
-    #    that built this layout -- for partition 1 of the seed VHD.
-    #    The EFI partition is created first in the diskpart script,
-    #    so it is always partition 1; `detail partition` prints its
-    #    GPT type GUID (and the volume line: letter, FS, size).
-    #    `select vdisk` on the still-attached VHD is the same select
-    #    the detach step uses, so it is proven to work here.
+    #    that built this layout. NEVER select by partition number:
+    #    run 46017835896 failed this exact check because the gate
+    #    hard-coded partition 1 and read the Microsoft Reserved
+    #    Partition's GPT type (e3c9e316-...) instead of the ESP's.
+    #    `convert gpt` auto-creates an MSR as partition 1 (16 MB on
+    #    Win10/11), so on the seed VHD partition 1 is the MSR,
+    #    partition 2 is the EFI partition (S:), and partition 3 is
+    #    the primary (V:). Select the volume by its letter S:
+    #    instead -- the same S: bcdboot uses -- which gives focus
+    #    to the volume's disk and partition (Microsoft Learn,
+    #    diskpart: "After a volume has focus, the related disk and
+    #    partition also have focus"), then `detail partition`
+    #    prints the GPT type GUID. The raw diskpart output of both
+    #    probes is printed to the log, so the next failure can be
+    #    located from the log alone.
     $espGuid = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
-    $detailLines = @()
-    try {
-        # Parenthesised join (the file-wide convention since the
-        # run 45981633632 binding bug): a trailing `) -join` at a
-        # call site parses as a -join parameter, so the join is
-        # always written ($array -join "`n") in parentheses.
-        $detailCommands = @(
-            "select vdisk file=`"$VhdPath`""
-            'select partition 1'
-            'detail partition'
-        )
-        $detailLines = @( ($detailCommands -join "`n") | diskpart 2>&1 | ForEach-Object { "$_" } )
-    } catch { $detailLines = @() }
-    $detailText = ($detailLines -join "`n")
-    $typeMatch = [regex]::Match($detailText, '(?m)^\s*Type\s*:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
-    if (-not $typeMatch.Success) {
-        Write-Host 'bcdboot prereq [FAIL] S: GPT type: diskpart detail partition returned no Type GUID -- cannot confirm partition 1 is the EFI System Partition'
-        $failures.Add('S: GPT type could not be confirmed (diskpart detail partition returned no Type GUID)')
-    }
-    elseif ($typeMatch.Groups[1].Value -ieq 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b') {
-        $sGptType = $espGuid
-        Write-Host 'bcdboot prereq [OK  ] S: GPT type: EFI System Partition (diskpart detail partition, partition 1)'
+    $sVolumeNumber = Get-SeedDiskpartVolumeNumber -DriveLetter 'S'
+    if ($null -eq $sVolumeNumber) {
+        Write-Host 'bcdboot prereq [FAIL] S: GPT type: diskpart list volume has no volume with drive letter S:'
+        $failures.Add('S: volume not found in diskpart list volume')
     }
     else {
-        Write-Host ("bcdboot prereq [FAIL] S: GPT type: {0}, expected EFI System Partition {1}" -f $typeMatch.Groups[1].Value, $espGuid)
-        $failures.Add(("S: GPT type is {0}, expected EFI System Partition" -f $typeMatch.Groups[1].Value))
+        Write-Host ("bcdboot prereq [OK  ] S: GPT type probe: S: is Volume {0} (diskpart list volume)" -f $sVolumeNumber)
+        $detailLines = @()
+        try {
+            # Parenthesised join (the file-wide convention since the
+            # run 45981633632 binding bug): a trailing `) -join` at a
+            # call site parses as a -join parameter, so the join is
+            # always written ($array -join "`n") in parentheses.
+            $detailCommands = @(
+                "select vdisk file=`"$VhdPath`""
+                "select volume $sVolumeNumber"
+                'detail disk'
+                'list partition'
+                'detail partition'
+            )
+            $detailLines = @( ($detailCommands -join "`n") | diskpart 2>&1 | ForEach-Object { "$_" } )
+        } catch { $detailLines = @() }
+        Write-Host 'bcdboot prereq [INFO] S: GPT type probe (diskpart detail disk / list partition / detail partition):'
+        $detailLines | ForEach-Object { Write-Host ("    {0}" -f $_) }
+        $detailText = ($detailLines -join "`n")
+        $typeMatch = [regex]::Match($detailText, '(?m)^\s*Type\s*:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
+        if (-not $typeMatch.Success) {
+            Write-Host 'bcdboot prereq [FAIL] S: GPT type: diskpart detail partition returned no Type GUID -- cannot confirm the S: volume is the EFI System Partition'
+            $failures.Add('S: GPT type could not be confirmed (diskpart detail partition returned no Type GUID)')
+        }
+        elseif ($typeMatch.Groups[1].Value -ieq 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b') {
+            $sGptType = $espGuid
+            Write-Host ("bcdboot prereq [OK  ] S: GPT type: EFI System Partition (diskpart detail partition, S: is Volume {0})" -f $sVolumeNumber)
+        }
+        else {
+            Write-Host ("bcdboot prereq [FAIL] S: GPT type: {0}, expected EFI System Partition {1}" -f $typeMatch.Groups[1].Value, $espGuid)
+            $failures.Add(("S: GPT type is {0}, expected EFI System Partition" -f $typeMatch.Groups[1].Value))
+        }
     }
 
     # 3. S: is readable RIGHT NOW -- the user's question: is the EFI
@@ -399,6 +479,7 @@ function Assert-SeedBcdbootPrerequisites {
         SReadable          = $sReadable
         SFileSystem        = $sFileSystem
         SGptType           = $sGptType
+        SVolumeNumber      = $sVolumeNumber
         BootmgfwExists     = $bootmgfwExists
         BcdTemplateExists  = $bcdTemplateExists
         ImageBcdbootExists = $imageBcdbootExists
@@ -880,7 +961,21 @@ $secOut = Join-Path $WorkDir 'SECURITY'
 Invoke-SeedDiskpart -Label 'attaching the seed VHD for harvest' -Script @(
     "select vdisk file=`"$vhdx`""
     'attach vdisk'
-    'select partition 2'
+)
+# The Windows volume is found by its label (SEED), never by
+# partition number: `convert gpt` auto-creates an MSR as partition
+# 1 (see the bcdboot gate comment), so the primary is partition 3,
+# not 2 -- a fixed partition number here used to select the EFI
+# partition instead, and the harvest would have read V:\Windows
+# off the ESP.
+$seedVolumeNumber = Get-SeedDiskpartVolumeNumber -Label 'SEED'
+if ($null -eq $seedVolumeNumber) {
+    throw [System.InvalidOperationException]::new(
+        'harvest failed: SEED volume not found in diskpart list volume')
+}
+Invoke-SeedDiskpart -Label 'assigning V: to the seed Windows volume' -Script @(
+    "select vdisk file=`"$vhdx`""
+    "select volume $seedVolumeNumber"
     'assign letter=V'
 )
 try {

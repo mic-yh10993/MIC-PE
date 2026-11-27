@@ -209,24 +209,31 @@ Describe 'seed diskpart accepts a string array (round 42 rerun)' {
 
 Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdboot fix)' {
     BeforeAll {
-        # Extract the real Assert-SeedBcdbootPrerequisites (brace-counting
-        # scan, same pattern as the diskpart tests), so the tests
-        # exercise the shipped function, not a copy. run 45988904072
-        # died at bcdboot: host bcdboot 26100 failed on the 22621
-        # image, exit 193, and the log never proved S: was readable.
-        $start = $script:SeedScriptText.IndexOf('function Assert-SeedBcdbootPrerequisites')
-        $open = $script:SeedScriptText.IndexOf('{', $start)
-        $depth = 0
-        $end = $open
-        for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
-            $ch = $script:SeedScriptText[$i]
-            if ($ch -eq '{') { $depth++ }
-            elseif ($ch -eq '}') {
-                $depth--
-                if ($depth -eq 0) { $end = $i; break }
+        # Extract the real Assert-SeedBcdbootPrerequisites and its
+        # helper Get-SeedDiskpartVolumeNumber (brace-counting scan,
+        # same pattern as the diskpart tests), so the tests exercise
+        # the shipped functions, not copies. run 45988904072 died
+        # at bcdboot: host bcdboot 26100 failed on the 22621 image,
+        # exit 193, and the log never proved S: was readable.
+        function Extract-SeedFunction {
+            param([string] $Name)
+            $start = $script:SeedScriptText.IndexOf("function $Name")
+            $open = $script:SeedScriptText.IndexOf('{', $start)
+            $depth = 0
+            $end = $open
+            for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
+                $ch = $script:SeedScriptText[$i]
+                if ($ch -eq '{') { $depth++ }
+                elseif ($ch -eq '}') {
+                    $depth--
+                    if ($depth -eq 0) { $end = $i; break }
+                }
             }
+            return $script:SeedScriptText.Substring($start, $end - $start + 1)
         }
-        $script:SeedBcdbootPrereqFuncText = $script:SeedScriptText.Substring($start, $end - $start + 1)
+        $script:SeedDiskpartVolumeFuncText = Extract-SeedFunction -Name 'Get-SeedDiskpartVolumeNumber'
+        . ([scriptblock]::Create($script:SeedDiskpartVolumeFuncText))
+        $script:SeedBcdbootPrereqFuncText = Extract-SeedFunction -Name 'Assert-SeedBcdbootPrerequisites'
         . ([scriptblock]::Create($script:SeedBcdbootPrereqFuncText))
 
         # Mock the Windows-only probes (Storage cmdlets, CIM, diskpart,
@@ -238,27 +245,53 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
         # Run 46004055968: the gate no longer asks Get-Volume /
         # Get-Partition -DriveLetter S (the Storage provider is blind
         # to ESP drive letters) -- S: is proven via Win32_Volume with
-        # a Test-Path fallback, and the GPT type via diskpart `detail
-        # partition`. The default mocks reproduce the CI state:
-        # Win32_Volume does NOT list S: (empty MockSeedCimVolumes),
-        # so the default pass path is the Test-Path fallback + the
-        # diskpart detail parse.
+        # a Test-Path fallback, and the GPT type via diskpart. Run
+        # 46017835896: `convert gpt` auto-creates an MSR as partition
+        # 1, so the ESP is partition 2 (S:, Volume 3) and the primary
+        # is partition 3 (V:, Volume 4, label SEED) -- the mocks
+        # reproduce that layout, and the diskpart mock dispatches on
+        # the piped commands: a `select partition 1` probe gets the
+        # MSR detail (the old gate's mistake), a `list volume` probe
+        # gets the volume table, anything else gets the ESP detail.
+        # The default mocks reproduce the CI state: Win32_Volume does
+        # NOT list S: (empty MockSeedCimVolumes), so the default pass
+        # path is the Test-Path fallback + the diskpart volume-letter
+        # lookup + detail parse.
         function Set-SeedBcdbootMocksOk {
             $global:MockSeedVolumes = @{
                 S = [pscustomobject]@{ DriveLetter = 'S'; FileSystem = 'FAT32'; HealthStatus = 'Healthy'; Size = 272629760 }
                 V = [pscustomobject]@{ DriveLetter = 'V'; FileSystem = 'NTFS'; HealthStatus = 'Healthy'; Size = 34359738368 }
             }
             $global:MockSeedCimVolumes = @{}
+            $global:MockSeedDiskpartListVolume = @(
+                '  Disk ###  Status      Size     Free     Dyn  Gpt'
+                '  --------  ----------  -------  -------  ---  ---'
+                '  Disk 0    Online       127 GB      0 B        *'
+                '  Disk 1    Online        32 GB      0 B        *'
+                '  Volume ###  Ltr  Label        Fs     Type        Size     Status     Info'
+                '  ----------  ---  -----------  -----  ----------  -------  ---------  --------'
+                '  Volume 0     C                NTFS   Partition    127 GB  Healthy    Boot'
+                '  Volume 3     S   SYSTEM       FAT32  Partition    260 MB  Healthy'
+                '  Volume 4     V   SEED         NTFS   Partition     31 GB  Healthy'
+            )
             $global:MockSeedDiskpartDetail = @(
-                'Partition 1'
+                'Partition 2'
                 'Type    : c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
-                'Hidden  : No'
-                'Required: No'
-                'Attribute : 0000000000000000'
-                'Offset in Bytes: 1048576'
+                'Hidden  : Yes'
+                'Required: Yes'
+                'Attribute : 0X8000000000000001'
+                'Offset in Bytes: 1024 KB'
                 '  Volume ###  Ltr  Label        Fs     Type        Size     Status     Info'
                 '  ----------  ---  -----------  -----  ----------  -------  ---------  --------'
                 '* Volume 3     S  SYSTEM       FAT32  Partition    260 MB  Healthy    Hidden'
+            )
+            $global:MockSeedDiskpartMsrDetail = @(
+                'Partition 1'
+                'Type    : e3c9e316-0b5c-4db8-817d-f92df00215ae'
+                'Hidden  : Yes'
+                'Required: Yes'
+                'Attrib  : 0000000000000000'
+                'Offset  : 1024 KB'
             )
             $global:MockSeedPaths = @{
                 'S:\'                                      = $true
@@ -284,9 +317,13 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
             function global:diskpart {
                 [CmdletBinding()]
                 param([Parameter(ValueFromPipeline = $true)] $InputObject)
-                begin { }
-                process { }
-                end { return $global:MockSeedDiskpartDetail }
+                begin { $global:MockSeedDiskpartInput = '' }
+                process { $global:MockSeedDiskpartInput += "$InputObject`n" }
+                end {
+                    if ($global:MockSeedDiskpartInput -match 'select partition 1') { return $global:MockSeedDiskpartMsrDetail }
+                    if ($global:MockSeedDiskpartInput -match 'list volume') { return $global:MockSeedDiskpartListVolume }
+                    return $global:MockSeedDiskpartDetail
+                }
             }
             function global:Test-Path {
                 [CmdletBinding()]
@@ -337,10 +374,17 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
         $script:SeedBcdbootPrereqFuncText | Should -Match 'is the EFI partition actually attached'
     }
 
-    It 'checks the S: GPT type is the EFI System Partition' {
+    It 'checks the S: GPT type is the EFI System Partition (selected by volume letter, never by partition number)' {
         $script:SeedBcdbootPrereqFuncText | Should -Match 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
         $script:SeedBcdbootPrereqFuncText | Should -Match 'detail partition'
-        $script:SeedBcdbootPrereqFuncText | Should -Match 'select partition 1'
+        $script:SeedBcdbootPrereqFuncText | Should -Match 'select volume'
+        $script:SeedBcdbootPrereqFuncText | Should -Match 'list partition'
+        $script:SeedBcdbootPrereqFuncText | Should -Match 'detail disk'
+        $script:SeedBcdbootPrereqFuncText | Should -Not -Match 'select partition 1'
+        # The list disk / list volume probe lives in the helper the
+        # gate calls (Get-SeedDiskpartVolumeNumber), not in the gate.
+        $script:SeedDiskpartVolumeFuncText | Should -Match 'list disk'
+        $script:SeedDiskpartVolumeFuncText | Should -Match 'list volume'
     }
 
     It 'never asks the Storage provider by drive letter for S: (run 46004055968: blind to the ESP)' {
@@ -366,6 +410,7 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
         $result.SReadable | Should -BeTrue
         $result.SFileSystem | Should -Be 'FAT32'
         $result.SGptType | Should -Be '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+        $result.SVolumeNumber | Should -Be '3'
         $result.BootmgfwExists | Should -BeTrue
         $result.BcdTemplateExists | Should -BeTrue
         $result.ImageBcdbootExists | Should -BeTrue
@@ -402,7 +447,7 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
     It 'fails naming the GPT type when S: is not an EFI System Partition' {
         Set-SeedBcdbootMocksOk
         $global:MockSeedDiskpartDetail = @(
-            'Partition 1'
+            'Partition 2'
             'Type    : ebd0a0a2-b9e5-4433-87c0-68b6b72699c7'
             'Hidden  : No'
         )
@@ -411,7 +456,7 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
 
     It 'fails naming the GPT type when diskpart detail returns no Type GUID' {
         Set-SeedBcdbootMocksOk
-        $global:MockSeedDiskpartDetail = @('Partition 1', 'Hidden  : No')
+        $global:MockSeedDiskpartDetail = @('Partition 2', 'Hidden  : No')
         { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*GPT type*'
     }
 
@@ -425,5 +470,66 @@ Describe 'seed bcdboot prerequisites are verified before bcdboot (round 42 bcdbo
         Set-SeedBcdbootMocksOk
         $global:MockSeedPaths['V:\Windows\System32\bcdboot.exe'] = $false
         { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*bcdboot.exe*'
+    }
+
+    It 'passes when convert gpt auto-created an MSR as partition 1 (run 46017835896 repro: ESP is partition 2, found by volume S:)' {
+        Set-SeedBcdbootMocksOk
+        # Default mocks reproduce the run 46017835896 layout: partition
+        # 1 is the MSR (MockSeedDiskpartMsrDetail), the ESP is partition
+        # 2 (S:, Volume 3). The old gate hard-coded partition 1 and
+        # threw the MSR GUID; the fixed gate selects by volume letter
+        # and must pass. The pre-fix failure is proven by
+        # ~/workspace/micpe-r42-seed/msr-probe.ps1 (old gate throws
+        # the exact CI error on the same mocks).
+        $result = Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx'
+        $result.SReadable | Should -BeTrue
+        $result.SFileSystem | Should -Be 'FAT32'
+        $result.SGptType | Should -Be '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+        $result.SVolumeNumber | Should -Be '3'
+    }
+
+    It 'fails naming the GPT type when diskpart list volume has no S: volume' {
+        Set-SeedBcdbootMocksOk
+        $global:MockSeedDiskpartListVolume = @(
+            '  Volume ###  Ltr  Label        Fs     Type        Size     Status     Info'
+            '  Volume 0     C                NTFS   Partition    127 GB  Healthy    Boot'
+            '  Volume 4     V   SEED         NTFS   Partition     31 GB  Healthy'
+        )
+        { Assert-SeedBcdbootPrerequisites -VhdPath 'C:\seed\seed.vhdx' } | Should -Throw '*list volume*'
+    }
+
+    It 'finds the S: volume number from diskpart list volume' {
+        Set-SeedBcdbootMocksOk
+        Get-SeedDiskpartVolumeNumber -DriveLetter 'S' | Should -Be '3'
+    }
+
+    It 'finds the SEED volume number from diskpart list volume' {
+        Set-SeedBcdbootMocksOk
+        Get-SeedDiskpartVolumeNumber -Label 'SEED' | Should -Be '4'
+    }
+
+    It 'returns null when no volume has the drive letter' {
+        Set-SeedBcdbootMocksOk
+        $n = Get-SeedDiskpartVolumeNumber -DriveLetter 'Q'
+        Should -BeNullOrEmpty -Actual $n
+    }
+
+    It 'returns null when no volume has the label' {
+        Set-SeedBcdbootMocksOk
+        $n = Get-SeedDiskpartVolumeNumber -Label 'NOPE'
+        Should -BeNullOrEmpty -Actual $n
+    }
+}
+
+Describe 'seed harvest finds the Windows volume by label (round 42 MSR fix)' {
+    It 'does not select a partition by number for the harvest attach (run 46017835896: convert gpt auto-creates an MSR as partition 1, so the primary is partition 3, not 2)' {
+        $script:SeedScriptText | Should -Not -Match 'select partition 2'
+        $script:SeedScriptText | Should -Not -Match 'select partition 1'
+    }
+
+    It 'finds the SEED volume by label and assigns V: to it' {
+        $script:SeedScriptText | Should -Match "Get-SeedDiskpartVolumeNumber -Label 'SEED'"
+        $script:SeedScriptText | Should -Match 'select volume \$seedVolumeNumber'
+        $script:SeedScriptText | Should -Match "'assign letter=V'"
     }
 }
