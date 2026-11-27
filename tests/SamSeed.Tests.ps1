@@ -578,4 +578,51 @@ Describe 'seed verifier helpers are loaded before first use (round 42 rerun)' {
     It 'falls back to bare qemu-img when QemuPath has no directory part' {
         Get-CleanQemuImgPath -QemuPath 'qemu-system-x86_64' | Should -Be 'qemu-img'
     }
+
+    It 'passes the seed QEMU full path through the dot-source (run 46043894030: the verifier default bare name clobbered the workflow path, "qemu-img not recognized")' {
+        $dotLine = [regex]::Match($script:SeedScriptText, '(?m)^\. \(Join-Path \$repoRoot ''src\\ci\\Invoke-CleanQemuVerify\.ps1''\)(.*)$')
+        $dotLine.Success | Should -BeTrue
+        $dotLine.Groups[1].Value | Should -Match '-QemuPath \$QemuPath'
+    }
+
+    It 'passes through the other shared verifier parameters the seed script uses after the load (MemoryMb/CpuCount/MonitorPort coincide with the verifier defaults today, but the same bind would silently reset a future workflow value)' {
+        $dotLine = [regex]::Match($script:SeedScriptText, '(?m)^\. \(Join-Path \$repoRoot ''src\\ci\\Invoke-CleanQemuVerify\.ps1''\)(.*)$')
+        $dotLine.Success | Should -BeTrue
+        $argsText = $dotLine.Groups[1].Value
+        $argsText | Should -Match '-MemoryMb \$MemoryMb'
+        $argsText | Should -Match '-CpuCount \$CpuCount'
+        $argsText | Should -Match '-MonitorPort \$MonitorPort'
+    }
+
+    It 'keeps the workflow QEMU full path after the dot-source (run 46043894030: the load rebound $QemuPath to the verifier default)' {
+        # Extract the verifier's real param block and dot-source it with
+        # exactly the arguments the seed line passes, so this fails while
+        # the line omits -QemuPath and passes once it is added.
+        $paramStart = $script:VerifyScriptText.IndexOf('[CmdletBinding()]')
+        $tail = $script:VerifyScriptText.Substring($paramStart)
+        $close = [regex]::Match($tail, '(?m)^\)\s*$')
+        $close.Success | Should -BeTrue
+        $paramBlock = [scriptblock]::Create($tail.Substring(0, $close.Index + $close.Length))
+        $dotLine = [regex]::Match($script:SeedScriptText, '(?m)^\. \(Join-Path \$repoRoot ''src\\ci\\Invoke-CleanQemuVerify\.ps1''\)(.*)$')
+        $dotLine.Success | Should -BeTrue
+        $argsText = $dotLine.Groups[1].Value
+        $QemuPath = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
+        $installWim = 'C:\fake\install.wim'
+        $OvmfPath = 'C:\fake\OVMF_CODE.fd'
+        $WorkDir = 'C:\fake\work'
+        $MemoryMb = 4096
+        $CpuCount = 4
+        $MonitorPort = '4444'
+        $splat = @{}
+        if ($argsText -match '-IsoPath') { $splat['IsoPath'] = $installWim }
+        if ($argsText -match '-OvmfPath') { $splat['OvmfPath'] = $OvmfPath }
+        if ($argsText -match '-WorkDir') { $splat['WorkDir'] = $WorkDir }
+        if ($argsText -match '-QemuPath') { $splat['QemuPath'] = $QemuPath }
+        if ($argsText -match '-MemoryMb') { $splat['MemoryMb'] = $MemoryMb }
+        if ($argsText -match '-CpuCount') { $splat['CpuCount'] = $CpuCount }
+        if ($argsText -match '-MonitorPort') { $splat['MonitorPort'] = $MonitorPort }
+        if ($argsText -match '-ParseOnly') { $splat['ParseOnly'] = $true }
+        . $paramBlock @splat
+        $QemuPath | Should -Be 'C:\Program Files\qemu\qemu-system-x86_64.exe'
+    }
 }

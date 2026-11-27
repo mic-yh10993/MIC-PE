@@ -813,7 +813,15 @@ Assert-PathExists -Path $QemuPath -Label 'QEMU'
 # (ParseOnly: define helpers, do not launch QEMU). IsoPath only needs
 # to exist here -- the install.wim stands in for it; the seed run
 # never boots an ISO.
-. (Join-Path $repoRoot 'src\ci\Invoke-CleanQemuVerify.ps1') -IsoPath $installWim -OvmfPath $OvmfPath -WorkDir $WorkDir -ParseOnly
+# Round 42 rerun (run 46043894030): dot-sourcing binds ALL of the
+# verifier's params into this scope, defaults included -- its bare
+# 'qemu-system-x86_64' default clobbered the workflow's full QEMU
+# path, so the qemu-img lookup fell back to bare 'qemu-img' (not in
+# PATH). Pass through every shared name the seed script uses after
+# this load, so a default can never silently reset a caller value
+# again (MemoryMb/CpuCount/MonitorPort coincide with the defaults
+# today; QemuPath is the one that differed).
+. (Join-Path $repoRoot 'src\ci\Invoke-CleanQemuVerify.ps1') -IsoPath $installWim -OvmfPath $OvmfPath -WorkDir $WorkDir -QemuPath $QemuPath -MemoryMb $MemoryMb -CpuCount $CpuCount -MonitorPort $MonitorPort -ParseOnly
 
 Write-Step 'converting the seed VHD to qcow2 for QEMU'
 $qemuImgPath = Get-CleanQemuImgPath -QemuPath $QemuPath
