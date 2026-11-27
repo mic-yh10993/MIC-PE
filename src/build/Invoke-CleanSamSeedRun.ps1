@@ -143,17 +143,30 @@ function Get-SeedQemuArgList {
         '-drive', "if=pflash,format=raw,unit=1,file=$VarsPath"
         '-drive', "file=$DiskQcow2,format=qcow2,if=ide,index=0"
         '-boot', 'c'
+        # -D only names the log file; QEMU writes nothing at all
+        # unless -d enables a log category, so without -d the file
+        # stays 0 bytes (run 46051050523: micpe-seed-qemu.log was
+        # empty for exactly this reason). guest_errors makes the log
+        # real -- guest errors during specialize/OOBE are the useful
+        # signal; a still-empty file then means "no guest errors",
+        # not "logging was off".
+        '-d', 'guest_errors'
         '-D', $QemuLogPath
     )
 }
 
 function Test-SeedScreenshotIsDesktop {
-    # Pure function: is this screenshot an arrived desktop? The desktop
-    # is a bright GUI (low black fraction); the firmware screen,
-    # the boot spinner and the specialize progress screens are all
-    # mostly black. One 'Other' shot is not enough -- specialize shows
-    # GUI progress screens too -- so the caller requires three in a
-    # row (90 s apart) before declaring the desktop reached.
+    # Pure function: is this screenshot an arrived desktop by color?
+    # The desktop is a bright GUI (low black fraction); the firmware
+    # screen, the boot spinner and the specialize progress screens are
+    # all mostly black. One 'Other' shot is not enough -- specialize
+    # shows GUI progress screens too -- so the caller requires three in
+    # a row (90 s apart) before declaring the desktop reached.
+    # Color alone is NECESSARY but NOT sufficient: the OOBE "getting
+    # ready" screens pass it too (Other, black 14-18%) and fooled
+    # three polls in run 46051050523 -- the caller also requires
+    # Test-SeedScreenshotHasDesktopDetail (texture + no central white
+    # text) before a shot counts toward the streak.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -163,6 +176,106 @@ function Test-SeedScreenshotIsDesktop {
         [double] $BlackFraction = 1.0
     )
     return ($Classification -eq 'Other') -and ($BlackFraction -lt 0.4)
+}
+
+function Test-SeedScreenshotHasDesktopDetail {
+    # Pure function: does this screenshot show a real desktop, not a
+    # smooth OOBE screen? Two independent pixel checks on the PPM
+    # raster (same 40x40 sampling grid as Test-CleanScreenshot):
+    #
+    #   edge       mean absolute horizontal brightness step between
+    #              adjacent sampled pixels. The OOBE "getting ready"
+    #              screens are smooth radial gradients (run 46051050523
+    #              shots 32-35: 3.5-4.3); the first-logon desktop has
+    #              the textured Bloom wallpaper plus the taskbar
+    #              (16.3 on the reconstructed desktop). Threshold 8
+    #              sits ~2x above the worst OOBE shot and ~2x below
+    #              the desktop.
+    #   white text fraction of near-white pixels in the central band
+    #              (x 20-80%, y 40-60%). The OOBE screens carry two
+    #              lines of large white text there (shots 32-35:
+    #              0.034-0.043); the desktop flower has none (0.000).
+    #              Threshold 0.02.
+    #
+    # Both must hold: texture without text is a desktop; the OOBE
+    # screens fail both. Calibration: all 35 real shots of run
+    # 46051050523 plus the reconstructed desktop (real Bloom wallpaper
+    # img0.jpg + solid dark taskbar); fixtures in tests/fixtures.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $len = $bytes.Length
+
+    # Parse the P6 header tokens (same tolerant scan as
+    # Test-CleanScreenshot: magic, width, height, maxval, '#'
+    # comments allowed). After the maxval token there is exactly one
+    # whitespace byte, then the raster begins.
+    $pos = 0
+    $tokens = [System.Collections.Generic.List[string]]::new()
+    while ($tokens.Count -lt 4 -and $pos -lt $len) {
+        while ($pos -lt $len -and ($bytes[$pos] -eq 32 -or $bytes[$pos] -eq 9 -or $bytes[$pos] -eq 10 -or $bytes[$pos] -eq 13)) { $pos++ }
+        if ($pos -ge $len) { break }
+        if ($bytes[$pos] -eq 35) {
+            while ($pos -lt $len -and $bytes[$pos] -ne 10) { $pos++ }
+            continue
+        }
+        $start = $pos
+        while ($pos -lt $len -and $bytes[$pos] -ne 32 -and $bytes[$pos] -ne 9 -and $bytes[$pos] -ne 10 -and $bytes[$pos] -ne 13 -and $bytes[$pos] -ne 35) { $pos++ }
+        $tokens.Add([System.Text.Encoding]::ASCII.GetString($bytes, $start, $pos - $start))
+    }
+    if ($tokens.Count -ne 4 -or $tokens[0] -ne 'P6') {
+        throw "not a P6 PPM file: '$Path'"
+    }
+    $width = [int]$tokens[1]
+    $height = [int]$tokens[2]
+    $maxval = [int]$tokens[3]
+    if ($width -le 0 -or $height -le 0 -or $maxval -ne 255) {
+        throw "unsupported PPM header in '$Path' ($width x $height, maxval $maxval)"
+    }
+    if ($pos -lt $len -and ($bytes[$pos] -eq 32 -or $bytes[$pos] -eq 9 -or $bytes[$pos] -eq 10 -or $bytes[$pos] -eq 13)) { $pos++ }
+    $rasterStart = $pos
+    if (($len - $rasterStart) -lt ($width * $height * 3)) {
+        throw "truncated PPM raster in '$Path' (expected $($width * $height * 3) bytes, found $($len - $rasterStart))"
+    }
+
+    $stepX = [Math]::Max(1, [int]($width / 40))
+    $stepY = [Math]::Max(1, [int]($height / 40))
+    $edgeSum = 0.0
+    $edgePairs = 0
+    for ($y = 0; $y -lt $height; $y += $stepY) {
+        $prev = -1
+        for ($x = 0; $x -lt $width; $x += $stepX) {
+            $off = $rasterStart + ($y * $width + $x) * 3
+            $br = [Math]::Floor(($bytes[$off] + $bytes[$off + 1] + $bytes[$off + 2]) / 3)
+            if ($prev -ge 0) {
+                $edgeSum += [Math]::Abs($br - $prev)
+                $edgePairs++
+            }
+            $prev = $br
+        }
+    }
+    $edge = if ($edgePairs -gt 0) { $edgeSum / $edgePairs } else { 0 }
+
+    $white = 0
+    $central = 0
+    $x0 = [int]($width * 0.2)
+    $x1 = [int]($width * 0.8)
+    $y0 = [int]($height * 0.4)
+    $y1 = [int]($height * 0.6)
+    for ($y = $y0; $y -lt $y1; $y += 4) {
+        for ($x = $x0; $x -lt $x1; $x += 4) {
+            $off = $rasterStart + ($y * $width + $x) * 3
+            $central++
+            if ($bytes[$off] -gt 200 -and $bytes[$off + 1] -gt 200 -and $bytes[$off + 2] -gt 200) { $white++ }
+        }
+    }
+    $whiteFraction = if ($central -gt 0) { $white / $central } else { 0 }
+
+    return ($edge -ge 8) -and ($whiteFraction -lt 0.02)
 }
 
 function Invoke-SeedDiskpart {
@@ -882,6 +995,11 @@ try {
     # TianoCore may reappear mid-run -- that only resets the streak,
     # it never fails the run. A blue screen at any point fails fast:
     # the specialize itself is broken, and waiting would waste the job.
+    # A shot counts toward the streak only if it passes BOTH the
+    # color rule and the detail check: the OOBE "getting ready"
+    # screens pass the color rule (Other, black 14-18%) and fooled
+    # three polls in run 46051050523, so the detail check (texture
+    # plus no central white text) is the second gate.
     $streak = 0
     $shotIndex = 0
     $deadline = (Get-Date).AddMinutes($SpecializeTimeoutMin)
@@ -903,7 +1021,7 @@ try {
         if ($class.Classification -eq 'BlueScreen' -or $class.Classification -eq 'Recovery') {
             throw "specialize failed: guest shows $($class.Classification) at shot $shotIndex (see $ppm)"
         }
-        if (Test-SeedScreenshotIsDesktop -Classification $class.Classification -BlackFraction $class.BlackFraction) {
+        if ((Test-SeedScreenshotIsDesktop -Classification $class.Classification -BlackFraction $class.BlackFraction) -and (Test-SeedScreenshotHasDesktopDetail -Path $ppm)) {
             $streak++
             Write-Host ("desktop-like shot {0}/3" -f $streak)
             if ($streak -ge 3) {
@@ -971,15 +1089,35 @@ if (-not $desktopReached) {
     throw 'OOBE desktop was never reached; no hives to harvest'
 }
 
+# Convert the QEMU-written qcow2 back to VHDX before harvesting.
+# Round 42 rerun (run 46051050523): the harvest attached the ORIGINAL
+# seed.vhdx, which QEMU never wrote to -- the guest's specialize/OOBE
+# writes all landed in seed.qcow2 -- so the harvested SAM was still
+# the install image's empty 8 KB hive. The convert-back writes a NEW
+# file; the original VHD is left untouched until the conversion
+# succeeds, and a failed conversion throws here instead of silently
+# harvesting the stale disk.
+Write-Step 'converting the QEMU qcow2 back to VHDX for harvest'
+$harvestVhdx = Join-Path $WorkDir 'seed-harvest.vhdx'
+if (Test-Path -LiteralPath $harvestVhdx) { Remove-Item -LiteralPath $harvestVhdx -Force }
+& $qemuImgPath convert -f qcow2 -O vhdx $qcow2 $harvestVhdx | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw [System.InvalidOperationException]::new(
+        "qemu-img convert back failed with exit code $LASTEXITCODE (the QEMU-written disk was not recovered; refusing to harvest the stale pre-QEMU VHD)")
+}
+
 # ---------------------------------------------------------------------------
 # 4. Harvest + verify the hives
 # ---------------------------------------------------------------------------
 
-Write-Step 'harvesting SAM + SECURITY from the seed VHD'
+# The harvest mounts $harvestVhdx (the converted-back QEMU disk),
+# never the original $vhdx: QEMU booted the qcow2, so only the
+# converted-back disk carries the specialize/OOBE writes.
+Write-Step 'harvesting SAM + SECURITY from the converted-back seed disk'
 $samOut = Join-Path $WorkDir 'SAM'
 $secOut = Join-Path $WorkDir 'SECURITY'
-Invoke-SeedDiskpart -Label 'attaching the seed VHD for harvest' -Script @(
-    "select vdisk file=`"$vhdx`""
+Invoke-SeedDiskpart -Label 'attaching the converted-back VHD for harvest' -Script @(
+    "select vdisk file=`"$harvestVhdx`""
     'attach vdisk'
 )
 # The Windows volume is found by its label (SEED), never by
@@ -994,7 +1132,7 @@ if ($null -eq $seedVolumeNumber) {
         'harvest failed: SEED volume not found in diskpart list volume')
 }
 Invoke-SeedDiskpart -Label 'assigning V: to the seed Windows volume' -Script @(
-    "select vdisk file=`"$vhdx`""
+    "select vdisk file=`"$harvestVhdx`""
     "select volume $seedVolumeNumber"
     'assign letter=V'
 )
@@ -1011,8 +1149,8 @@ try {
     Assert-PathExists -Path $secOut -Label 'harvested SECURITY'
 }
 finally {
-    Invoke-SeedDiskpart -Label 'detaching the seed VHD after harvest' -Script @(
-        "select vdisk file=`"$vhdx`""
+    Invoke-SeedDiskpart -Label 'detaching the converted-back VHD after harvest' -Script @(
+        "select vdisk file=`"$harvestVhdx`""
         'detach vdisk'
     )
 }

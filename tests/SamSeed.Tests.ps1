@@ -626,3 +626,162 @@ Describe 'seed verifier helpers are loaded before first use (round 42 rerun)' {
         $QemuPath | Should -Be 'C:\Program Files\qemu\qemu-system-x86_64.exe'
     }
 }
+
+Describe 'seed harvest recovers the QEMU-written disk (round 42 rerun 7)' {
+    It 'converts the qcow2 back to VHDX after QEMU exits, before the harvest (run 46051050523: the harvest attached the stale pre-QEMU VHD and read the empty 8 KB SAM)' {
+        # The convert-back uses the resolved qemu-img path and writes a
+        # NEW file (the original VHD stays untouched until the
+        # conversion succeeds).
+        $script:SeedScriptText | Should -Match '& \$qemuImgPath convert -f qcow2 -O vhdx \$qcow2 \$harvestVhdx'
+        $convertBack = $script:SeedScriptText.IndexOf('convert -f qcow2 -O vhdx')
+        $convertBack | Should -BeGreaterThan 0
+        # It runs after QEMU has exited (past the desktop guard, which
+        # sits right after the shutdown finally block) and before the
+        # harvest step -- the disk must be quiesced and the harvest must
+        # read the converted-back disk, not the pre-QEMU one.
+        $desktopGuard = $script:SeedScriptText.IndexOf('OOBE desktop was never reached')
+        $desktopGuard | Should -BeGreaterThan 0
+        $convertBack | Should -BeGreaterThan $desktopGuard
+        $harvest = $script:SeedScriptText.IndexOf("Write-Step 'harvesting")
+        $harvest | Should -BeGreaterThan 0
+        $convertBack | Should -BeLessThan $harvest
+    }
+
+    It 'harvests from the converted-back disk, never from the original pre-QEMU VHD' {
+        $harvestSection = (($script:SeedScriptText -split "Write-Step 'harvesting")[1] -split "Write-Step 'verifying")[0]
+        $harvestSection | Should -Match 'select vdisk file=`"\$harvestVhdx`"'
+        $harvestSection | Should -Not -Match 'select vdisk file=`"\$vhdx`"'
+    }
+
+    It 'fails hard if the convert-back fails (never silently harvest the stale VHD)' {
+        $script:SeedScriptText | Should -Match 'convert back failed'
+        $script:SeedScriptText | Should -Match 'refusing to harvest the stale pre-QEMU VHD'
+    }
+}
+
+Describe 'seed desktop detection rejects the OOBE getting-ready screens (round 42 rerun 7)' {
+    BeforeAll {
+        # Extract the real Test-SeedScreenshotHasDesktopDetail from the
+        # seed script (brace-counting scan, same pattern as the other
+        # Describes), so the tests exercise the shipped function, not a
+        # copy. On HEAD the function does not exist yet, so this
+        # BeforeAll throws and every test below fails -- that is the
+        # intended fail-on-HEAD signal.
+        $start = $script:SeedScriptText.IndexOf('function Test-SeedScreenshotHasDesktopDetail')
+        $open = $script:SeedScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
+            $ch = $script:SeedScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        $script:SeedDetailFuncText = $script:SeedScriptText.Substring($start, $end - $start + 1)
+        . ([scriptblock]::Create($script:SeedDetailFuncText))
+
+        # The real shot-34/35 PPMs are 3 MB each; they live gzipped in
+        # tests/fixtures (bytes exact) and are expanded here. The
+        # reconstructed desktop is the shipped Bloom wallpaper
+        # (Windows\Web\Wallpaper\Windows\img0.jpg, same 22621.1105
+        # build) scaled to the 1280x800 QEMU display plus the solid
+        # dark taskbar -- a reconstruction, not a screenshot, used only
+        # to prove the new detector still accepts a real desktop.
+        $script:SeedFixtures = Join-Path $PSScriptRoot 'fixtures'
+        function Expand-SeedFixtureGzip {
+            param([string] $Source, [string] $Destination)
+            $inStream = [System.IO.File]::OpenRead($Source)
+            try {
+                $outStream = [System.IO.File]::Create($Destination)
+                try {
+                    $gzip = [System.IO.Compression.GZipStream]::new($inStream, [System.IO.Compression.CompressionMode]::Decompress)
+                    try { $gzip.CopyTo($outStream) } finally { $gzip.Dispose() }
+                } finally { $outStream.Dispose() }
+            } finally { $inStream.Dispose() }
+        }
+        $script:SeedShot34 = Join-Path $TestDrive 'shot-34.ppm'
+        $script:SeedShot35 = Join-Path $TestDrive 'shot-35.ppm'
+        $script:SeedDesktop = Join-Path $TestDrive 'seed-desktop.ppm'
+        Expand-SeedFixtureGzip -Source (Join-Path $script:SeedFixtures 'seed-oobe-shot-34.ppm.gz') -Destination $script:SeedShot34
+        Expand-SeedFixtureGzip -Source (Join-Path $script:SeedFixtures 'seed-oobe-shot-35.ppm.gz') -Destination $script:SeedShot35
+        Expand-SeedFixtureGzip -Source (Join-Path $script:SeedFixtures 'seed-desktop-reconstructed.ppm.gz') -Destination $script:SeedDesktop
+    }
+
+    It 'pins the confuser: the color rule alone accepts the OOBE screens (passes on HEAD by design -- it proves the old detector was fooled, the gate tests below are the ones that must fail on HEAD)' {
+        # Extract the real Test-CleanScreenshot from the verifier and
+        # run it on the actual shot-34 pixels.
+        $start = $script:VerifyScriptText.IndexOf('function Test-CleanScreenshot')
+        $open = $script:VerifyScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:VerifyScriptText.Length; $i++) {
+            $ch = $script:VerifyScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        . ([scriptblock]::Create($script:VerifyScriptText.Substring($start, $end - $start + 1)))
+        $class = Test-CleanScreenshot -Path $script:SeedShot34
+        $class.Classification | Should -Be 'Other'
+        $class.BlackFraction | Should -BeLessThan 0.4
+    }
+
+    It 'rejects shot-34 (run 46051050523: "确保一切都已准备就绪" -- OOBE, not a desktop)' {
+        Test-SeedScreenshotHasDesktopDetail -Path $script:SeedShot34 | Should -BeFalse
+    }
+
+    It 'rejects shot-35 (run 46051050523: "仍在处理一些问题" -- OOBE, not a desktop)' {
+        Test-SeedScreenshotHasDesktopDetail -Path $script:SeedShot35 | Should -BeFalse
+    }
+
+    It 'accepts the reconstructed first-logon desktop (real Bloom wallpaper + taskbar -- the new detector must not become always-false)' {
+        Test-SeedScreenshotHasDesktopDetail -Path $script:SeedDesktop | Should -BeTrue
+    }
+
+    It 'the poll loop requires the detail check in addition to the color rule' {
+        $script:SeedScriptText | Should -Match 'Test-SeedScreenshotHasDesktopDetail -Path \$ppm'
+        $detail = $script:SeedScriptText.IndexOf('Test-SeedScreenshotHasDesktopDetail -Path $ppm')
+        $detail | Should -BeGreaterThan 0
+        $streak = $script:SeedScriptText.IndexOf('$streak++')
+        $streak | Should -BeGreaterThan 0
+        $detail | Should -BeLessThan $streak
+    }
+}
+
+Describe 'seed QEMU log actually records guest errors (round 42 rerun 7)' {
+    # Run 46051050523: micpe-seed-qemu.log was 0 bytes. QEMU's -D only
+    # names the log file; nothing is written unless -d enables a log
+    # category, so the parameter was dead. -d guest_errors makes the
+    # log real (guest errors during specialize/OOBE are the useful
+    # signal); a still-empty file then means "no guest errors", not
+    # "logging was off".
+    BeforeAll {
+        $script:SeedScriptText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' 'src' 'build' 'Invoke-CleanSamSeedRun.ps1') -Raw
+        $start = $script:SeedScriptText.IndexOf('function Get-SeedQemuArgList')
+        $open = $script:SeedScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
+            $ch = $script:SeedScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        $func = $script:SeedScriptText.Substring($start, $end - $start + 1)
+        . ([scriptblock]::Create($func))
+    }
+
+    It 'enables a log category with -d so -D writes something' {
+        $args = Get-SeedQemuArgList -DiskQcow2 'C:\seed-out\seed.qcow2' -OvmfCodePath 'C:\qemu\OVMF_CODE.fd' -VarsPath 'C:\seed-out\vars.fd' -QemuLogPath 'C:\seed-out\micpe-seed-qemu.log'
+        $dIndex = [Array]::IndexOf($args, '-d')
+        $dIndex | Should -BeGreaterThan -1
+        $args[$dIndex + 1] | Should -Be 'guest_errors'
+        $args | Should -Contain '-D'
+    }
+}
