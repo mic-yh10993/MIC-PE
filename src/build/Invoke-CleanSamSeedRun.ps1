@@ -166,15 +166,21 @@ function Test-SeedScreenshotIsDesktop {
 function Invoke-SeedDiskpart {
     # Run a diskpart script, fail loudly on a non-zero exit (same
     # pattern as the build's data-disk preparation).
+    # -Script is [string[]]: the call sites pass @(...) line arrays.
+    # A trailing `-join "`n"` at a call site does NOT join -- it parses
+    # as a -join parameter and fails binding (run 45981633632 died on
+    # the [string] conversion first; with [string[]] the same call sites
+    # would die on the -join parameter instead). Join here, once, and
+    # feed diskpart a single script.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string] $Script,
+        [string[]] $Script,
 
         [Parameter(Mandatory = $true)]
         [string] $Label
     )
-    $Script | diskpart | Out-Host
+    ($Script -join "`n") | diskpart | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw [System.InvalidOperationException]::new(
             "diskpart failed while $Label (exit code $LASTEXITCODE)")
@@ -441,7 +447,7 @@ Invoke-SeedDiskpart -Label 'creating the seed VHD' -Script @(
     'create partition primary'
     'format quick fs=ntfs label="SEED"'
     'assign letter=V'
-) -join "`n"
+)
 
 try {
     Write-Step 'applying install.wim to the seed VHD (DISM)'
@@ -471,7 +477,7 @@ finally {
     Invoke-SeedDiskpart -Label 'detaching the seed VHD' -Script @(
         "select vdisk file=`"$vhdx`""
         'detach vdisk'
-    ) -join "`n"
+    )
 }
 
 Write-Step 'converting the seed VHD to qcow2 for QEMU'
@@ -644,7 +650,7 @@ Invoke-SeedDiskpart -Label 'attaching the seed VHD for harvest' -Script @(
     'attach vdisk'
     'select partition 2'
     'assign letter=V'
-) -join "`n"
+)
 try {
     if (-not (Test-Path -LiteralPath 'V:\Windows\System32\config\SAM')) {
         throw 'harvest failed: V:\Windows\System32\config\SAM is missing (specialize did not produce a system hive)'
@@ -661,7 +667,7 @@ finally {
     Invoke-SeedDiskpart -Label 'detaching the seed VHD after harvest' -Script @(
         "select vdisk file=`"$vhdx`""
         'detach vdisk'
-    ) -join "`n"
+    )
 }
 
 Write-Step 'verifying the harvested hives'

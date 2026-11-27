@@ -153,3 +153,56 @@ Describe 'offline admin enable targets a RID (round 42)' {
         $script:AdminAccountText | Should -Match 'Replace\(''__RID__'', \$RidHex\)'
     }
 }
+
+Describe 'seed diskpart accepts a string array (round 42 rerun)' {
+    BeforeAll {
+        # Extract the real Invoke-SeedDiskpart from the seed script
+        # (brace-counting scan), so the tests exercise the shipped
+        # function, not a copy. run 45981633632 died here: the 4 call
+        # sites pass @(...) but -Script was [string].
+        $start = $script:SeedScriptText.IndexOf('function Invoke-SeedDiskpart')
+        $open = $script:SeedScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
+            $ch = $script:SeedScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        $script:SeedDiskpartFuncText = $script:SeedScriptText.Substring($start, $end - $start + 1)
+
+        # Mock diskpart: capture exactly what the function pipes to it,
+        # and report success so the exit-code check passes.
+        function diskpart {
+            $global:SeedDiskpartCaptured = @($input)
+            $global:LASTEXITCODE = 0
+        }
+        . ([scriptblock]::Create($script:SeedDiskpartFuncText))
+    }
+
+    AfterEach {
+        $global:SeedDiskpartCaptured = @()
+    }
+
+    It 'accepts a string array argument (the 4 call sites pass @(...) -- [string] rejected it in run 45981633632)' {
+        { Invoke-SeedDiskpart -Label 'test' -Script @('select vdisk file="x"', 'detach vdisk') } | Should -Not -Throw
+    }
+
+    It 'joins the array into a single script before feeding diskpart' {
+        Invoke-SeedDiskpart -Label 'test' -Script @('select vdisk file="x"', 'detach vdisk')
+        $global:SeedDiskpartCaptured.Count | Should -Be 1
+        $global:SeedDiskpartCaptured[0] | Should -Be "select vdisk file=`"x`"`ndetach vdisk"
+    }
+
+    It 'declares -Script as [string[]] (not [string])' {
+        $script:SeedDiskpartFuncText | Should -Match '\[string\[\]\] \$Script'
+        $script:SeedDiskpartFuncText | Should -Not -Match '\[string\] \$Script'
+    }
+
+    It 'has no trailing -join at the call sites (it parses as a -join parameter and fails binding)' {
+        $script:SeedScriptText | Should -Not -Match '\) -join "`n"'
+    }
+}
