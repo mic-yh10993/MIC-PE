@@ -50,6 +50,10 @@ on:
         options: [full, static, none]
         default: full
         required: true
+      seed:
+        description: "只跑 SAM 制种：官方映像过一次 specialize，取出 SAM/SECURITY（第 42 轮方案 A，一次性，不构建 PE）"
+        type: boolean
+        default: false
   push:
     tags:
       - 'v*'
@@ -64,6 +68,10 @@ concurrency:
 jobs:
   build:
     name: Build ISO
+    # Round 42 seed dispatch (inputs.seed == true) runs only the seed
+    # job below; a normal dispatch (or a v* tag push, where inputs is
+    # empty) runs this job. The two jobs are mutually exclusive.
+    if: inputs.seed != true
     runs-on: windows-2025
     timeout-minutes: 360
 
@@ -727,3 +735,116 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed for $tag" }
           Write-Host "released $tag"
+
+  # Round 42, Scheme A (user-approved 2026-11-27): one-off SAM/SECURITY
+  # seeding -- run the official Professional install.wim through
+  # specialize once, in audit mode, and harvest the SAM + SECURITY
+  # databases it generates. NOT run per build: the harvested hives are
+  # committed to the repo as build inputs (src/build/data/sam-seed/)
+  # and the main build seeds them into staging. Re-run only if the
+  # seed hives ever need regenerating (same source, same unattend).
+  # Dispatch with: gh workflow run build.yml --ref <branch> -f seed=true
+  # (a workflow file must exist on the default branch to be dispatched,
+  # so the seed job lives in this already-resolvable file instead of
+  # its own workflow file).
+  seed:
+    name: Specialize and harvest SAM/SECURITY
+    if: inputs.seed == true
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          . ./src/build/lib/Common.ps1
+          . ./src/build/lib/Disk.ps1
+          $removed = Remove-RunnerBloat
+          Get-PSDrive -PSProvider FileSystem |
+            Where-Object { $_.Free } |
+            ForEach-Object { Write-Host ("{0}  free {1:N1} GB" -f $_.Root, ($_.Free / 1GB)) }
+
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip)) {
+            choco install 7zip -y --no-progress
+          }
+          $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            throw '7z not found on PATH after installing 7zip; the seed run cannot extract the ISO media'
+          }
+          if (-not (Get-Command wimlib-imagex -ErrorAction SilentlyContinue)) {
+            choco install wimlib -y --no-progress
+          }
+          $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+          if (-not (Get-Command wimlib-imagex -ErrorAction SilentlyContinue)) {
+            throw 'wimlib-imagex not found on PATH after installing wimlib; the seed run cannot resolve the image index'
+          }
+          if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
+            choco install qemu -y --no-progress
+          }
+          $qemu = (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue).Source
+          if (-not $qemu) { $qemu = 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
+          if (-not (Test-Path -LiteralPath $qemu)) { throw 'qemu-system-x86_64 not found after install' }
+          "QEMU_PATH=$qemu" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Ensure OVMF firmware
+        shell: pwsh
+        run: |
+          . ./src/ci/Invoke-QemuVerify.ps1 -ParseOnly
+          $qemu = if ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
+          $ovmf = Find-OvmfCode -QemuPath $qemu
+          if (-not $ovmf) {
+            throw 'No UEFI firmware found near the QEMU install; cannot boot the seed VM with UEFI'
+          }
+          Write-Host "firmware: $ovmf"
+          "OVMF_PATH=$ovmf" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Specialize and harvest SAM/SECURITY
+        shell: pwsh
+        env:
+          IN_QEMU: ${{ env.QEMU_PATH }}
+          IN_OVMF: ${{ env.OVMF_PATH }}
+        run: |
+          $qemu = if ($env:IN_QEMU) { $env:IN_QEMU } elseif ($env:QEMU_PATH) { $env:QEMU_PATH } else { 'qemu-system-x86_64' }
+          $ovmf = if ($env:IN_OVMF) { $env:IN_OVMF } elseif ($env:OVMF_PATH) { $env:OVMF_PATH } else { '' }
+          if (-not $ovmf) { throw 'Seed: no OVMF path was passed (IN_OVMF and OVMF_PATH are both empty)' }
+          if (-not (Test-Path -LiteralPath $ovmf)) { throw "Seed: OVMF firmware file not found at '$ovmf'" }
+          ./src/build/Invoke-CleanSamSeedRun.ps1 -WorkDir "$env:GITHUB_WORKSPACE\seed-out" -QemuPath $qemu -OvmfPath $ovmf
+
+      # The hives are the deliverable: a failed upload must fail the
+      # job (unlike the build's backup-channel artifacts, which ride
+      # continue-on-error). They are tiny (~160 KB total), so the
+      # stale-quota counter that hit the GB-scale build uploads does
+      # not apply here; if this step fails, re-run the workflow.
+      - name: Upload seed hives
+        uses: actions/upload-artifact@v4
+        with:
+          name: micpe-sam-seed-hives
+          path: |
+            seed-out/SAM
+            seed-out/SECURITY
+            seed-out/micpe-seed-verify.txt
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload seed evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: micpe-sam-seed-evidence
+          path: |
+            seed-out/screenshots/*.ppm
+            seed-out/micpe-seed-qemu.log
+            seed-out/micpe-seed-qemu-stdout.log
+            seed-out/micpe-seed-qemu-stderr.log
+          retention-days: 30
+          if-no-files-found: warn
+          compression-level: 0
