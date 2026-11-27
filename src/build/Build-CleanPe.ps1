@@ -346,8 +346,20 @@ function Invoke-CleanExtractStep {
     # TrustedInstaller. Grant write access to every place the build
     # writes into: the icsxml directory (StartAllBack.xml), the
     # config directory and the hive files themselves (reg load/import
-    # and the SAM edit write them in place), and System32 itself
-    # (unattend.xml lands there). Same takeown + icacls pattern as
+    # and the SAM edit write them in place), System32 itself
+    # (unattend.xml lands there), and the CatRoot directory (the
+    # .cat injection steps -- cdrom.sys round 13 and GdiPlus round
+    # 36 -- copy catalog files into
+    # CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}). Round 37
+    # died on exactly this: the serviced 22621.1105 image (DISM
+    # integration) leaves CatRoot with a tighter ACL than the RTM
+    # source, so the first .cat copy was denied with "Access to the
+    # path ... is denied" at Build-CleanPe.ps1:840 while the same
+    # line had worked on the RTM source in round 36. Granting the
+    # whole CatRoot (not just the one GUID subdir) also covers any
+    # future .cat injection; the grant is recursive with inheritance
+    # (OI/CI), so files created inside it later inherit the ACE.
+    # Same takeown + icacls pattern as
     # Grant-FolderWriteAccess (UwpChain.ps1).
     foreach ($writeTarget in @(
             'Windows\System32\icsxml',
@@ -357,6 +369,7 @@ function Invoke-CleanExtractStep {
             'Windows\System32\config\DEFAULT',
             'Windows\System32\config\SAM',
             'Windows\System32\config\SECURITY',
+            'Windows\System32\CatRoot',
             'Windows\System32'
         )) {
         Grant-StagingWriteAccess -Path (Join-Path $paths.Staging $writeTarget)

@@ -101,6 +101,31 @@ Describe 'Build-CleanPe.ps1 pipeline' {
         $diagPos | Should -BeLessThan $copyPos
     }
 
+    It 'grants write access to the staging CatRoot before any .cat injection (round 38)' {
+        # Round 37 died at Build-CleanPe.ps1:840: the first cdrom.sys
+        # .cat copy into staging CatRoot\{F750E6C3-...} was denied --
+        # the serviced 22621.1105 image (DISM integration) leaves
+        # CatRoot with a tighter ACL than the RTM source, and CatRoot
+        # was never in the base step's write-access list. The grant
+        # must cover the whole CatRoot (both .cat steps -- cdrom
+        # round 13 and GdiPlus round 36 -- write into the same GUID
+        # directory), and it must run before either of them.
+        $listStart = $script:CleanScriptText.IndexOf('foreach ($writeTarget')
+        $listStart | Should -BeGreaterThan 0
+        $catRootPos = $script:CleanScriptText.IndexOf('Windows\System32\CatRoot')
+        $catRootPos | Should -BeGreaterThan $listStart
+        $grantCallPos = $script:CleanScriptText.IndexOf('Grant-StagingWriteAccess -Path')
+        $grantCallPos | Should -BeGreaterThan $catRootPos
+        # Runtime order (dispatch section): base step grants first,
+        # then the cdrom .cat step, then the GdiPlus .cat step.
+        $baseCallPos = $script:CleanScriptText.IndexOf('$base = Invoke-CleanBaseStep')
+        $catFixCallPos = $script:CleanScriptText.IndexOf('$catFix = Invoke-CleanCatFixStep')
+        $gdiPlusCallPos = $script:CleanScriptText.IndexOf('$gdiPlusFix = Invoke-CleanGdiPlusCatFixStep')
+        $baseCallPos | Should -BeGreaterThan 0
+        $catFixCallPos | Should -BeGreaterThan $baseCallPos
+        $gdiPlusCallPos | Should -BeGreaterThan $catFixCallPos
+    }
+
     It 'asserts the critical staged files (boot loader, shell, hives)' {
         foreach ($critical in 'winload\.exe', 'explorer\.exe', 'config\\SYSTEM', 'config\\SOFTWARE', 'config\\DEFAULT', 'config\\SAM', 'config\\SECURITY') {
             $script:CleanScriptText | Should -Match $critical
