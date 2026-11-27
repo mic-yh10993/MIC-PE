@@ -533,3 +533,49 @@ Describe 'seed harvest finds the Windows volume by label (round 42 MSR fix)' {
         $script:SeedScriptText | Should -Match "'assign letter=V'"
     }
 }
+
+Describe 'seed verifier helpers are loaded before first use (round 42 rerun)' {
+    BeforeAll {
+        # Extract the real Get-CleanQemuImgPath from the verifier
+        # (brace-counting scan, same pattern as the diskpart tests),
+        # so the tests exercise the shipped function, not a copy.
+        $start = $script:VerifyScriptText.IndexOf('function Get-CleanQemuImgPath')
+        $open = $script:VerifyScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:VerifyScriptText.Length; $i++) {
+            $ch = $script:VerifyScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        $script:QemuImgPathFuncText = $script:VerifyScriptText.Substring($start, $end - $start + 1)
+        . ([scriptblock]::Create($script:QemuImgPathFuncText))
+    }
+
+    It 'dot-sources the clean verifier before the qcow2 conversion calls its helper (run 46033515034: the call ran 24 lines before the load, "not recognized")' {
+        $dotSource = [regex]::Match($script:SeedScriptText, '(?m)^\. \(Join-Path \$repoRoot ''src\\ci\\Invoke-CleanQemuVerify\.ps1''\)')
+        $dotSource.Success | Should -BeTrue
+        $call = [regex]::Match($script:SeedScriptText, '(?m)^\$qemuImgPath = Get-CleanQemuImgPath')
+        $call.Success | Should -BeTrue
+        $dotSource.Index | Should -BeLessThan $call.Index
+    }
+
+    It 'has no verifier-helper call before the dot-source (the seed script only uses Get-CleanQemuImgPath and Find-CleanOvmfVars from the verifier)' {
+        $dotSource = [regex]::Match($script:SeedScriptText, '(?m)^\. \(Join-Path \$repoRoot ''src\\ci\\Invoke-CleanQemuVerify\.ps1''\)')
+        $dotSource.Success | Should -BeTrue
+        $before = $script:SeedScriptText.Substring(0, $dotSource.Index)
+        $before | Should -Not -Match 'Get-CleanQemuImgPath'
+        $before | Should -Not -Match 'Find-CleanOvmfVars'
+    }
+
+    It 'resolves qemu-img.exe next to qemu-system-x86_64.exe' {
+        Get-CleanQemuImgPath -QemuPath 'C:\Program Files\qemu\qemu-system-x86_64.exe' | Should -Be 'C:\Program Files\qemu\qemu-img.exe'
+    }
+
+    It 'falls back to bare qemu-img when QemuPath has no directory part' {
+        Get-CleanQemuImgPath -QemuPath 'qemu-system-x86_64' | Should -Be 'qemu-img'
+    }
+}

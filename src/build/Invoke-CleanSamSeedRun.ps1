@@ -793,6 +793,28 @@ finally {
     )
 }
 
+# Section 3 prerequisites, loaded here -- before the qcow2 conversion
+# (round 42 rerun: run 46033515034 died on an unrecognized verifier
+# helper because the conversion ran before this load, which used to sit
+# 24 lines below the call). The OvmfPath/QemuPath checks come first so
+# a missing firmware or emulator still fails with the intended message,
+# not a parameter-binding error from the dot-source. All four values
+# are already set here: $installWim was applied by DISM above, and
+# $OvmfPath/$QemuPath/$WorkDir are script parameters / created at the
+# head of this script.
+if (-not $OvmfPath) {
+    throw [System.InvalidOperationException]::new(
+        'no OVMF firmware path was passed (the workflow discovers it before this step)')
+}
+Assert-PathExists -Path $OvmfPath -Label 'OVMF firmware'
+Assert-PathExists -Path $QemuPath -Label 'QEMU'
+
+# Dot-source the clean verifier for its screenshot/monitor helpers
+# (ParseOnly: define helpers, do not launch QEMU). IsoPath only needs
+# to exist here -- the install.wim stands in for it; the seed run
+# never boots an ISO.
+. (Join-Path $repoRoot 'src\ci\Invoke-CleanQemuVerify.ps1') -IsoPath $installWim -OvmfPath $OvmfPath -WorkDir $WorkDir -ParseOnly
+
 Write-Step 'converting the seed VHD to qcow2 for QEMU'
 $qemuImgPath = Get-CleanQemuImgPath -QemuPath $QemuPath
 $qcow2 = Join-Path $WorkDir 'seed.qcow2'
@@ -807,19 +829,9 @@ if ($LASTEXITCODE -ne 0) {
 # 3. Boot in QEMU, wait for the OOBE desktop (MICPE auto-logged on)
 # ---------------------------------------------------------------------------
 
-if (-not $OvmfPath) {
-    throw [System.InvalidOperationException]::new(
-        'no OVMF firmware path was passed (the workflow discovers it before this step)')
-}
-Assert-PathExists -Path $OvmfPath -Label 'OVMF firmware'
-Assert-PathExists -Path $QemuPath -Label 'QEMU'
-
-# Dot-source the clean verifier for its screenshot/monitor helpers
-# (ParseOnly: define helpers, do not launch QEMU). IsoPath only needs
-# to exist here -- the install.wim stands in for it; the seed run
-# never boots an ISO.
-. (Join-Path $repoRoot 'src\ci\Invoke-CleanQemuVerify.ps1') -IsoPath $installWim -OvmfPath $OvmfPath -WorkDir $WorkDir -ParseOnly
-
+# (Section 3 prerequisites -- the OvmfPath/QemuPath checks and the
+# verifier dot-source -- now live above the qcow2 conversion, which
+# needs the verifier helpers. See the comment there.)
 $varsTemplate = Find-CleanOvmfVars -CodePath $OvmfPath
 $varsPath = Join-Path $WorkDir 'OVMF_VARS.fd'
 Copy-Item -LiteralPath $varsTemplate -Destination $varsPath -Force
