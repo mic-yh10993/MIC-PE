@@ -1776,3 +1776,131 @@ Describe 'SYSTEM registry query codes file (round 42 rerun 16)' {
         Test-SeedMembersHasRid -RegOutput $script:MembersOutOtherDomain -RidHex '000003E8' | Should -BeTrue
     }
 }
+
+Describe 'seed hive sequence repair (round 42 rerun 17)' {
+    BeforeAll {
+        $script:RegistryLibText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/Registry.ps1') -Raw
+
+        function script:Get-RegistryLibFunctionText($name) {
+            $start = $script:RegistryLibText.IndexOf("function $name")
+            if ($start -lt 0) { throw "function $name not found in lib/Registry.ps1" }
+            $open = $script:RegistryLibText.IndexOf('{', $start)
+            $depth = 0
+            $end = $open
+            for ($i = $open; $i -lt $script:RegistryLibText.Length; $i++) {
+                $ch = $script:RegistryLibText[$i]
+                if ($ch -eq '{') { $depth++ }
+                elseif ($ch -eq '}') {
+                    $depth--
+                    if ($depth -eq 0) { $end = $i; break }
+                }
+            }
+            return $script:RegistryLibText.Substring($start, $end - $start + 1)
+        }
+        . ([scriptblock]::Create((Get-RegistryLibFunctionText 'Get-CleanHiveHeader')))
+        . ([scriptblock]::Create((Get-RegistryLibFunctionText 'Repair-CleanHiveSequence')))
+
+        # Fixtures are COPIES of the committed seed inputs, made in a
+        # temp dir per test: the repair writes to the file, so the repo
+        # input itself is never touched.
+        $script:SeedSam = Join-Path $script:RepoRoot 'src/build/data/sam-seed/SAM'
+        $script:SeedSec = Join-Path $script:RepoRoot 'src/build/data/sam-seed/SECURITY'
+
+        function script:New-HiveCopy($Source) {
+            $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-hiverepair-{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $copy = Join-Path $dir (Split-Path -Leaf $Source)
+            Copy-Item -LiteralPath $Source -Destination $copy -Force
+            return @{ Dir = $dir; Path = $copy }
+        }
+    }
+
+    It 'reports the harvested SECURITY as dirty (primary 99, secondary 98) with a valid header checksum' {
+        # Round 42 rerun 16 attempt 3 died on 0x74 / STATUS_REGISTRY_CORRUPT:
+        # this is the diagnosed state of the committed seed input. If the
+        # seed input is ever replaced, this test must be re-examined.
+        $header = Get-CleanHiveHeader -HiveFile $script:SeedSec
+        $header.IsDirty | Should -BeTrue
+        $header.PrimarySequence | Should -Be 99
+        $header.SecondarySequence | Should -Be 98
+        $header.ChecksumValid | Should -BeTrue
+    }
+
+    It 'reports the harvested SAM as clean' {
+        $header = Get-CleanHiveHeader -HiveFile $script:SeedSam
+        $header.IsDirty | Should -BeFalse
+        $header.PrimarySequence | Should -Be $header.SecondarySequence
+        $header.ChecksumValid | Should -BeTrue
+    }
+
+    It 'repairs a dirty hive: secondary reconciled to primary, checksum recomputed, nothing else touched' {
+        $fix = New-HiveCopy -Source $script:SeedSec
+        try {
+            $before = [System.IO.File]::ReadAllBytes($fix.Path)
+            $result = Repair-CleanHiveSequence -HiveFile $fix.Path
+            $result.Repaired | Should -BeTrue
+            $result.PrimarySequence | Should -Be 99
+            $result.SecondarySequence | Should -Be 99
+            $after = [System.IO.File]::ReadAllBytes($fix.Path)
+            $after.Length | Should -Be $before.Length
+            $diff = @()
+            for ($i = 0; $i -lt $before.Length; $i++) { if ($after[$i] -ne $before[$i]) { $diff += $i } }
+            $diff.Count | Should -Be 2
+            $diff[0] | Should -Be 8
+            $diff[1] | Should -Be 508
+            $header = Get-CleanHiveHeader -HiveFile $fix.Path
+            $header.IsDirty | Should -BeFalse
+            $header.ChecksumValid | Should -BeTrue
+        }
+        finally {
+            Remove-Item -LiteralPath $fix.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'leaves a clean hive byte-identical' {
+        $fix = New-HiveCopy -Source $script:SeedSam
+        try {
+            $beforeHash = (Get-FileHash -LiteralPath $fix.Path -Algorithm SHA256).Hash
+            $result = Repair-CleanHiveSequence -HiveFile $fix.Path
+            $result.Repaired | Should -BeFalse
+            (Get-FileHash -LiteralPath $fix.Path -Algorithm SHA256).Hash | Should -Be $beforeHash
+        }
+        finally {
+            Remove-Item -LiteralPath $fix.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'refuses a hive whose header checksum is invalid' {
+        $fix = New-HiveCopy -Source $script:SeedSam
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($fix.Path)
+            $bytes[0x10] = $bytes[0x10] -bxor 0xFF
+            [System.IO.File]::WriteAllBytes($fix.Path, $bytes)
+            { Repair-CleanHiveSequence -HiveFile $fix.Path } | Should -Throw -ExpectedMessage '*checksum*'
+        }
+        finally {
+            Remove-Item -LiteralPath $fix.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'reports a non-hive file as an error' {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-hiverepair-{0}" -f [guid]::NewGuid().ToString('N'))
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $text = Join-Path $dir 'not-a-hive.txt'
+            Set-Content -LiteralPath $text -Value 'hello' -Encoding ASCII
+            { Get-CleanHiveHeader -HiveFile $text } | Should -Throw -ExpectedMessage '*not a registry hive*'
+        }
+        finally {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'seed step repairs both staged hives right after the copy (before the SAM verification)' {
+        $start = $script:CleanScriptText.IndexOf('function Invoke-CleanSamSeedStep')
+        $step = $script:CleanScriptText.Substring($start, $script:CleanScriptText.IndexOf('function Invoke-CleanRegistryStep', $start) - $start)
+        $step | Should -Match 'Repair-CleanHiveSequence'
+        $step.IndexOf('seed copy') | Should -BeLessThan $step.IndexOf('Repair-CleanHiveSequence')
+        $step | Should -Match 'seed hive headers'
+    }
+}

@@ -1445,6 +1445,21 @@ function Invoke-CleanSamSeedStep {
     $stagedSize = (Get-Item -LiteralPath $stagedSam).Length
     Assert-True -Condition ($stagedSize -gt 8192) -Message "seeded staging SAM is still an empty hive ($stagedSize bytes)"
 
+    $stagedSec = Join-Path $configDir 'SECURITY'
+    # Repair a dirty harvested hive before it ships (round 42 rerun 17):
+    # the harvested SECURITY is 99/98 (a write transaction started but
+    # never flushed -- the seed VM's shutdown did not flush LSA's last
+    # write) and boot.wim carries no SECURITY.LOG1/LOG2, so the kernel
+    # cannot recover it: STATUS_REGISTRY_CORRUPT (0xC000014C), bugcheck
+    # 0x74 (run 46159374271 attempt 3). Reconciling the secondary
+    # sequence to the primary marks the hive cleanly flushed at the
+    # last transaction; the bins are a complete snapshot (regipy walks
+    # the whole hive), so nothing is lost. The repo seed input is
+    # untouched -- only the staged copy is repaired.
+    $samRepair = Repair-CleanHiveSequence -HiveFile $stagedSam
+    $secRepair = Repair-CleanHiveSequence -HiveFile $stagedSec
+    Write-SubStep ("seed hive headers: SAM primary={0} secondary={1} repaired={2}; SECURITY primary={3} secondary={4} repaired={5}" -f $samRepair.PrimarySequence, $samRepair.SecondarySequence, $samRepair.Repaired, $secRepair.PrimarySequence, $secRepair.SecondarySequence, $secRepair.Repaired)
+
     # Confirm MICPE landed in the staged SAM. The query runs as
     # SYSTEM (round 42 rerun 15): the harvested SAM's keys carry
     # the live-system DACL -- SYSTEM has KEY_ALL_ACCESS (0xF003F)

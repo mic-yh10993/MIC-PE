@@ -331,6 +331,112 @@ function Get-CleanSystemRegQueryCodes {
     return $codes
 }
 
+function Get-CleanHiveHeader {
+    # Read a registry hive file's regf header and report its sequence
+    # numbers and header checksum. Pure (file read only, no Windows
+    # APIs), so it runs on Linux too.
+    #
+    # A hive is dirty when the primary sequence number (offset 0x04)
+    # differs from the secondary (offset 0x08): a write transaction
+    # started but was never flushed to disk, and the kernel can only
+    # recover it from the hive's .LOG files. A dirty hive with no
+    # .LOG is unrecoverable: the kernel refuses to load it with
+    # STATUS_REGISTRY_CORRUPT (0xC000014C) and the boot bugchecks
+    # 0x74 BAD_SYSTEM_CONFIG_INFO. Round 42 rerun 16 attempt 3 died
+    # exactly that way: the harvested SECURITY was 99/98 and boot.wim
+    # carried no SECURITY.LOG1/LOG2 (every other hive had them),
+    # while SYSTEM/SAM/SOFTWARE/DEFAULT were all clean. regipy reads
+    # such a hive fine (it walks the bins directly), so a regipy
+    # check alone cannot catch it -- the header is the gate.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $HiveFile
+    )
+    $bytes = [System.IO.File]::ReadAllBytes($HiveFile)
+    if ($bytes.Length -lt 0x200) {
+        throw [System.InvalidOperationException]::new(
+            "not a registry hive: '$HiveFile' is only $($bytes.Length) bytes")
+    }
+    $signature = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4)
+    if ($signature -ne 'regf') {
+        throw [System.InvalidOperationException]::new(
+            "not a registry hive: '$HiveFile' has signature '$signature', expected 'regf'")
+    }
+    $primary = [BitConverter]::ToUInt32($bytes, 0x04)
+    $secondary = [BitConverter]::ToUInt32($bytes, 0x08)
+    $checksum = [uint32]0
+    for ($i = 0; $i -lt 0x1FC; $i += 4) {
+        $checksum = [uint32]($checksum -bxor [BitConverter]::ToUInt32($bytes, $i))
+    }
+    $stored = [BitConverter]::ToUInt32($bytes, 0x1FC)
+    return [pscustomobject]@{
+        HiveFile          = $HiveFile
+        PrimarySequence   = $primary
+        SecondarySequence = $secondary
+        IsDirty           = ($primary -ne $secondary)
+        ChecksumValid     = ($checksum -eq $stored)
+        Checksum          = $stored
+    }
+}
+
+function Repair-CleanHiveSequence {
+    # Reconcile a dirty hive's sequence numbers (round 42 rerun 17).
+    #
+    # Sets the secondary sequence number to the primary and recomputes
+    # the header checksum, so the kernel loads the hive as cleanly
+    # flushed. Only the secondary-sequence DWORD (offset 0x08) and the
+    # checksum DWORD (offset 0x1FC) change; every other byte stays
+    # identical, and the function re-reads the header afterwards and
+    # refuses to return until it is clean with a valid checksum.
+    #
+    # Why this is safe here: the file's bins are a complete snapshot
+    # as of the last flush (transaction 98); the unflushed transaction
+    # (99) never reached the disk, so nothing in the file is torn --
+    # regipy walks the whole hive fine. Marking the hive flushed at
+    # 99 tells the kernel to load that snapshot as-is instead of
+    # demanding a .LOG that does not exist. A hive whose header
+    # checksum is already invalid is NOT repaired (the header itself
+    # is corrupt, not just unflushed) -- that throws.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $HiveFile
+    )
+    $header = Get-CleanHiveHeader -HiveFile $HiveFile
+    if (-not $header.ChecksumValid) {
+        throw [System.InvalidOperationException]::new(
+            ("refusing to repair hive '{0}': header checksum is invalid (primary={1}, secondary={2}) -- the header itself is corrupt, not just unflushed" -f $HiveFile, $header.PrimarySequence, $header.SecondarySequence))
+    }
+    if (-not $header.IsDirty) {
+        return [pscustomobject]@{
+            HiveFile          = $HiveFile
+            Repaired          = $false
+            PrimarySequence   = $header.PrimarySequence
+            SecondarySequence = $header.SecondarySequence
+        }
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($HiveFile)
+    [BitConverter]::GetBytes([uint32]$header.PrimarySequence).CopyTo($bytes, 0x08)
+    $checksum = [uint32]0
+    for ($i = 0; $i -lt 0x1FC; $i += 4) {
+        $checksum = [uint32]($checksum -bxor [BitConverter]::ToUInt32($bytes, $i))
+    }
+    [BitConverter]::GetBytes([uint32]$checksum).CopyTo($bytes, 0x1FC)
+    [System.IO.File]::WriteAllBytes($HiveFile, $bytes)
+    $after = Get-CleanHiveHeader -HiveFile $HiveFile
+    if ($after.IsDirty -or -not $after.ChecksumValid) {
+        throw [System.InvalidOperationException]::new(
+            ("hive repair did not stick for '{0}': primary={1}, secondary={2}, checksum valid={3}" -f $HiveFile, $after.PrimarySequence, $after.SecondarySequence, $after.ChecksumValid))
+    }
+    return [pscustomobject]@{
+        HiveFile          = $HiveFile
+        Repaired          = $true
+        PrimarySequence   = $after.PrimarySequence
+        SecondarySequence = $after.SecondarySequence
+    }
+}
+
 function Invoke-CleanSystemRegQuery {
     # Run one reg.exe query against an offline hive as SYSTEM
     # and return the full output.

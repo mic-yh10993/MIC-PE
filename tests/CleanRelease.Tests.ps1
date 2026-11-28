@@ -12,6 +12,7 @@ BeforeAll {
         $state = @{
             Calls          = [System.Collections.Generic.List[object]]::new()
             ViewExit       = 1     # 1 = release does not exist, 0 = exists
+            ViewExitQueue  = [System.Collections.Generic.Queue[int]]::new()
             FailCreate     = $false
             FailAllUploads = $false
             FailFiles      = @()   # leaf names whose upload fails
@@ -19,7 +20,12 @@ BeforeAll {
         $invoker = {
             param([string[]] $GhArgs)
             $state.Calls.Add($GhArgs)
-            if ($GhArgs[1] -eq 'view') { return [int]$state.ViewExit }
+            if ($GhArgs[1] -eq 'view') {
+                # A queued exit code wins (lets a test fail the first
+                # view and succeed on the retry); otherwise ViewExit.
+                if ($state.ViewExitQueue.Count -gt 0) { return [int]$state.ViewExitQueue.Dequeue() }
+                return [int]$state.ViewExit
+            }
             if ($GhArgs[1] -eq 'create') {
                 if ($state.FailCreate) { return 1 }
                 return 0
@@ -275,6 +281,38 @@ Describe 'Publish-CleanRelease' {
         }
     }
 
+    It 'a failing create whose first view failed retries the view and uploads into the existing release (round 42 rerun 17)' {
+        # Run 46159374271 attempt 3: the first `gh release view` failed
+        # transiently, so the code took the create path; the create then
+        # failed on the duplicate tag, and the size check said "not
+        # landed" because the re-run had rebuilt the files. The release
+        # itself was there all along -- re-checking the view finds it,
+        # and the rebuilt core files go up with --clobber.
+        $rel = New-TestReleaseDir
+        try {
+            $fake = New-FakeGh
+            $fake.State.ViewExitQueue.Enqueue(1)
+            $fake.State.ViewExitQueue.Enqueue(0)
+            $fake.State.FailCreate = $true
+            $lister = New-FakeAssetLister -Assets $null
+            $extra1 = Join-Path $rel.Dir 'shot-01.png'
+            Set-Content -LiteralPath $extra1 -Value 'fake png 1' -Encoding ASCII
+            Publish-CleanRelease -Tag 'micpe-clean-22621.1105-20261128-r133' `
+                -CoreFiles @($rel.Iso, $rel.Wim, $rel.Checksums) `
+                -ExtraFiles @($extra1) `
+                -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker -AssetLister $lister `
+                -WarningVariable warnings
+            # view (failed) + create (failed) + view (retry, found) + core upload + extra upload.
+            $fake.State.Calls.Count | Should -Be 5
+            ($fake.State.Calls[3] -join ' ') | Should -Be "release upload micpe-clean-22621.1105-20261128-r133 $($rel.Iso) $($rel.Wim) $($rel.Checksums) --repo mic-yh10993/MIC-PE --clobber"
+            ($fake.State.Calls[4] -join ' ') | Should -Be "release upload micpe-clean-22621.1105-20261128-r133 $extra1 --repo mic-yh10993/MIC-PE --clobber"
+            "$warnings" | Should -Match 'already exists'
+        }
+        finally {
+            Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'a failing create with no release behind it throws "create failed", not "upload failed" (run 45463045449)' {
         $rel = New-TestReleaseDir
         try {
@@ -293,8 +331,8 @@ Describe 'Publish-CleanRelease' {
             $caught | Should -Not -BeNullOrEmpty
             $caught | Should -Match 'gh release create failed'
             $caught | Should -Not -Match 'upload failed'
-            # view + create only: no extra uploads were attempted.
-            $fake.State.Calls.Count | Should -Be 2
+            # view + create + retry view: no extra uploads were attempted.
+            $fake.State.Calls.Count | Should -Be 3
         }
         finally {
             Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue
@@ -316,7 +354,8 @@ Describe 'Publish-CleanRelease' {
                     -CoreFiles @($rel.Iso, $rel.Wim, $rel.Checksums) `
                     -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker -AssetLister $lister
             } | Should -Throw -ExpectedMessage '*gh release create failed*'
-            $fake.State.Calls.Count | Should -Be 2
+            # view + create + retry view (the retry also finds no release).
+            $fake.State.Calls.Count | Should -Be 3
         }
         finally {
             Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue
@@ -337,7 +376,8 @@ Describe 'Publish-CleanRelease' {
                     -CoreFiles @($rel.Iso, $rel.Wim, $rel.Checksums) `
                     -Repository 'mic-yh10993/MIC-PE' -GhInvoker $fake.Invoker -AssetLister $lister
             } | Should -Throw -ExpectedMessage '*gh release create failed*'
-            $fake.State.Calls.Count | Should -Be 2
+            # view + create + retry view (the retry also finds no release).
+            $fake.State.Calls.Count | Should -Be 3
         }
         finally {
             Remove-Item -LiteralPath $rel.Dir -Recurse -Force -ErrorAction SilentlyContinue

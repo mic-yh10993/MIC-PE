@@ -203,10 +203,28 @@ function Publish-CleanRelease {
             # `gh release view --json assets`, so a missing release
             # and a size mismatch both come back as "not landed");
             # only a release that truly is not there fails the step.
-            if (-not (Test-CoreFilesLanded -Tag $Tag -CoreFiles $core -Repository $Repository -AssetLister $AssetLister)) {
-                throw "gh release create failed for $tag"
+            if (Test-CoreFilesLanded -Tag $Tag -CoreFiles $core -Repository $Repository -AssetLister $AssetLister) {
+                Write-Warning ("release upload: 'gh release create' for {0} reported failure, but the release and core files are already in place; continuing with the extras" -f $Tag)
             }
-            Write-Warning ("release upload: 'gh release create' for {0} reported failure, but the release and core files are already in place; continuing with the extras" -f $Tag)
+            else {
+                # The release may still exist with different-sized files:
+                # a re-run rebuilds the core files, so their sizes differ
+                # from the previous attempt's assets (run 46159374271
+                # attempt 3: the first `gh release view` failed
+                # transiently, the create then failed on the duplicate
+                # tag, and the size check correctly said "not landed").
+                # Re-check the release itself; if it is there, upload
+                # the rebuilt core files into it with --clobber instead
+                # of failing the step.
+                $retryViewExit = & $GhInvoker $viewArgs 2>$null
+                if ($retryViewExit -ne 0) {
+                    throw "gh release create failed for $tag"
+                }
+                Write-Warning ("release upload: release {0} already exists; uploading the rebuilt core files into it" -f $Tag)
+                $uploadArgs = @('release', 'upload', $Tag) + $core + @('--repo', $Repository, '--clobber')
+                $uploadExit = & $GhInvoker $uploadArgs
+                if ($uploadExit -ne 0) { throw "gh release upload failed for $tag" }
+            }
         }
     }
 
