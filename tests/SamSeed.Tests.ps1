@@ -803,6 +803,8 @@ Describe 'seed shutdown is on a timer, not on screenshot gates (round 42 rerun 1
         $script:SeedStartMenuMinutes = ([DateTime]::Parse($script:SeedTiming.startMenuAtUtc) - [DateTime]::Parse($script:SeedTiming.qemuStartedAtUtc)).TotalMinutes
         $m = [regex]::Match($script:SeedScriptText, '\$ShutdownAfterMin\s*=\s*(\d+)')
         $script:SeedShutdownAfterMin = if ($m.Success) { [int]$m.Groups[1].Value } else { -1 }
+        $mt = [regex]::Match($script:SeedScriptText, '\$SpecializeTimeoutMin\s*=\s*(\d+)')
+        $script:SeedSpecializeTimeoutMin = if ($mt.Success) { [int]$mt.Groups[1].Value } else { -1 }
     }
 
     It 'the timing fixture records the measured Start-menu time (about 53.4 min after QEMU start)' {
@@ -810,9 +812,20 @@ Describe 'seed shutdown is on a timer, not on screenshot gates (round 42 rerun 1
         $script:SeedStartMenuMinutes | Should -BeLessThan 60
     }
 
-    It 'the shutdown timer covers the measured time plus a 10-minute buffer' {
+    It 'the shutdown timer is 90 minutes (user 2026-11-28 15:19: "延长到90分钟吧")' {
+        $script:SeedShutdownAfterMin | Should -Be 90
+        $script:SeedScriptText | Should -Match '\$ShutdownAfterMin = 90'
+    }
+
+    It 'the shutdown timer covers the measured time plus a 10-minute buffer, with room for the round-11 slowdown' {
+        # Round 42 rerun 12: the user overrode the 64 min formula
+        # (53.43 + 10) with 90 min -- in run 46105769251 specialize
+        # alone ran ~60 min, so the single specialize->OOBE reboot
+        # landed at ~60-61 min and OOBE had only ~3 min when the
+        # 64 min timer fired. The upper bound from the old formula
+        # no longer applies; the outer timeout is the ceiling now.
         $script:SeedShutdownAfterMin | Should -BeGreaterOrEqual ($script:SeedStartMenuMinutes + 10)
-        $script:SeedShutdownAfterMin | Should -BeLessThan ($script:SeedStartMenuMinutes + 15)
+        $script:SeedShutdownAfterMin | Should -BeLessThan $script:SeedSpecializeTimeoutMin
     }
 
     It 'the timer is anchored at QEMU start' {
@@ -852,8 +865,10 @@ Describe 'seed shutdown is on a timer, not on screenshot gates (round 42 rerun 1
         $script:SeedScriptText | Should -Match 'Send-CleanKey -Port \$MonitorPort -Key ''ctrl'''
     }
 
-    It 'the 75-minute timeout is still the outer backstop' {
-        $script:SeedScriptText | Should -Match '\$SpecializeTimeoutMin = 75'
+    It 'the 100-minute timeout is still the outer backstop (above the 90 min timer)' {
+        $script:SeedSpecializeTimeoutMin | Should -Be 100
+        $script:SeedScriptText | Should -Match '\$SpecializeTimeoutMin = 100'
+        $script:SeedSpecializeTimeoutMin | Should -BeGreaterThan $script:SeedShutdownAfterMin
     }
 
     It 'the harvest path is unchanged (convert-back, empty-hive assertion)' {
@@ -944,5 +959,64 @@ cp "$6" "$7"
     It 'the helper copies instead of clearing the flag in place (the copy is the fix)' {
         $script:DeSparseFunc | Should -Match 'Copy-Item -LiteralPath \$tmpPath -Destination \$OutPath -Force'
         $script:DeSparseFunc | Should -Match 'fsutil sparse queryflag'
+    }
+}
+
+Describe 'seed harvest failure still leaves numbers (round 42 rerun 12)' {
+    # Run 46105769251 failed at the Names check (SAM Users\Names
+    # empty) and the log never got the SAM size, hash or .LOG state:
+    # the throw at line 545 happened before the Write-VerifyLine
+    # calls, so the empty-Names failure could not be told apart
+    # from an unflushed/torn hive (that run's shutdown was unclean
+    # too: powerdown ignored for 180 s, monitor quit). Log the
+    # numbers first, then rethrow; record the shutdown path and the
+    # registry log files' state. The .LOG files are diagnostics
+    # only -- never copied out, never uploaded.
+    BeforeAll {
+        $script:WorkflowText = Get-Content -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/build.yml') -Raw
+    }
+
+    It 'verification failure logs the hive numbers before throwing (log-then-throw)' {
+        $call = $script:SeedScriptText.IndexOf('$observed = Get-SeedHiveVerification')
+        $diag = $script:SeedScriptText.IndexOf('harvested hive diagnostics')
+        $rethrow = $script:SeedScriptText.IndexOf("`n    throw`n", $diag)
+        $call | Should -BeGreaterOrEqual 0
+        $diag | Should -BeGreaterThan $call
+        $rethrow | Should -BeGreaterThan $diag
+        $block = $script:SeedScriptText.Substring($diag, $rethrow - $diag)
+        $block | Should -Match 'SHA256'
+        $block | Should -Match 'Get-FileHash'
+        $block | Should -Match 'hive log files: not captured'
+        $block | Should -Match 'Write-Host \("shutdown path: \{0\}"'
+        $script:SeedScriptText | Should -Match 'harvested hive diagnostics \(verification failed\)'
+    }
+
+    It 'the harvest records the registry log files while the volume is still mounted' {
+        $script:SeedScriptText | Should -Match 'SAM\.LOG1'
+        $script:SeedScriptText | Should -Match 'SAM\.LOG2'
+        $script:SeedScriptText | Should -Match 'SECURITY\.LOG1'
+        $script:SeedScriptText | Should -Match 'SECURITY\.LOG2'
+        $script:SeedScriptText | Should -Match 'hive log \{0\}: \{1:N0\} bytes'
+        $script:SeedScriptText | Should -Match 'hive log \{0\}: not present'
+        $log = $script:SeedScriptText.IndexOf('SAM.LOG1')
+        $detach = $script:SeedScriptText.IndexOf('detaching the converted-back VHD after harvest')
+        $log | Should -BeGreaterThan 0
+        $detach | Should -BeGreaterThan 0
+        $log | Should -BeLessThan $detach
+        $script:SeedScriptText | Should -Not -Match 'Copy-Item.*\.LOG'
+    }
+
+    It 'the shutdown path is recorded in the verification report' {
+        $script:SeedScriptText | Should -Match '\$seedShutdownPath = ''not-attempted'''
+        $script:SeedScriptText | Should -Match '\$seedShutdownPath = ''clean-powerdown'''
+        $script:SeedScriptText | Should -Match '\$seedShutdownPath = ''monitor-quit'''
+        $script:SeedScriptText | Should -Match '\$seedShutdownPath = ''force-kill'''
+        $script:SeedScriptText | Should -Match '\$seedShutdownPath = ''kill-failed'''
+        $script:SeedScriptText | Should -Match 'Write-VerifyLine \("shutdown path: \{0\}"'
+    }
+
+    It 'the hives artifact takes only SAM, SECURITY and the verification report (no .LOG files)' {
+        $script:WorkflowText | Should -Match 'name: micpe-sam-seed-hives'
+        $script:WorkflowText | Should -Match 'seed-out/SAM\s+seed-out/SECURITY\s+seed-out/micpe-seed-verify\.txt\s+retention-days'
     }
 }

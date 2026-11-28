@@ -61,18 +61,26 @@ param(
     [string] $OvmfPath = '',
 
     # Specialize under TCG is slow: a full Windows boot to the OOBE
-    # desktop can take 20-40 minutes. 75 minutes is the outer
+    # desktop can take 20-40 minutes. 100 minutes is the outer
     # ceiling; the shutdown timer below is what actually ends the run.
-    [int] $SpecializeTimeoutMin = 75,
+    # (Round 42 rerun 12: was 75; the 90 min timer needs a ceiling
+    # above it, with the same 10 min margin as the 64/75 pairing.)
+    [int] $SpecializeTimeoutMin = 100,
 
     # Minutes after QEMU start when the guest is shut down for
     # harvest. Round 42 rerun 10 (user 2026-11-28 09:12): no
     # screenshot gates at all -- shutdown is on a timer. In run
     # 46080314320 the Start menu appeared 53.43 min after QEMU
     # start (shot-36, 00:27:38Z; QEMU started 23:34:12Z), so the
-    # timer is that measured time plus a 10 min buffer against
+    # timer was that measured time plus a 10 min buffer against
     # run-to-run variation, rounded up to a clean 64 min.
-    [int] $ShutdownAfterMin = 64,
+    # Round 42 rerun 12 (user 2026-11-28 15:19, "延长到90分钟吧"):
+    # 64 min proved too short -- in run 46105769251 specialize
+    # alone ran ~60 min (its single reboot to OOBE landed at
+    # ~60-61 min), so OOBE had only ~3 min when the timer fired
+    # and MICPE was never created. The user chose 90 min; the
+    # outer timeout went to 100 with it.
+    [int] $ShutdownAfterMin = 90,
 
     [int] $MemoryMb = 4096,
 
@@ -858,6 +866,7 @@ if ($null -eq $qemu) { throw 'failed to start QEMU' }
 
 $shutdownTimerFired = $false
 $lastShotIndex = 0
+$seedShutdownPath = 'not-attempted'
 try {
     $monitorUp = $false
     $deadline = (Get-Date).AddSeconds(120)
@@ -917,6 +926,11 @@ finally {
     # flushed them. system_powerdown lets the guest shut down; QEMU
     # exits on shutdown (no -no-shutdown). If it is still alive
     # after 180 s, quit via the monitor; as a last resort kill it.
+    # Round 42 rerun 12: record which path actually ended the guest
+    # in $seedShutdownPath -- run 46105769251 failed with an empty
+    # Names list after an unflushed shutdown (powerdown ignored for
+    # 180 s, monitor quit), and the report had no way to tell a torn
+    # hive from an empty database. The verification below prints it.
     try {
         $null = Invoke-CleanMonitorCommand -Port $MonitorPort -Command 'system_powerdown'
     }
@@ -927,6 +941,9 @@ finally {
     for ($i = 0; $i -lt 36; $i++) {
         if ($qemu.HasExited) { $exited = $true; break }
         Start-Sleep -Seconds 5
+    }
+    if ($exited) {
+        $seedShutdownPath = 'clean-powerdown'
     }
     if (-not $exited) {
         Write-Host 'guest did not exit after powerdown; sending quit via the monitor'
@@ -940,11 +957,20 @@ finally {
             if ($qemu.HasExited) { $exited = $true; break }
             Start-Sleep -Seconds 5
         }
+        if ($exited) {
+            $seedShutdownPath = 'monitor-quit'
+        }
     }
     if (-not $exited -and -not $qemu.HasExited) {
         Write-Host '!!! QEMU still alive; killing it (hives may be torn -- the verification below will catch it)'
         Stop-Process -InputObject $qemu -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 5
+        if ($qemu.HasExited) {
+            $seedShutdownPath = 'force-kill'
+        }
+        else {
+            $seedShutdownPath = 'kill-failed'
+        }
     }
     if ($qemu.HasExited) {
         Write-Host ("QEMU exit code: {0}" -f $qemu.ExitCode)
@@ -1000,6 +1026,7 @@ catch {
 Write-Step 'harvesting SAM + SECURITY from the converted-back seed disk'
 $samOut = Join-Path $WorkDir 'SAM'
 $secOut = Join-Path $WorkDir 'SECURITY'
+$seedLogFiles = @()
 Invoke-SeedDiskpart -Label 'attaching the converted-back VHD for harvest' -Script @(
     "select vdisk file=`"$harvestVhdx`""
     'attach vdisk'
@@ -1031,6 +1058,23 @@ try {
     Copy-Item -LiteralPath 'V:\Windows\System32\config\SECURITY' -Destination $secOut -Force
     Assert-PathExists -Path $samOut -Label 'harvested SAM'
     Assert-PathExists -Path $secOut -Label 'harvested SECURITY'
+    # Round 42 rerun 12: capture the registry log files' state while
+    # V: is still mounted. Run 46105769251 failed with an empty Names
+    # list and the log had no SAM size, hash or .LOG state, so nobody
+    # could tell a genuinely empty database from an unflushed one.
+    # The .LOG files are diagnostics only: record their sizes here,
+    # never copy them out and never upload them (the hives artifact
+    # takes only SAM, SECURITY and the verification report).
+    foreach ($logName in 'SAM.LOG1', 'SAM.LOG2', 'SECURITY.LOG1', 'SECURITY.LOG2') {
+        $logPath = "V:\Windows\System32\config\$logName"
+        if (Test-Path -LiteralPath $logPath) {
+            $seedLogFiles += ("hive log {0}: {1:N0} bytes" -f $logName, (Get-Item -LiteralPath $logPath).Length)
+        }
+        else {
+            $seedLogFiles += ("hive log {0}: not present" -f $logName)
+        }
+    }
+    $seedLogFiles | ForEach-Object { Write-VerifyLine $_ }
 }
 finally {
     Invoke-SeedDiskpart -Label 'detaching the converted-back VHD after harvest' -Script @(
@@ -1040,12 +1084,41 @@ finally {
 }
 
 Write-Step 'verifying the harvested hives'
-$observed = Get-SeedHiveVerification -SamPath $samOut -SecurityPath $secOut
+try {
+    $observed = Get-SeedHiveVerification -SamPath $samOut -SecurityPath $secOut
+}
+catch {
+    # Round 42 rerun 12: log-then-throw. Run 46105769251 failed at
+    # the Names check and the log never got the SAM size, hash or
+    # .LOG state (the throw happened before the Write-VerifyLine
+    # calls below), so the empty-Names failure could not be told
+    # apart from an unflushed/torn hive. Record the numbers first,
+    # then rethrow the original error unchanged: a bare throw keeps
+    # the original error record, and a nested try/catch in here does
+    # not disturb $_ (verified locally with pwsh 7.4.6).
+    try {
+        Write-Host '--- harvested hive diagnostics (verification failed) ---'
+        Write-Host ("harvested SAM: {0:N0} bytes, SHA256 {1}" -f (Get-Item -LiteralPath $samOut).Length, (Get-FileHash -LiteralPath $samOut -Algorithm SHA256).Hash.ToLower())
+        Write-Host ("harvested SECURITY: {0:N0} bytes, SHA256 {1}" -f (Get-Item -LiteralPath $secOut).Length, (Get-FileHash -LiteralPath $secOut -Algorithm SHA256).Hash.ToLower())
+        if ($seedLogFiles) {
+            $seedLogFiles | ForEach-Object { Write-Host $_ }
+        }
+        else {
+            Write-Host 'hive log files: not captured (harvest did not reach the copy step)'
+        }
+        Write-Host ("shutdown path: {0}" -f $seedShutdownPath)
+    }
+    catch {
+        Write-Host ("!!! could not record hive diagnostics: {0}" -f $_.Exception.Message)
+    }
+    throw
+}
 Write-VerifyLine ("harvested SAM: {0:N0} bytes, SHA256 {1}" -f $observed.SamSize, $observed.SamSha256)
 Write-VerifyLine ("harvested SECURITY: {0:N0} bytes, SHA256 {1}" -f $observed.SecuritySize, $observed.SecuritySha256)
 Write-VerifyLine ("SAM Users\Names: {0}" -f ($observed.SamNames -join ', '))
 Write-VerifyLine ("SAM MICPE (RID 1000) F flags: 0x{0:X8} (ACB_DISABLED bit is CLEAR -- the build still clears it offline as a belt-and-braces step)" -f $observed.SamFlags)
 Write-VerifyLine ("SECURITY Policy\Accounts: {0} account(s): {1}" -f $observed.SecurityAccounts.Count, ($observed.SecurityAccounts -join ', '))
+Write-VerifyLine ("shutdown path: {0}" -f $seedShutdownPath)
 Write-VerifyLine ("blank-password proof: the desktop screenshot (shot-{0:d2}.ppm) shows the machine auto-logged on as MICPE with no password (AutoLogon, blank password)" -f $lastShotIndex)
 Write-VerifyLine 'seed hives verified: SAM + SECURITY are populated databases, ready to commit as build inputs'
 
