@@ -635,11 +635,11 @@ Describe 'seed harvest recovers the QEMU-written disk (round 42 rerun 7)' {
         $script:SeedScriptText | Should -Match '& \$qemuImgPath convert -f qcow2 -O vhdx \$qcow2 \$harvestVhdx'
         $convertBack = $script:SeedScriptText.IndexOf('convert -f qcow2 -O vhdx')
         $convertBack | Should -BeGreaterThan 0
-        # It runs after QEMU has exited (past the desktop guard, which
-        # sits right after the shutdown finally block) and before the
-        # harvest step -- the disk must be quiesced and the harvest must
-        # read the converted-back disk, not the pre-QEMU one.
-        $desktopGuard = $script:SeedScriptText.IndexOf('OOBE desktop was never reached')
+        # It runs after QEMU has exited (past the shutdown-timer guard,
+        # which sits right after the shutdown finally block) and before
+        # the harvest step -- the disk must be quiesced and the harvest
+        # must read the converted-back disk, not the pre-QEMU one.
+        $desktopGuard = $script:SeedScriptText.IndexOf('shutdown timer never fired')
         $desktopGuard | Should -BeGreaterThan 0
         $convertBack | Should -BeGreaterThan $desktopGuard
         $harvest = $script:SeedScriptText.IndexOf("Write-Step 'harvesting")
@@ -656,99 +656,6 @@ Describe 'seed harvest recovers the QEMU-written disk (round 42 rerun 7)' {
     It 'fails hard if the convert-back fails (never silently harvest the stale VHD)' {
         $script:SeedScriptText | Should -Match 'convert back failed'
         $script:SeedScriptText | Should -Match 'refusing to harvest the stale pre-QEMU VHD'
-    }
-}
-
-Describe 'seed desktop detection rejects the OOBE getting-ready screens (round 42 rerun 7)' {
-    BeforeAll {
-        # Extract the real Test-SeedScreenshotHasDesktopDetail from the
-        # seed script (brace-counting scan, same pattern as the other
-        # Describes), so the tests exercise the shipped function, not a
-        # copy. On HEAD the function does not exist yet, so this
-        # BeforeAll throws and every test below fails -- that is the
-        # intended fail-on-HEAD signal.
-        $start = $script:SeedScriptText.IndexOf('function Test-SeedScreenshotHasDesktopDetail')
-        $open = $script:SeedScriptText.IndexOf('{', $start)
-        $depth = 0
-        $end = $open
-        for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
-            $ch = $script:SeedScriptText[$i]
-            if ($ch -eq '{') { $depth++ }
-            elseif ($ch -eq '}') {
-                $depth--
-                if ($depth -eq 0) { $end = $i; break }
-            }
-        }
-        $script:SeedDetailFuncText = $script:SeedScriptText.Substring($start, $end - $start + 1)
-        . ([scriptblock]::Create($script:SeedDetailFuncText))
-
-        # The real shot-34/35 PPMs are 3 MB each; they live gzipped in
-        # tests/fixtures (bytes exact) and are expanded here. The
-        # reconstructed desktop is the shipped Bloom wallpaper
-        # (Windows\Web\Wallpaper\Windows\img0.jpg, same 22621.1105
-        # build) scaled to the 1280x800 QEMU display plus the solid
-        # dark taskbar -- a reconstruction, not a screenshot, used only
-        # to prove the new detector still accepts a real desktop.
-        $script:SeedFixtures = Join-Path $PSScriptRoot 'fixtures'
-        function Expand-SeedFixtureGzip {
-            param([string] $Source, [string] $Destination)
-            $inStream = [System.IO.File]::OpenRead($Source)
-            try {
-                $outStream = [System.IO.File]::Create($Destination)
-                try {
-                    $gzip = [System.IO.Compression.GZipStream]::new($inStream, [System.IO.Compression.CompressionMode]::Decompress)
-                    try { $gzip.CopyTo($outStream) } finally { $gzip.Dispose() }
-                } finally { $outStream.Dispose() }
-            } finally { $inStream.Dispose() }
-        }
-        $script:SeedShot34 = Join-Path $TestDrive 'shot-34.ppm'
-        $script:SeedShot35 = Join-Path $TestDrive 'shot-35.ppm'
-        $script:SeedDesktop = Join-Path $TestDrive 'seed-desktop.ppm'
-        Expand-SeedFixtureGzip -Source (Join-Path $script:SeedFixtures 'seed-oobe-shot-34.ppm.gz') -Destination $script:SeedShot34
-        Expand-SeedFixtureGzip -Source (Join-Path $script:SeedFixtures 'seed-oobe-shot-35.ppm.gz') -Destination $script:SeedShot35
-        Expand-SeedFixtureGzip -Source (Join-Path $script:SeedFixtures 'seed-desktop-reconstructed.ppm.gz') -Destination $script:SeedDesktop
-    }
-
-    It 'pins the confuser: the color rule alone accepts the OOBE screens (passes on HEAD by design -- it proves the old detector was fooled, the gate tests below are the ones that must fail on HEAD)' {
-        # Extract the real Test-CleanScreenshot from the verifier and
-        # run it on the actual shot-34 pixels.
-        $start = $script:VerifyScriptText.IndexOf('function Test-CleanScreenshot')
-        $open = $script:VerifyScriptText.IndexOf('{', $start)
-        $depth = 0
-        $end = $open
-        for ($i = $open; $i -lt $script:VerifyScriptText.Length; $i++) {
-            $ch = $script:VerifyScriptText[$i]
-            if ($ch -eq '{') { $depth++ }
-            elseif ($ch -eq '}') {
-                $depth--
-                if ($depth -eq 0) { $end = $i; break }
-            }
-        }
-        . ([scriptblock]::Create($script:VerifyScriptText.Substring($start, $end - $start + 1)))
-        $class = Test-CleanScreenshot -Path $script:SeedShot34
-        $class.Classification | Should -Be 'Other'
-        $class.BlackFraction | Should -BeLessThan 0.4
-    }
-
-    It 'rejects shot-34 (run 46051050523: "确保一切都已准备就绪" -- OOBE, not a desktop)' {
-        Test-SeedScreenshotHasDesktopDetail -Path $script:SeedShot34 | Should -BeFalse
-    }
-
-    It 'rejects shot-35 (run 46051050523: "仍在处理一些问题" -- OOBE, not a desktop)' {
-        Test-SeedScreenshotHasDesktopDetail -Path $script:SeedShot35 | Should -BeFalse
-    }
-
-    It 'accepts the reconstructed first-logon desktop (real Bloom wallpaper + taskbar -- the new detector must not become always-false)' {
-        Test-SeedScreenshotHasDesktopDetail -Path $script:SeedDesktop | Should -BeTrue
-    }
-
-    It 'the poll loop requires the detail check in addition to the color rule' {
-        $script:SeedScriptText | Should -Match 'Test-SeedScreenshotHasDesktopDetail -Path \$ppm'
-        $detail = $script:SeedScriptText.IndexOf('Test-SeedScreenshotHasDesktopDetail -Path $ppm')
-        $detail | Should -BeGreaterThan 0
-        $streak = $script:SeedScriptText.IndexOf('$streak++')
-        $streak | Should -BeGreaterThan 0
-        $detail | Should -BeLessThan $streak
     }
 }
 
@@ -852,10 +759,9 @@ Describe 'seed classifier must not mistake the welcome screen for Recovery (roun
         ($class.Classification -eq 'BlueScreen' -or $class.Classification -eq 'Recovery') | Should -BeFalse
     }
 
-    It 'the poll loop still fails fast on a real blue failure screen (the throw is conditioned on the classification, not deleted)' {
+    It 'the classifier still flags a real flat-blue failure screen (round 42 rerun 10: the fail-fast throw is gone from the seed poll loop by user instruction, but the uniformity gate stays in the verifier)' {
         $script:VerifyScriptText | Should -Match 'BlueUniform'
-        $script:SeedScriptText | Should -Match "if \(\`$class\.Classification -eq 'BlueScreen' -or \`$class\.Classification -eq 'Recovery'\)"
-        $script:SeedScriptText | Should -Match 'specialize failed: guest shows'
+        $script:SeedScriptText | Should -Not -Match 'specialize failed: guest shows'
     }
 
     It 'still classifies shot-45 (TianoCore) as Boot' {
@@ -884,5 +790,72 @@ Describe 'seed classifier must not mistake the welcome screen for Recovery (roun
         $class.Classification | Should -Be 'Other'
         $class.BlueFraction | Should -BeGreaterThan 0.5
         $class.BlueUniform | Should -BeLessThan 0.9
+    }
+}
+
+Describe 'seed shutdown is on a timer, not on screenshot gates (round 42 rerun 10)' {
+    BeforeAll {
+        $timingPath = Join-Path $PSScriptRoot 'fixtures/seed-startmenu-timing.json'
+        $script:SeedTiming = Get-Content -LiteralPath $timingPath -Raw | ConvertFrom-Json
+        $script:SeedStartMenuMinutes = ([DateTime]::Parse($script:SeedTiming.startMenuAtUtc) - [DateTime]::Parse($script:SeedTiming.qemuStartedAtUtc)).TotalMinutes
+        $m = [regex]::Match($script:SeedScriptText, '\$ShutdownAfterMin\s*=\s*(\d+)')
+        $script:SeedShutdownAfterMin = if ($m.Success) { [int]$m.Groups[1].Value } else { -1 }
+    }
+
+    It 'the timing fixture records the measured Start-menu time (about 53.4 min after QEMU start)' {
+        $script:SeedStartMenuMinutes | Should -BeGreaterOrEqual 50
+        $script:SeedStartMenuMinutes | Should -BeLessThan 60
+    }
+
+    It 'the shutdown timer covers the measured time plus a 10-minute buffer' {
+        $script:SeedShutdownAfterMin | Should -BeGreaterOrEqual ($script:SeedStartMenuMinutes + 10)
+        $script:SeedShutdownAfterMin | Should -BeLessThan ($script:SeedStartMenuMinutes + 15)
+    }
+
+    It 'the timer is anchored at QEMU start' {
+        $anchor = $script:SeedScriptText.IndexOf('$qemuStartedAt = Get-Date')
+        $start = $script:SeedScriptText.IndexOf('Start-Process -FilePath $QemuPath')
+        $anchor | Should -BeGreaterOrEqual 0
+        $start | Should -BeGreaterOrEqual 0
+        $anchor | Should -BeLessThan $start
+        $script:SeedScriptText | Should -Match '\$qemuStartedAt\.AddMinutes\(\$ShutdownAfterMin\)'
+    }
+
+    It 'the poll loop takes screenshots as evidence only, with no detection' {
+        $script:SeedScriptText | Should -Not -Match 'Test-CleanScreenshot'
+        $script:SeedScriptText | Should -Not -Match 'Test-SeedScreenshotHasDesktopDetail'
+        $script:SeedScriptText | Should -Not -Match 'Test-SeedScreenshotIsDesktop'
+        $script:SeedScriptText | Should -Not -Match 'Test-SeedScreenshotHasStartMenu'
+        $script:SeedScriptText | Should -Not -Match 'specialize failed: guest shows'
+        $script:SeedScriptText | Should -Not -Match 'desktop-like'
+        $script:SeedScriptText.IndexOf('$streak') | Should -Be -1
+        $script:SeedScriptText | Should -Match 'Save-CleanScreenshot'
+        $script:SeedScriptText | Should -Match 'specialize poll'
+    }
+
+    It 'the timer firing is what leads to shutdown, and the outer timeout still guards it' {
+        $script:SeedScriptText | Should -Match '\$shutdownTimerFired = \$true'
+        $script:SeedScriptText | Should -Match 'shutdown timer reached'
+        $script:SeedScriptText | Should -Match 'shutdown timer did not fire within \$SpecializeTimeoutMin minutes'
+        $timer = $script:SeedScriptText.IndexOf('shutdown timer reached')
+        $powerdown = $script:SeedScriptText.IndexOf('system_powerdown')
+        $timer | Should -BeGreaterOrEqual 0
+        $timer | Should -BeLessThan $powerdown
+    }
+
+    It 'the poll loop keeps the display awake so the evidence screenshots stay readable' {
+        $count = ([regex]::Matches($script:SeedScriptText, 'Send-CleanKey')).Count
+        $count | Should -Be 1
+        $script:SeedScriptText | Should -Match 'Send-CleanKey -Port \$MonitorPort -Key ''ctrl'''
+    }
+
+    It 'the 75-minute timeout is still the outer backstop' {
+        $script:SeedScriptText | Should -Match '\$SpecializeTimeoutMin = 75'
+    }
+
+    It 'the harvest path is unchanged (convert-back, empty-hive assertion)' {
+        $script:SeedScriptText | Should -Match 'seed-harvest.vhdx'
+        $script:SeedScriptText | Should -Match 'refusing to harvest the stale pre-QEMU VHD'
+        $script:SeedScriptText | Should -Match 'harvested SAM is still an empty hive'
     }
 }

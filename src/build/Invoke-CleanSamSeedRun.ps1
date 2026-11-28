@@ -61,13 +61,18 @@ param(
     [string] $OvmfPath = '',
 
     # Specialize under TCG is slow: a full Windows boot to the OOBE
-    # desktop can take 20-40 minutes. 75 minutes is the ceiling; the
-    # loop fails fast on a blue screen instead of burning it.
+    # desktop can take 20-40 minutes. 75 minutes is the outer
+    # ceiling; the shutdown timer below is what actually ends the run.
     [int] $SpecializeTimeoutMin = 75,
 
-    # Seconds to let the desktop settle before powering off
-    # (lets specialize finish writing the hives).
-    [int] $DesktopSettleSec = 120,
+    # Minutes after QEMU start when the guest is shut down for
+    # harvest. Round 42 rerun 10 (user 2026-11-28 09:12): no
+    # screenshot gates at all -- shutdown is on a timer. In run
+    # 46080314320 the Start menu appeared 53.43 min after QEMU
+    # start (shot-36, 00:27:38Z; QEMU started 23:34:12Z), so the
+    # timer is that measured time plus a 10 min buffer against
+    # run-to-run variation, rounded up to a clean 64 min.
+    [int] $ShutdownAfterMin = 64,
 
     [int] $MemoryMb = 4096,
 
@@ -158,129 +163,6 @@ function Get-SeedQemuArgList {
         '-d', 'guest_errors'
         '-D', $QemuLogPath
     )
-}
-
-function Test-SeedScreenshotIsDesktop {
-    # Pure function: is this screenshot an arrived desktop by color?
-    # The desktop is a bright GUI (low black fraction); the firmware
-    # screen, the boot spinner and the specialize progress screens are
-    # all mostly black. One 'Other' shot is not enough -- specialize
-    # shows GUI progress screens too -- so the caller requires three in
-    # a row (90 s apart) before declaring the desktop reached.
-    # Color alone is NECESSARY but NOT sufficient: the OOBE "getting
-    # ready" screens pass it too (Other, black 14-18%) and fooled
-    # three polls in run 46051050523 -- the caller also requires
-    # Test-SeedScreenshotHasDesktopDetail (texture + no central white
-    # text) before a shot counts toward the streak.
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string] $Classification,
-
-        [double] $BlackFraction = 1.0
-    )
-    return ($Classification -eq 'Other') -and ($BlackFraction -lt 0.4)
-}
-
-function Test-SeedScreenshotHasDesktopDetail {
-    # Pure function: does this screenshot show a real desktop, not a
-    # smooth OOBE screen? Two independent pixel checks on the PPM
-    # raster (same 40x40 sampling grid as Test-CleanScreenshot):
-    #
-    #   edge       mean absolute horizontal brightness step between
-    #              adjacent sampled pixels. The OOBE "getting ready"
-    #              screens are smooth radial gradients (run 46051050523
-    #              shots 32-35: 3.5-4.3); the first-logon desktop has
-    #              the textured Bloom wallpaper plus the taskbar
-    #              (16.3 on the reconstructed desktop). Threshold 8
-    #              sits ~2x above the worst OOBE shot and ~2x below
-    #              the desktop.
-    #   white text fraction of near-white pixels in the central band
-    #              (x 20-80%, y 40-60%). The OOBE screens carry two
-    #              lines of large white text there (shots 32-35:
-    #              0.034-0.043); the desktop flower has none (0.000).
-    #              Threshold 0.02.
-    #
-    # Both must hold: texture without text is a desktop; the OOBE
-    # screens fail both. Calibration: all 35 real shots of run
-    # 46051050523 plus the reconstructed desktop (real Bloom wallpaper
-    # img0.jpg + solid dark taskbar); fixtures in tests/fixtures.
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $Path
-    )
-
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
-    $len = $bytes.Length
-
-    # Parse the P6 header tokens (same tolerant scan as
-    # Test-CleanScreenshot: magic, width, height, maxval, '#'
-    # comments allowed). After the maxval token there is exactly one
-    # whitespace byte, then the raster begins.
-    $pos = 0
-    $tokens = [System.Collections.Generic.List[string]]::new()
-    while ($tokens.Count -lt 4 -and $pos -lt $len) {
-        while ($pos -lt $len -and ($bytes[$pos] -eq 32 -or $bytes[$pos] -eq 9 -or $bytes[$pos] -eq 10 -or $bytes[$pos] -eq 13)) { $pos++ }
-        if ($pos -ge $len) { break }
-        if ($bytes[$pos] -eq 35) {
-            while ($pos -lt $len -and $bytes[$pos] -ne 10) { $pos++ }
-            continue
-        }
-        $start = $pos
-        while ($pos -lt $len -and $bytes[$pos] -ne 32 -and $bytes[$pos] -ne 9 -and $bytes[$pos] -ne 10 -and $bytes[$pos] -ne 13 -and $bytes[$pos] -ne 35) { $pos++ }
-        $tokens.Add([System.Text.Encoding]::ASCII.GetString($bytes, $start, $pos - $start))
-    }
-    if ($tokens.Count -ne 4 -or $tokens[0] -ne 'P6') {
-        throw "not a P6 PPM file: '$Path'"
-    }
-    $width = [int]$tokens[1]
-    $height = [int]$tokens[2]
-    $maxval = [int]$tokens[3]
-    if ($width -le 0 -or $height -le 0 -or $maxval -ne 255) {
-        throw "unsupported PPM header in '$Path' ($width x $height, maxval $maxval)"
-    }
-    if ($pos -lt $len -and ($bytes[$pos] -eq 32 -or $bytes[$pos] -eq 9 -or $bytes[$pos] -eq 10 -or $bytes[$pos] -eq 13)) { $pos++ }
-    $rasterStart = $pos
-    if (($len - $rasterStart) -lt ($width * $height * 3)) {
-        throw "truncated PPM raster in '$Path' (expected $($width * $height * 3) bytes, found $($len - $rasterStart))"
-    }
-
-    $stepX = [Math]::Max(1, [int]($width / 40))
-    $stepY = [Math]::Max(1, [int]($height / 40))
-    $edgeSum = 0.0
-    $edgePairs = 0
-    for ($y = 0; $y -lt $height; $y += $stepY) {
-        $prev = -1
-        for ($x = 0; $x -lt $width; $x += $stepX) {
-            $off = $rasterStart + ($y * $width + $x) * 3
-            $br = [Math]::Floor(($bytes[$off] + $bytes[$off + 1] + $bytes[$off + 2]) / 3)
-            if ($prev -ge 0) {
-                $edgeSum += [Math]::Abs($br - $prev)
-                $edgePairs++
-            }
-            $prev = $br
-        }
-    }
-    $edge = if ($edgePairs -gt 0) { $edgeSum / $edgePairs } else { 0 }
-
-    $white = 0
-    $central = 0
-    $x0 = [int]($width * 0.2)
-    $x1 = [int]($width * 0.8)
-    $y0 = [int]($height * 0.4)
-    $y1 = [int]($height * 0.6)
-    for ($y = $y0; $y -lt $y1; $y += 4) {
-        for ($x = $x0; $x -lt $x1; $x += 4) {
-            $off = $rasterStart + ($y * $width + $x) * 3
-            $central++
-            if ($bytes[$off] -gt 200 -and $bytes[$off + 1] -gt 200 -and $bytes[$off + 2] -gt 200) { $white++ }
-        }
-    }
-    $whiteFraction = if ($central -gt 0) { $white / $central } else { 0 }
-
-    return ($edge -ge 8) -and ($whiteFraction -lt 0.02)
 }
 
 function Invoke-SeedDiskpart {
@@ -969,11 +851,12 @@ $qemuArgs = Get-SeedQemuArgList -DiskQcow2 $qcow2 -OvmfCodePath $OvmfPath -VarsP
 $argString = ($qemuArgs | ForEach-Object {
     if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ }
 }) -join ' '
+$qemuStartedAt = Get-Date
 Write-Host "starting QEMU: $QemuPath $argString"
 $qemu = Start-Process -FilePath $QemuPath -ArgumentList $argString -PassThru -NoNewWindow -RedirectStandardOutput $qemuStdoutLog -RedirectStandardError $qemuStderrLog
 if ($null -eq $qemu) { throw 'failed to start QEMU' }
 
-$desktopReached = $false
+$shutdownTimerFired = $false
 $lastShotIndex = 0
 try {
     $monitorUp = $false
@@ -994,66 +877,40 @@ try {
     if (-not $monitorUp) { throw 'QEMU monitor never came up within 120 s' }
     Write-Host 'QEMU monitor is up; specialize is running'
 
-    # Poll screenshots until the desktop is stable: three
-    # consecutive desktop-like shots, 90 s apart. Specialize
-    # reboots once (specialize -> OOBE -> AutoLogon desktop), so
-    # TianoCore may reappear mid-run -- that only resets the streak,
-    # it never fails the run. A blue screen at any point fails fast:
-    # the specialize itself is broken, and waiting would waste the job.
-    # A shot counts toward the streak only if it passes BOTH the
-    # color rule and the detail check: the OOBE "getting ready"
-    # screens pass the color rule (Other, black 14-18%) and fooled
-    # three polls in run 46051050523, so the detail check (texture
-    # plus no central white text) is the second gate.
-    # Round 42 rerun 8 lesson: the Windows 11 welcome screen is
-    # blue-dominant too (Bloom wallpaper, blue 57%) but TEXTURED, so
-    # the classifier now only calls a FLAT blue a failure screen
-    # (uniformity >= 0.90); a textured blue (welcome screen or
-    # desktop) classifies as Other, which only resets the streak and
-    # keeps polling -- it must never throw. The welcome screen is
-    # progress (MICPE created, auto-logon in progress), not a failure.
-    $streak = 0
+    # Round 42 rerun 10 (user 2026-11-28 09:12): no screenshot gates
+    # at all. Screenshots are evidence only -- the shutdown is on a
+    # timer (see $ShutdownAfterMin). Specialize reboots once
+    # (specialize -> OOBE -> AutoLogon desktop), so the guest may show
+    # TianoCore, OOBE, the welcome screen, the desktop or the Start
+    # menu at any poll; none of them is a gate any more. A bare Ctrl
+    # keypress each poll keeps the display awake so the evidence
+    # screenshots stay readable (it types nothing and opens nothing).
     $shotIndex = 0
     $deadline = (Get-Date).AddMinutes($SpecializeTimeoutMin)
+    $shutdownAt = $qemuStartedAt.AddMinutes($ShutdownAfterMin)
     while ((Get-Date) -lt $deadline) {
         if ($qemu.HasExited) {
-            throw "QEMU exited before the desktop appeared (exit $($qemu.ExitCode)); see $qemuLog"
+            throw "QEMU exited before the shutdown timer fired (exit $($qemu.ExitCode)); see $qemuLog"
         }
         $shotIndex++
+        $null = Send-CleanKey -Port $MonitorPort -Key 'ctrl'
         $took = Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $shotIndex -Label ("specialize poll {0}" -f $shotIndex)
         if (-not $took) {
             Write-Host ("!!! specialize poll {0}: screenshot failed, retrying" -f $shotIndex)
-            $streak = 0
             Start-Sleep -Seconds 60
             continue
         }
-        $ppm = Join-Path $shotDir ("shot-{0:d2}.ppm" -f $shotIndex)
-        $class = Test-CleanScreenshot -Path $ppm
-        Write-Host ("specialize poll {0}: {1} (black {2:P0}, blue {3:P0})" -f $shotIndex, $class.Classification, $class.BlackFraction, $class.BlueFraction)
-        if ($class.Classification -eq 'BlueScreen' -or $class.Classification -eq 'Recovery') {
-            throw "specialize failed: guest shows $($class.Classification) at shot $shotIndex (see $ppm)"
-        }
-        if ((Test-SeedScreenshotIsDesktop -Classification $class.Classification -BlackFraction $class.BlackFraction) -and (Test-SeedScreenshotHasDesktopDetail -Path $ppm)) {
-            $streak++
-            Write-Host ("desktop-like shot {0}/3" -f $streak)
-            if ($streak -ge 3) {
-                $desktopReached = $true
-                $lastShotIndex = $shotIndex
-                break
-            }
-        }
-        else {
-            $streak = 0
+        if ((Get-Date) -ge $shutdownAt) {
+            $lastShotIndex = $shotIndex
+            $shutdownTimerFired = $true
+            Write-Host ("shutdown timer reached ({0} min after QEMU start, shot {1}); shutting down for harvest" -f $ShutdownAfterMin, $shotIndex)
+            break
         }
         Start-Sleep -Seconds 90
     }
-    if (-not $desktopReached) {
-        throw "OOBE desktop not reached within $SpecializeTimeoutMin minutes (last shot $shotIndex); see $shotDir"
+    if (-not $shutdownTimerFired) {
+        throw "shutdown timer did not fire within $SpecializeTimeoutMin minutes (last shot $shotIndex); see $shotDir"
     }
-    Write-Host ("desktop reached (shot {0}); letting it settle {1} s" -f $lastShotIndex, $DesktopSettleSec)
-    Start-Sleep -Seconds $DesktopSettleSec
-    $lastShotIndex++
-    $null = Save-CleanScreenshot -Port $MonitorPort -ScreenshotDir $shotDir -ShotIndex $lastShotIndex -Label 'desktop final'
 }
 finally {
     # Clean shutdown: the hives are only trustworthy if the guest
@@ -1097,8 +954,8 @@ finally {
     }
 }
 
-if (-not $desktopReached) {
-    throw 'OOBE desktop was never reached; no hives to harvest'
+if (-not $shutdownTimerFired) {
+    throw 'shutdown timer never fired; no hives to harvest'
 }
 
 # Convert the QEMU-written qcow2 back to VHDX before harvesting.
