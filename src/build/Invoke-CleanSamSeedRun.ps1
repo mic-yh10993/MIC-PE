@@ -966,13 +966,28 @@ if (-not $shutdownTimerFired) {
 # file; the original VHD is left untouched until the conversion
 # succeeds, and a failed conversion throws here instead of silently
 # harvesting the stale disk.
+# Round 42 rerun 11 (run 46093144284 rerun): the bare qemu-img output
+# is sparse, and diskpart refuses to attach a sparse virtual disk
+# ("Virtual hard disk files must be uncompressed and unencrypted and
+# must not be sparse") -- the harvest died at the attach with only
+# the runner's own disks in list volume. So the conversion goes
+# through ConvertTo-CleanDeSparseDisk (round 23, same fix on the main
+# build's dump disk): it converts to a .convert temp file and
+# plain-copies it to the output, which loses the sparse attribute,
+# and logs the fsutil sparse queryflag as proof. The helper is
+# defined in the verifier, which this script dot-sourced above
+# (section 3 prerequisites), so it is in scope here -- no duplicate
+# implementation. The convert + de-sparse lines land in $verifyLines,
+# so the proof travels with the verification report.
 Write-Step 'converting the QEMU qcow2 back to VHDX for harvest'
 $harvestVhdx = Join-Path $WorkDir 'seed-harvest.vhdx'
 if (Test-Path -LiteralPath $harvestVhdx) { Remove-Item -LiteralPath $harvestVhdx -Force }
-& $qemuImgPath convert -f qcow2 -O vhdx $qcow2 $harvestVhdx | Out-Host
-if ($LASTEXITCODE -ne 0) {
+try {
+    $null = ConvertTo-CleanDeSparseDisk -QemuImgPath $qemuImgPath -Qcow2Path $qcow2 -Format 'vhdx' -OutPath $harvestVhdx -Lines $verifyLines
+}
+catch {
     throw [System.InvalidOperationException]::new(
-        "qemu-img convert back failed with exit code $LASTEXITCODE (the QEMU-written disk was not recovered; refusing to harvest the stale pre-QEMU VHD)")
+        "qemu-img convert back failed ($($_.Exception.Message)) (the QEMU-written disk was not recovered; refusing to harvest the stale pre-QEMU VHD)")
 }
 
 # ---------------------------------------------------------------------------

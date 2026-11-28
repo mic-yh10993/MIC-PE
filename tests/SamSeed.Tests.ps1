@@ -631,9 +631,12 @@ Describe 'seed harvest recovers the QEMU-written disk (round 42 rerun 7)' {
     It 'converts the qcow2 back to VHDX after QEMU exits, before the harvest (run 46051050523: the harvest attached the stale pre-QEMU VHD and read the empty 8 KB SAM)' {
         # The convert-back uses the resolved qemu-img path and writes a
         # NEW file (the original VHD stays untouched until the
-        # conversion succeeds).
-        $script:SeedScriptText | Should -Match '& \$qemuImgPath convert -f qcow2 -O vhdx \$qcow2 \$harvestVhdx'
-        $convertBack = $script:SeedScriptText.IndexOf('convert -f qcow2 -O vhdx')
+        # conversion succeeds). Round 42 rerun 11: the conversion goes
+        # through ConvertTo-CleanDeSparseDisk, not a bare qemu-img
+        # call -- the bare output is sparse and diskpart refuses to
+        # attach it (run 46093144284 rerun).
+        $script:SeedScriptText | Should -Match 'ConvertTo-CleanDeSparseDisk -QemuImgPath \$qemuImgPath -Qcow2Path \$qcow2 -Format ''vhdx'' -OutPath \$harvestVhdx'
+        $convertBack = [regex]::Match($script:SeedScriptText, 'ConvertTo-CleanDeSparseDisk -QemuImgPath').Index
         $convertBack | Should -BeGreaterThan 0
         # It runs after QEMU has exited (past the shutdown-timer guard,
         # which sits right after the shutdown finally block) and before
@@ -857,5 +860,89 @@ Describe 'seed shutdown is on a timer, not on screenshot gates (round 42 rerun 1
         $script:SeedScriptText | Should -Match 'seed-harvest.vhdx'
         $script:SeedScriptText | Should -Match 'refusing to harvest the stale pre-QEMU VHD'
         $script:SeedScriptText | Should -Match 'harvested SAM is still an empty hive'
+    }
+}
+
+Describe 'seed harvest de-sparses the converted-back disk before attaching (round 42 rerun 11)' {
+    # Run 46093144284 rerun: the timer fired, QEMU exited 0, the
+    # qcow2 converted back -- then the harvest attach failed because
+    # the converted-back seed-harvest.vhdx is sparse ("Virtual hard
+    # disk files must be uncompressed and unencrypted and must not be
+    # sparse"), list volume showed only the runner's own disks, and
+    # the script threw "harvest failed: SEED volume not found".
+    # Round 23 already fixed the same failure on the main build's
+    # dump disk with ConvertTo-CleanDeSparseDisk (plain copy loses
+    # the sparse attribute; fsutil sparse setflag 0 on an
+    # already-sparse file may corrupt it, so the copy -- not setflag
+    # -- is the fix). Reuse that helper here.
+    BeforeAll {
+        # Extract the real ConvertTo-CleanDeSparseDisk from the
+        # verifier (same brace-matching extraction as the round-8
+        # classifier tests).
+        $start = $script:VerifyScriptText.IndexOf('function ConvertTo-CleanDeSparseDisk')
+        $open = $script:VerifyScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:VerifyScriptText.Length; $i++) {
+            $ch = $script:VerifyScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        $script:DeSparseFunc = $script:VerifyScriptText.Substring($start, $end - $start + 1)
+        . ([scriptblock]::Create($script:DeSparseFunc))
+    }
+
+    It 'no bare qemu-img convert-back to the harvest VHDX remains (the bare output is sparse)' {
+        $script:SeedScriptText | Should -Not -Match '& \$qemuImgPath convert -f qcow2 -O vhdx \$qcow2 \$harvestVhdx'
+    }
+
+    It 'reuses the verifier helper: the seed script dot-sources the verifier above the convert-back and defines no copy of it' {
+        $script:SeedScriptText | Should -Not -Match 'function ConvertTo-CleanDeSparseDisk'
+        $script:VerifyScriptText | Should -Match 'function ConvertTo-CleanDeSparseDisk'
+        $dotSource = $script:SeedScriptText.IndexOf("Invoke-CleanQemuVerify.ps1') -IsoPath")
+        $call = [regex]::Match($script:SeedScriptText, 'ConvertTo-CleanDeSparseDisk -QemuImgPath').Index
+        $dotSource | Should -BeGreaterThan 0
+        $call | Should -BeGreaterThan 0
+        $dotSource | Should -BeLessThan $call
+    }
+
+    It 'the helper materializes the converted file with a plain copy and logs the fsutil queryflag as proof' {
+        # A fake qemu-img: a shell script that copies its last two
+        # args (input -> tmp output), so the convert step is real but
+        # the sparse attribute never enters the picture on the Linux
+        # test host; the property under test is the plain-copy
+        # materialization, not the NTFS flag itself (there is no NTFS
+        # here). fsutil does not exist on Linux, so the helper takes
+        # its "did not run" branch -- on the CI Windows runner the
+        # same line carries the queryflag output.
+        $dir = Join-Path $TestDrive 'desparse'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $qcow2 = Join-Path $dir 'seed.qcow2'
+        [System.IO.File]::WriteAllText($qcow2, 'fake-qcow2-bytes')
+        $stub = Join-Path $dir 'qemu-img'
+        $stubText = @'
+#!/bin/sh
+cp "$6" "$7"
+'@
+        [System.IO.File]::WriteAllText($stub, $stubText)
+        & chmod +x $stub
+        $out = Join-Path $dir 'seed-harvest.vhdx'
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $result = ConvertTo-CleanDeSparseDisk -QemuImgPath $stub -Qcow2Path $qcow2 -Format 'vhdx' -OutPath $out -Lines $lines
+        $result | Should -Be $out
+        Test-Path -LiteralPath $out | Should -BeTrue
+        Get-Content -LiteralPath $out -Raw | Should -Be 'fake-qcow2-bytes'
+        Test-Path -LiteralPath ($out + '.convert') | Should -BeFalse
+        ($lines -join "`n") | Should -Match 'convert: qemu-img convert -f qcow2 -O vhdx'
+        ($lines -join "`n") | Should -Match 'de-sparse: copied to'
+        ($lines -join "`n") | Should -Match 'fsutil sparse queryflag'
+    }
+
+    It 'the helper copies instead of clearing the flag in place (the copy is the fix)' {
+        $script:DeSparseFunc | Should -Match 'Copy-Item -LiteralPath \$tmpPath -Destination \$OutPath -Force'
+        $script:DeSparseFunc | Should -Match 'fsutil sparse queryflag'
     }
 }
