@@ -1556,6 +1556,222 @@ HKEY_LOCAL_MACHINE\MICPE_BUILD_SAM_ab12cd34\SAM\Domains\Account\Users\Names\MICP
     }
 }
 
+Describe 'SYSTEM registry query codes file (round 42 rerun 16)' {
+    BeforeAll {
+        $script:RegistryLibText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/Registry.ps1') -Raw
+
+        function script:Get-RegistryLibFunctionText($name) {
+            $start = $script:RegistryLibText.IndexOf("function $name")
+            if ($start -lt 0) { throw "function $name not found in lib/Registry.ps1" }
+            $open = $script:RegistryLibText.IndexOf('{', $start)
+            $depth = 0
+            $end = $open
+            for ($i = $open; $i -lt $script:RegistryLibText.Length; $i++) {
+                $ch = $script:RegistryLibText[$i]
+                if ($ch -eq '{') { $depth++ }
+                elseif ($ch -eq '}') {
+                    $depth--
+                    if ($depth -eq 0) { $end = $i; break }
+                }
+            }
+            return $script:RegistryLibText.Substring($start, $end - $start + 1)
+        }
+        . ([scriptblock]::Create((Get-RegistryLibFunctionText 'Get-CleanSystemRegQueryScript')))
+
+        # Mock reg.exe for executing the generated SYSTEM task script
+        # in-process: canned outputs per verb, exit codes from
+        # $script:MockRegBehavior. A function named reg.exe wins over
+        # a native reg.exe when the generated script calls "& reg.exe
+        # ..." in this session, and setting $global:LASTEXITCODE
+        # mimics a native exit code. Each It resets the behavior
+        # before it runs the script.
+        $script:MockRegBehavior = @{ LoadExit = 0; QueryExit = 0; UnloadExit = 0; LoadStderr = $false }
+        function reg.exe {
+            $verb = $args[0]
+            $behavior = $script:MockRegBehavior
+            if ($verb -eq 'load') {
+                if ($behavior.LoadExit -ne 0) { Write-Output 'ERROR: The system was unable to find the specified registry key or value.' }
+                elseif ($behavior.LoadStderr) { Write-Error 'The operation completed successfully.' }
+                else { Write-Output 'The operation completed successfully.' }
+                $global:LASTEXITCODE = $behavior.LoadExit
+            }
+            elseif ($verb -eq 'query') {
+                Write-Output 'HKEY_LOCAL_MACHINE\MICPE_BUILD_SAM_ab12cd34\SAM\Domains\Account\Users\Names'
+                Write-Output '    (Default)    REG_NONE'
+                Write-Output ''
+                Write-Output 'HKEY_LOCAL_MACHINE\MICPE_BUILD_SAM_ab12cd34\SAM\Domains\Account\Users\Names\MICPE'
+                Write-Output '    (Default)    REG_NONE'
+                $global:LASTEXITCODE = $behavior.QueryExit
+            }
+            elseif ($verb -eq 'unload') {
+                Write-Output 'The operation completed successfully.'
+                $global:LASTEXITCODE = $behavior.UnloadExit
+            }
+            else {
+                Write-Output "ERROR: unknown verb $verb"
+                $global:LASTEXITCODE = 1
+            }
+        }
+
+        function script:Invoke-GeneratedSystemRegQuery($LoadExit, $QueryExit, $UnloadExit, $LoadStderr) {
+            $script:MockRegBehavior = @{ LoadExit = $LoadExit; QueryExit = $QueryExit; UnloadExit = $UnloadExit; LoadStderr = $LoadStderr }
+            $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-sysregquery-{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            $loadOut = Join-Path $workDir 'load.log'
+            $queryOut = Join-Path $workDir 'query.log'
+            $codesFile = Join-Path $workDir 'codes.txt'
+            $generated = Get-CleanSystemRegQueryScript -HiveFile 'D:\micpe\staging\Windows\System32\config\SAM' -HiveKey 'MICPE_BUILD_SAM_ab12cd34' -QuerySubKey 'SAM\Domains\Account\Users\Names' -LoadOutputFile $loadOut -QueryOutputFile $queryOut -CodesFile $codesFile -Recurse
+            & ([scriptblock]::Create($generated))
+            return [pscustomobject]@{ WorkDir = $workDir; LoadOut = $loadOut; QueryOut = $queryOut; CodesFile = $codesFile }
+        }
+    }
+
+    AfterEach {
+        if ($script:LastSysRegWorkDir -and (Test-Path -LiteralPath $script:LastSysRegWorkDir)) {
+            Remove-Item -LiteralPath $script:LastSysRegWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $script:LastSysRegWorkDir = $null
+    }
+
+    It 'executing the generated task script writes one exit code per line (run 46153205670: the codes file collapsed to one line, so the load reported -1)' {
+        $run = Invoke-GeneratedSystemRegQuery -LoadExit 0 -QueryExit 0 -UnloadExit 0 -LoadStderr $false
+        $script:LastSysRegWorkDir = $run.WorkDir
+        $lines = @(Get-Content -LiteralPath $run.CodesFile)
+        $lines.Count | Should -Be 3
+        $lines[0] | Should -Be 'loadExit=0'
+        $lines[1] | Should -Be 'queryExit=0'
+        $lines[2] | Should -Be 'unloadExit=0'
+    }
+
+    It 'the generated task script survives reg.exe writing to stderr (PS 5.1 Stop + 2>&1 would kill it before codes.txt)' {
+        $run = Invoke-GeneratedSystemRegQuery -LoadExit 0 -QueryExit 0 -UnloadExit 0 -LoadStderr $true
+        $script:LastSysRegWorkDir = $run.WorkDir
+        Test-Path -LiteralPath $run.CodesFile | Should -BeTrue
+        @(Get-Content -LiteralPath $run.CodesFile) -contains 'loadExit=0' | Should -BeTrue
+    }
+
+    It 'the generated task script does not collapse the codes array with + (static guard for the run 46153205670 root cause)' {
+        $generated = Get-CleanSystemRegQueryScript -HiveFile 'D:\micpe\staging\Windows\System32\config\SAM' -HiveKey 'MICPE_BUILD_SAM_ab12cd34' -QuerySubKey 'SAM\Domains\Account\Users\Names' -LoadOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\load.log' -QueryOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\query.log' -CodesFile 'C:\ProgramData\MICPE-SysRegQuery-test\codes.txt' -Recurse
+        # Comment lines are excluded: the explanation comment inside the
+        # template quotes the collapsing form, only code lines count.
+        $codeLines = @($generated -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' })
+        $codeOnly = ($codeLines -join "`n")
+        $codeOnly | Should -Not -Match "@\('loadExit=' \+"
+        $codeOnly | Should -Match '@\("loadExit=\$loadCode", "queryExit=\$queryCode", "unloadExit=\$unloadCode"\) \| Set-Content'
+    }
+
+    It 'the generated task script does not stop on reg.exe stderr (static guard: Continue, not Stop)' {
+        $generated = Get-CleanSystemRegQueryScript -HiveFile 'D:\micpe\staging\Windows\System32\config\SAM' -HiveKey 'MICPE_BUILD_SAM_ab12cd34' -QuerySubKey 'SAM\Domains\Account\Users\Names' -LoadOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\load.log' -QueryOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\query.log' -CodesFile 'C:\ProgramData\MICPE-SysRegQuery-test\codes.txt' -Recurse
+        $generated | Should -Match "ErrorActionPreference = 'Continue'"
+        $generated | Should -Not -Match "ErrorActionPreference = 'Stop'"
+    }
+
+    Describe 'Get-CleanSystemRegQueryCodes parses the codes file' {
+        BeforeAll {
+            . ([scriptblock]::Create((Get-RegistryLibFunctionText 'Get-CleanSystemRegQueryCodes')))
+        }
+
+        It 'parses a normal three-line codes file' {
+            $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-sysregcodes-{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            try {
+                $codesFile = Join-Path $workDir 'codes.txt'
+                Set-Content -LiteralPath $codesFile -Value @('loadExit=0', 'queryExit=0', 'unloadExit=0') -Encoding utf8
+                $codes = Get-CleanSystemRegQueryCodes -CodesFile $codesFile
+                $codes.LoadExitCode | Should -Be 0
+                $codes.QueryExitCode | Should -Be 0
+                $codes.UnloadExitCode | Should -Be 0
+            }
+            finally {
+                Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'parses a collapsed single-line codes file (defense in depth for the run 46153205670 shape)' {
+            $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-sysregcodes-{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            try {
+                $codesFile = Join-Path $workDir 'codes.txt'
+                Set-Content -LiteralPath $codesFile -Value 'loadExit=0 queryExit=0 unloadExit=0' -Encoding utf8
+                $codes = Get-CleanSystemRegQueryCodes -CodesFile $codesFile
+                $codes.LoadExitCode | Should -Be 0
+                $codes.QueryExitCode | Should -Be 0
+                $codes.UnloadExitCode | Should -Be 0
+            }
+            finally {
+                Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'parses a load failure (loadExit=1, query/unload stay -1)' {
+            $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-sysregcodes-{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            try {
+                $codesFile = Join-Path $workDir 'codes.txt'
+                Set-Content -LiteralPath $codesFile -Value @('loadExit=1', 'queryExit=-1', 'unloadExit=-1') -Encoding utf8
+                $codes = Get-CleanSystemRegQueryCodes -CodesFile $codesFile
+                $codes.LoadExitCode | Should -Be 1
+                $codes.QueryExitCode | Should -Be -1
+                $codes.UnloadExitCode | Should -Be -1
+            }
+            finally {
+                Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'parses an empty codes file as all -1 (missing codes are never mistaken for success)' {
+            $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-sysregcodes-{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            try {
+                $codesFile = Join-Path $workDir 'codes.txt'
+                Set-Content -LiteralPath $codesFile -Value '' -Encoding utf8
+                $codes = Get-CleanSystemRegQueryCodes -CodesFile $codesFile
+                $codes.LoadExitCode | Should -Be -1
+                $codes.QueryExitCode | Should -Be -1
+                $codes.UnloadExitCode | Should -Be -1
+            }
+            finally {
+                Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'parses a BOM-prefixed codes file' {
+            $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("micpe-sysregcodes-{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            try {
+                $codesFile = Join-Path $workDir 'codes.txt'
+                [System.IO.File]::WriteAllText($codesFile, "loadExit=0`r`nqueryExit=0`r`nunloadExit=0`r`n", (New-Object System.Text.UTF8Encoding($true)))
+                $codes = Get-CleanSystemRegQueryCodes -CodesFile $codesFile
+                $codes.LoadExitCode | Should -Be 0
+                $codes.QueryExitCode | Should -Be 0
+                $codes.UnloadExitCode | Should -Be 0
+            }
+            finally {
+                Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'reports the real codes from an executed task script (load succeeded: 0/0/0, not -1/-1/-1)' {
+            $run = Invoke-GeneratedSystemRegQuery -LoadExit 0 -QueryExit 0 -UnloadExit 0 -LoadStderr $false
+            $script:LastSysRegWorkDir = $run.WorkDir
+            $codes = Get-CleanSystemRegQueryCodes -CodesFile $run.CodesFile
+            $codes.LoadExitCode | Should -Be 0
+            $codes.QueryExitCode | Should -Be 0
+            $codes.UnloadExitCode | Should -Be 0
+        }
+
+        It 'reports a failed load from an executed task script (loadExit=1, query/unload -1)' {
+            $run = Invoke-GeneratedSystemRegQuery -LoadExit 1 -QueryExit 0 -UnloadExit 0 -LoadStderr $false
+            $script:LastSysRegWorkDir = $run.WorkDir
+            $codes = Get-CleanSystemRegQueryCodes -CodesFile $run.CodesFile
+            $codes.LoadExitCode | Should -Be 1
+            $codes.QueryExitCode | Should -Be -1
+            $codes.UnloadExitCode | Should -Be -1
+            (Get-Content -LiteralPath $run.LoadOut -Raw) | Should -Match 'ERROR:'
+        }
+    }
+}
+
     It 'finds MICPE under a different domain SID (the check must not depend on the machine SID)' {
         Test-SeedMembersHasRid -RegOutput $script:MembersOutOtherDomain -RidHex '000003E8' | Should -BeTrue
     }

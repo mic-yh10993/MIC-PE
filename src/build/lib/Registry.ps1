@@ -263,7 +263,12 @@ function Get-CleanSystemRegQueryScript {
 
     $recurseFlag = if ($Recurse) { '/s' } else { '' }
     $body = @'
-$ErrorActionPreference = 'Stop'
+# 'Continue', not 'Stop': this script's only job is to record reg.exe's
+# exit codes. Under 'Stop', a reg.exe line on stderr (2>&1) is a
+# terminating error in Windows PowerShell 5.1, so a failed load would
+# kill the script before codes.txt is written and the caller could not
+# tell a load failure from a broken task (run 46153205670).
+$ErrorActionPreference = 'Continue'
 $loadRaw = & reg.exe load 'HKLM\__HIVEKEY__' '__HIVEFILE__' 2>&1
 $loadCode = $LASTEXITCODE
 ($loadRaw | Out-String) | Set-Content -LiteralPath '__LOADOUT__' -Encoding utf8
@@ -280,10 +285,50 @@ if ($loadCode -eq 0) {
     $null = & reg.exe unload 'HKLM\__HIVEKEY__' 2>&1
     $unloadCode = $LASTEXITCODE
 }
-@('loadExit=' + $loadCode, 'queryExit=' + $queryCode, 'unloadExit=' + $unloadCode) | Set-Content -LiteralPath '__CODES__' -Encoding utf8
+# Interpolation, not '...' + $code: @('loadExit=' + $loadCode, ...) parses
+# as 'loadExit=' + ($loadCode, 'queryExit=' + ...) and collapses to ONE
+# space-joined string, so codes.txt was a single line and the caller
+# parsed every exit code as -1 even though the load succeeded
+# (run 46153205670). Interpolation keeps one code per line.
+@("loadExit=$loadCode", "queryExit=$queryCode", "unloadExit=$unloadCode") | Set-Content -LiteralPath '__CODES__' -Encoding utf8
 '@
     $body = $body.Replace('__HIVEKEY__', $HiveKey).Replace('__HIVEFILE__', $HiveFile).Replace('__QUERYSUBKEY__', $QuerySubKey).Replace('__RECURSE__', $recurseFlag).Replace('__LOADOUT__', $LoadOutputFile).Replace('__QUERYOUT__', $QueryOutputFile).Replace('__CODES__', $CodesFile)
     return $body
+}
+
+function Get-CleanSystemRegQueryCodes {
+    # Parse the exit-code file a SYSTEM task script wrote
+    # (Get-CleanSystemRegQueryScript) and return the three codes.
+    #
+    # The file is normally one code per line, but the parse tolerates
+    # a collapsed single line ("loadExit=0 queryExit=0 unloadExit=0"):
+    # round 42 rerun 15 wrote exactly that shape (the codes array
+    # collapsed, run 46153205670) and the old anchored line regex
+    # parsed every code as -1 even though the load had succeeded.
+    # A code that never parsed stays -1, the "unknown" sentinel the
+    # caller already treats as a failure; a BOM prefix is stripped
+    # defensively (Set-Content -Encoding utf8 writes one under
+    # Windows PowerShell 5.1).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $CodesFile
+    )
+
+    $codes = [pscustomobject]@{
+        LoadExitCode   = -1
+        QueryExitCode  = -1
+        UnloadExitCode = -1
+    }
+    $raw = (Get-Content -LiteralPath $CodesFile -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $raw) { $raw = '' }
+    foreach ($token in (@($raw -split '\s+' | Where-Object { $_ }))) {
+        $token = $token.Trim([char]0xFEFF)
+        if ($token -match '^loadExit=(-?\d+)$') { $codes.LoadExitCode = [int]$Matches[1] }
+        elseif ($token -match '^queryExit=(-?\d+)$') { $codes.QueryExitCode = [int]$Matches[1] }
+        elseif ($token -match '^unloadExit=(-?\d+)$') { $codes.UnloadExitCode = [int]$Matches[1] }
+    }
+    return $codes
 }
 
 function Invoke-CleanSystemRegQuery {
@@ -358,12 +403,14 @@ function Invoke-CleanSystemRegQuery {
             throw [System.InvalidOperationException]::new(
                 "failed to create SYSTEM registry query task $taskName : $($create.Trim())")
         }
+        Write-SubStep "created SYSTEM registry query task $taskName"
 
         $run = & schtasks.exe /run /tn $taskName 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
             throw [System.InvalidOperationException]::new(
                 "failed to start SYSTEM registry query task $taskName : $($run.Trim())")
         }
+        Write-SubStep "started SYSTEM registry query task $taskName for $QuerySubKey"
 
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while (-not (Test-Path -LiteralPath $codeFile)) {
@@ -386,19 +433,23 @@ function Invoke-CleanSystemRegQuery {
             throw [System.InvalidOperationException]::new(
                 "SYSTEM registry query task failed with exit code $code for $QuerySubKey : $detail")
         }
+        Write-SubStep "SYSTEM registry query task finished (task script exit code 0) for $QuerySubKey"
 
         if (-not (Test-Path -LiteralPath $codesFile)) {
             throw [System.InvalidOperationException]::new(
                 "SYSTEM registry query task finished but wrote no exit codes for $QuerySubKey (task $taskName)")
         }
-        $loadExit = -1
-        $queryExit = -1
-        $unloadExit = -1
-        foreach ($line in (Get-Content -LiteralPath $codesFile -ErrorAction SilentlyContinue)) {
-            if ($line -match '^loadExit=(-?\d+)$') { $loadExit = [int]$Matches[1] }
-            elseif ($line -match '^queryExit=(-?\d+)$') { $queryExit = [int]$Matches[1] }
-            elseif ($line -match '^unloadExit=(-?\d+)$') { $unloadExit = [int]$Matches[1] }
+        $codes = Get-CleanSystemRegQueryCodes -CodesFile $codesFile
+        $loadExit = $codes.LoadExitCode
+        $queryExit = $codes.QueryExitCode
+        $unloadExit = $codes.UnloadExitCode
+        if (($loadExit -eq -1) -and ($queryExit -eq -1) -and ($unloadExit -eq -1)) {
+            $codesText = (Get-Content -LiteralPath $codesFile -Raw -ErrorAction SilentlyContinue)
+            if ($null -eq $codesText) { $codesText = '' }
+            throw [System.InvalidOperationException]::new(
+                "SYSTEM registry query task wrote an unparseable exit-code file for $QuerySubKey (task $taskName): [$($codesText.Trim())]")
         }
+        Write-SubStep ("SYSTEM registry query codes: loadExit={0} queryExit={1} unloadExit={2}" -f $loadExit, $queryExit, $unloadExit)
         $loadOutput = ''
         if (Test-Path -LiteralPath $loadOutFile) {
             $loadOutput = (Get-Content -LiteralPath $loadOutFile -Raw -ErrorAction SilentlyContinue)
