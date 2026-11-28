@@ -211,6 +211,218 @@ function Invoke-RegImportAsSystem {
     }
 }
 
+function Test-CleanRegOutputHasError {
+    # Does a reg.exe query output carry a reg.exe error line?
+    # reg.exe can print an error AND exit 0 (round 42 rerun 15:
+    # run 46146459319 printed "ERROR: Access is denied." for a
+    # /s query of the staged SAM and still exited 0), so
+    # $LASTEXITCODE alone cannot tell a failed query from an
+    # empty database. Only a line that starts with "ERROR:"
+    # counts -- a value that merely mentions ERROR: mid-line
+    # does not.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $RegOutput
+    )
+
+    return @($RegOutput -split "`r?`n" | Where-Object { $_ -match '^\s*ERROR:' }).Count -gt 0
+}
+
+function Get-CleanSystemRegQueryScript {
+    # The task script Invoke-CleanSystemRegQuery runs as SYSTEM:
+    # load the hive, run one reg.exe query, unload, and write the
+    # exit codes plus the FULL load and query outputs to files.
+    # Pure (no Windows calls), so it is unit-testable on Linux.
+    # The paths are baked into single quotes (they never contain
+    # one); the recurse flag is baked in as '/s' or nothing, so
+    # the generated text never contains a stray /s.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $HiveFile,
+
+        [Parameter(Mandatory = $true)]
+        [string] $HiveKey,
+
+        [Parameter(Mandatory = $true)]
+        [string] $QuerySubKey,
+
+        [Parameter(Mandatory = $true)]
+        [string] $LoadOutputFile,
+
+        [Parameter(Mandatory = $true)]
+        [string] $QueryOutputFile,
+
+        [Parameter(Mandatory = $true)]
+        [string] $CodesFile,
+
+        [switch] $Recurse
+    )
+
+    $recurseFlag = if ($Recurse) { '/s' } else { '' }
+    $body = @'
+$ErrorActionPreference = 'Stop'
+$loadRaw = & reg.exe load 'HKLM\__HIVEKEY__' '__HIVEFILE__' 2>&1
+$loadCode = $LASTEXITCODE
+($loadRaw | Out-String) | Set-Content -LiteralPath '__LOADOUT__' -Encoding utf8
+$queryOut = ''
+$queryCode = -1
+if ($loadCode -eq 0) {
+    $queryRaw = & reg.exe query 'HKLM\__HIVEKEY__\__QUERYSUBKEY__' __RECURSE__ 2>&1
+    $queryCode = $LASTEXITCODE
+    $queryOut = ($queryRaw | Out-String)
+}
+($queryOut | Out-String) | Set-Content -LiteralPath '__QUERYOUT__' -Encoding utf8
+$unloadCode = -1
+if ($loadCode -eq 0) {
+    $null = & reg.exe unload 'HKLM\__HIVEKEY__' 2>&1
+    $unloadCode = $LASTEXITCODE
+}
+@('loadExit=' + $loadCode, 'queryExit=' + $queryCode, 'unloadExit=' + $unloadCode) | Set-Content -LiteralPath '__CODES__' -Encoding utf8
+'@
+    $body = $body.Replace('__HIVEKEY__', $HiveKey).Replace('__HIVEFILE__', $HiveFile).Replace('__QUERYSUBKEY__', $QuerySubKey).Replace('__RECURSE__', $recurseFlag).Replace('__LOADOUT__', $LoadOutputFile).Replace('__QUERYOUT__', $QueryOutputFile).Replace('__CODES__', $CodesFile)
+    return $body
+}
+
+function Invoke-CleanSystemRegQuery {
+    # Run one reg.exe query against an offline hive as SYSTEM
+    # and return the full output.
+    #
+    # Round 42 rerun 15 root cause (run 46146459319, and the
+    # seed-side run 46134591088 before it): the harvested SAM's
+    # keys carry the live-system DACL -- SYSTEM has KEY_ALL_ACCESS
+    # (0xF003F) but Administrators only READ_CONTROL|WRITE_DAC
+    # (0x60000, no KEY_QUERY_VALUE / KEY_ENUMERATE_SUB_KEYS), so
+    # an admin reg.exe query on Users\Names fails with "ERROR:
+    # Access is denied." while reg.exe still exits 0. The query
+    # therefore runs as SYSTEM through the same one-shot
+    # scheduled-task mechanism Set-OfflineAdminState uses for SAM
+    # surgery (and Invoke-RegImportAsSystem for DACL-blocked
+    # imports): load, query and unload all happen inside the
+    # SYSTEM task, so the admin shell never touches the keys.
+    # The hive file itself is only read, never modified, and no
+    # key DACL is weakened.
+    #
+    # Returns a pscustomobject with LoadExitCode, QueryExitCode,
+    # UnloadExitCode, LoadOutput (the full load output text) and
+    # QueryOutput (the full listing text). A load or query failure
+    # is RETURNED, not thrown, so the caller can say which step
+    # failed; only the task infrastructure itself (schtasks,
+    # timeout, missing output files) throws.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $HiveFile,
+
+        [Parameter(Mandatory = $true)]
+        [string] $HiveKey,
+
+        [Parameter(Mandatory = $true)]
+        [string] $QuerySubKey,
+
+        [switch] $Recurse,
+
+        [int] $TimeoutSeconds = 120
+    )
+
+    if ($null -eq (Get-Command -Name 'schtasks.exe' -ErrorAction SilentlyContinue)) {
+        throw [System.InvalidOperationException]::new(
+            'schtasks.exe is not available: a SYSTEM registry query needs Windows (one-shot scheduled task as SYSTEM)')
+    }
+
+    $taskName = "MICPE-SysRegQuery-$([guid]::NewGuid().ToString('N'))"
+    $workDir = Join-Path $env:ProgramData $taskName
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    $loader = Join-Path $workDir 'query-hive.ps1'
+    $codeFile = Join-Path $workDir 'exitcode.txt'
+    $loadOutFile = Join-Path $workDir 'load.log'
+    $queryOutFile = Join-Path $workDir 'query.log'
+    $codesFile = Join-Path $workDir 'codes.txt'
+    $scriptPath = Join-Path $workDir 'run-query.cmd'
+    try {
+        Set-Content -LiteralPath $loader -Value (Get-CleanSystemRegQueryScript -HiveFile $HiveFile -HiveKey $HiveKey -QuerySubKey $QuerySubKey -LoadOutputFile $loadOutFile -QueryOutputFile $queryOutFile -CodesFile $codesFile -Recurse:$Recurse) -Encoding utf8
+        @(
+            '@echo off',
+            "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$loader`" > `"$queryOutFile.console`" 2>&1",
+            "echo %ERRORLEVEL% > `"$codeFile`""
+        ) | Set-Content -LiteralPath $scriptPath -Encoding ascii
+
+        # A /sc once task needs a start time; use two minutes in the
+        # future (local time, same clock schtasks reads) and trigger it
+        # immediately with /run -- the schedule itself never fires.
+        $startAt = (Get-Date).AddMinutes(2).ToString('HH:mm')
+        $create = & schtasks.exe /create /tn $taskName /tr "`"$scriptPath`"" /sc once /st $startAt /ru SYSTEM /rl highest /f 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "failed to create SYSTEM registry query task $taskName : $($create.Trim())")
+        }
+
+        $run = & schtasks.exe /run /tn $taskName 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw [System.InvalidOperationException]::new(
+                "failed to start SYSTEM registry query task $taskName : $($run.Trim())")
+        }
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while (-not (Test-Path -LiteralPath $codeFile)) {
+            if ((Get-Date) -gt $deadline) {
+                throw [System.InvalidOperationException]::new(
+                    "SYSTEM registry query did not finish within $TimeoutSeconds seconds for $QuerySubKey (task $taskName)")
+            }
+            Start-Sleep -Seconds 1
+        }
+        Start-Sleep -Milliseconds 200
+        $code = (Get-Content -LiteralPath $codeFile -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($null -eq $code) { $code = '' }
+        $code = "$code".Trim()
+        if ($code -ne '0') {
+            $detail = '(the SYSTEM query script printed nothing)'
+            if (Test-Path -LiteralPath "$queryOutFile.console") {
+                $logged = (Get-Content -LiteralPath "$queryOutFile.console" -Raw -ErrorAction SilentlyContinue)
+                if ($logged) { $detail = "$logged".Trim() }
+            }
+            throw [System.InvalidOperationException]::new(
+                "SYSTEM registry query task failed with exit code $code for $QuerySubKey : $detail")
+        }
+
+        if (-not (Test-Path -LiteralPath $codesFile)) {
+            throw [System.InvalidOperationException]::new(
+                "SYSTEM registry query task finished but wrote no exit codes for $QuerySubKey (task $taskName)")
+        }
+        $loadExit = -1
+        $queryExit = -1
+        $unloadExit = -1
+        foreach ($line in (Get-Content -LiteralPath $codesFile -ErrorAction SilentlyContinue)) {
+            if ($line -match '^loadExit=(-?\d+)$') { $loadExit = [int]$Matches[1] }
+            elseif ($line -match '^queryExit=(-?\d+)$') { $queryExit = [int]$Matches[1] }
+            elseif ($line -match '^unloadExit=(-?\d+)$') { $unloadExit = [int]$Matches[1] }
+        }
+        $loadOutput = ''
+        if (Test-Path -LiteralPath $loadOutFile) {
+            $loadOutput = (Get-Content -LiteralPath $loadOutFile -Raw -ErrorAction SilentlyContinue)
+            if ($null -eq $loadOutput) { $loadOutput = '' }
+        }
+        $queryOutput = ''
+        if (Test-Path -LiteralPath $queryOutFile) {
+            $queryOutput = (Get-Content -LiteralPath $queryOutFile -Raw -ErrorAction SilentlyContinue)
+            if ($null -eq $queryOutput) { $queryOutput = '' }
+        }
+        return [pscustomobject]@{
+            LoadExitCode   = $loadExit
+            QueryExitCode  = $queryExit
+            UnloadExitCode = $unloadExit
+            LoadOutput     = $loadOutput
+            QueryOutput    = $queryOutput
+        }
+    }
+    finally {
+        $null = & schtasks.exe /delete /tn $taskName /f 2>&1
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-RegImportPrivileged {
     [CmdletBinding()]
     param(

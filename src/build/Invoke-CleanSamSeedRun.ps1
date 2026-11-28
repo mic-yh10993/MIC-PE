@@ -97,6 +97,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
 . (Join-Path $scriptDir 'lib\Common.ps1')
 . (Join-Path $scriptDir 'lib\BaseImage.ps1')
 . (Join-Path $scriptDir 'lib\Wim.ps1')
+. (Join-Path $scriptDir 'lib\Registry.ps1')
 
 if (-not (Test-Path -LiteralPath $WorkDir)) {
     New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -554,7 +555,10 @@ function Test-SeedMembersHasRid {
 function Get-SeedHiveVerification {
     # Verify the harvested hives with reg.exe only (load, query,
     # unload -- never the PowerShell provider: round 19 proved the
-    # provider holds an open handle and a later reg unload fails).
+    # provider holds an open handle and a later reg unload fails),
+    # run as SYSTEM (round 42 rerun 15: the harvested SAM's keys
+    # carry the live-system DACL, so an admin query fails with
+    # "ERROR: Access is denied." while reg.exe still exits 0).
     # Returns the observed structure; throws loudly on any gap.
     [CmdletBinding()]
     param(
@@ -584,92 +588,90 @@ function Get-SeedHiveVerification {
     # queried key by exactly one segment. The built-in Administrator
     # (RID 500) stays disabled in a UserAccounts-built image; the
     # logon account is MICPE, so only RID 1000 is checked here.
+    # SAM: the queries run as SYSTEM, not as the admin running
+    # this script (round 42 rerun 15): the harvested SAM's keys
+    # carry the live-system DACL (SYSTEM KEY_ALL_ACCESS 0xF003F,
+    # Administrators only READ_CONTROL|WRITE_DAC 0x60000), so an
+    # admin reg.exe query fails with "ERROR: Access is denied."
+    # while reg.exe still exits 0 -- run 46134591088 died on an
+    # empty Names parse of a good SAM for exactly this reason.
+    # Load, query and unload all happen inside the SYSTEM task;
+    # the output text is checked for ERROR: lines as well as the
+    # exit code, and a failure carries the FULL reg output.
     $samKey = "MICPE_SEED_SAM_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $samLoaded = $false
     $names = @()
     $samFlags = $null
-    try {
-        $LASTEXITCODE = 0
-        $null = & reg.exe load "HKLM\$samKey" $SamPath 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg load failed for harvested SAM $SamPath (exit code $LASTEXITCODE)")
-        }
-        $samLoaded = $true
-        $LASTEXITCODE = 0
-        $namesOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Account\Users\Names" /s 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg query failed for SAM Users\Names (exit code $LASTEXITCODE): the harvested SAM has no account database")
-        }
-        $namesPrefix = "HKEY_LOCAL_MACHINE\$samKey\SAM\Domains\Account\Users\Names\"
-        $names = @(Get-SeedNamesFromRegOutput -RegOutput $namesOut -Prefix $namesPrefix)
-        if ($names -notcontains 'MICPE') {
-            # Round 42 rerun 14: run 46134591088 failed here on a SAM
-            # that contains MICPE, and the log carried no reg output
-            # at all -- an empty parse and an empty database looked
-            # identical. Record the output shape in the error so a
-            # recurrence is diagnosable instead of a black box.
-            $namesPreview = @($namesOut -split "`r?`n" | Where-Object { $_ } | Select-Object -First 5) -join '; '
-            throw [System.InvalidOperationException]::new(
-                "harvested SAM Users\Names has no MICPE (found: $($names -join ', ')); reg output had $(@($namesOut -split "`r?`n").Count) line(s), first lines: $namesPreview")
-        }
-        $LASTEXITCODE = 0
-        $fOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Account\Users\000003E8" 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg query failed for SAM Users\000003E8 (exit code $LASTEXITCODE): no MICPE record")
-        }
-        $fMatch = [regex]::Match($fOut, '^\s*F\s+REG_BINARY\s+([0-9a-fA-F]+)\s*$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
-        if (-not $fMatch.Success -or $fMatch.Groups[1].Value.Length -lt 160) {
-            throw [System.InvalidOperationException]::new(
-                'harvested SAM Users\000003E8 has no 80-byte F value')
-        }
-        $fHex = $fMatch.Groups[1].Value
-        $fBytes = [byte[]]::new($fHex.Length / 2)
-        for ($i = 0; $i -lt $fBytes.Length; $i++) {
-            $fBytes[$i] = [Convert]::ToByte($fHex.Substring($i * 2, 2), 16)
-        }
-        # ACB flags: DWORD at offset 0x38, ACB_DISABLED = 0x0001.
-        # A UserAccounts-created admin is enabled by construction
-        # (0x0014 = ACB_NORMAL | ACB_PWNOTREQ, verified on the
-        # harvested SAM -- the old comment said 0x0210, which is a
-        # different flag combination). The build still runs
-        # Set-OfflineAdminState on MICPE as a belt-and-braces step,
-        # but a disabled MICPE here means the unattend did not do
-        # what it was supposed to -- fail loudly instead of
-        # harvesting a database that cannot log on. The
-        # blank-password proof is the desktop screenshot (the machine
-        # auto-logged on as MICPE with no password).
-        $samFlags = [BitConverter]::ToUInt32($fBytes, 0x38)
-        if (($samFlags -band 0x1) -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                ("harvested SAM MICPE is flagged disabled (F flags 0x{0:X8}): the unattend UserAccounts step did not enable it" -f $samFlags))
-        }
-        # Administrators alias (00000220) must list MICPE (RID 1000)
-        # as a member: the unattend puts it in the Administrators
-        # group, and the PE logon needs an admin account. Members
-        # are NOT under the alias key (00000220 has no subkeys, only
-        # a C value): they live directly under Aliases\Members, as
-        # subkeys named by SID under the domain SID, with the member
-        # RID as the last segment. Round 42 rerun 14: the old query
-        # under the alias key does not exist, and a decimal RID
-        # match hits no Members line -- check the hex RID instead.
-        $LASTEXITCODE = 0
-        $membersOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Builtin\Aliases\Members" /s 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg query failed for SAM Builtin Aliases\Members (exit code $LASTEXITCODE): cannot confirm MICPE is in the Administrators group")
-        }
-        if (-not (Test-SeedMembersHasRid -RegOutput $membersOut -RidHex '000003E8')) {
-            throw [System.InvalidOperationException]::new(
-                "harvested SAM Administrators alias has no RID 1000 member (MICPE is not in the Administrators group): $membersOut")
-        }
+    $namesResult = Invoke-CleanSystemRegQuery -HiveFile $SamPath -HiveKey $samKey -QuerySubKey 'SAM\Domains\Account\Users\Names' -Recurse
+    if ($namesResult.LoadExitCode -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            ("reg load failed for harvested SAM {0} (exit code {1}): full reg output: {2}" -f $SamPath, $namesResult.LoadExitCode, $namesResult.LoadOutput))
     }
-    finally {
-        if ($samLoaded) {
-            $null = & reg.exe unload "HKLM\$samKey" 2>&1
-        }
+    if (($namesResult.QueryExitCode -ne 0) -or (Test-CleanRegOutputHasError -RegOutput $namesResult.QueryOutput)) {
+        throw [System.InvalidOperationException]::new(
+            ("reg query failed for SAM Users\Names (load exit {0}, query exit {1}): full reg output: {2}" -f $namesResult.LoadExitCode, $namesResult.QueryExitCode, $namesResult.QueryOutput))
+    }
+    $namesPrefix = "HKEY_LOCAL_MACHINE\$samKey\SAM\Domains\Account\Users\Names\"
+    $names = @(Get-SeedNamesFromRegOutput -RegOutput $namesResult.QueryOutput -Prefix $namesPrefix)
+    if ($names -notcontains 'MICPE') {
+        throw [System.InvalidOperationException]::new(
+            "harvested SAM Users\Names has no MICPE (found: $($names -join ', ')); full reg output: $($namesResult.QueryOutput)")
+    }
+    $fResult = Invoke-CleanSystemRegQuery -HiveFile $SamPath -HiveKey $samKey -QuerySubKey 'SAM\Domains\Account\Users\000003E8'
+    if ($fResult.LoadExitCode -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            ("reg load failed for harvested SAM {0} (exit code {1}): full reg output: {2}" -f $SamPath, $fResult.LoadExitCode, $fResult.LoadOutput))
+    }
+    if (($fResult.QueryExitCode -ne 0) -or (Test-CleanRegOutputHasError -RegOutput $fResult.QueryOutput)) {
+        throw [System.InvalidOperationException]::new(
+            ("reg query failed for SAM Users\000003E8 (load exit {0}, query exit {1}): full reg output: {2}" -f $fResult.LoadExitCode, $fResult.QueryExitCode, $fResult.QueryOutput))
+    }
+    $fMatch = [regex]::Match($fResult.QueryOutput, '^\s*F\s+REG_BINARY\s+([0-9a-fA-F]+)\s*$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    if (-not $fMatch.Success -or $fMatch.Groups[1].Value.Length -lt 160) {
+        throw [System.InvalidOperationException]::new(
+            'harvested SAM Users\000003E8 has no 80-byte F value')
+    }
+    $fHex = $fMatch.Groups[1].Value
+    $fBytes = [byte[]]::new($fHex.Length / 2)
+    for ($i = 0; $i -lt $fBytes.Length; $i++) {
+        $fBytes[$i] = [Convert]::ToByte($fHex.Substring($i * 2, 2), 16)
+    }
+    # ACB flags: DWORD at offset 0x38, ACB_DISABLED = 0x0001.
+    # A UserAccounts-created admin is enabled by construction
+    # (0x0014 = ACB_NORMAL | ACB_PWNOTREQ, verified on the
+    # harvested SAM -- the old comment said 0x0210, which is a
+    # different flag combination). The build still runs
+    # Set-OfflineAdminState on MICPE as a belt-and-braces step,
+    # but a disabled MICPE here means the unattend did not do
+    # what it was supposed to -- fail loudly instead of
+    # harvesting a database that cannot log on. The
+    # blank-password proof is the desktop screenshot (the machine
+    # auto-logged on as MICPE with no password).
+    $samFlags = [BitConverter]::ToUInt32($fBytes, 0x38)
+    if (($samFlags -band 0x1) -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            ("harvested SAM MICPE is flagged disabled (F flags 0x{0:X8}): the unattend UserAccounts step did not enable it" -f $samFlags))
+    }
+    # Administrators alias (00000220) must list MICPE (RID 1000)
+    # as a member: the unattend puts it in the Administrators
+    # group, and the PE logon needs an admin account. Members
+    # are NOT under the alias key (00000220 has no subkeys, only
+    # a C value): they live directly under Aliases\Members, as
+    # subkeys named by SID under the domain SID, with the member
+    # RID as the last segment. Round 42 rerun 14: the old query
+    # under the alias key does not exist, and a decimal RID
+    # match hits no Members line -- check the hex RID instead.
+    $membersResult = Invoke-CleanSystemRegQuery -HiveFile $SamPath -HiveKey $samKey -QuerySubKey 'SAM\Domains\Builtin\Aliases\Members' -Recurse
+    if ($membersResult.LoadExitCode -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            ("reg load failed for harvested SAM {0} (exit code {1}): full reg output: {2}" -f $SamPath, $membersResult.LoadExitCode, $membersResult.LoadOutput))
+    }
+    if (($membersResult.QueryExitCode -ne 0) -or (Test-CleanRegOutputHasError -RegOutput $membersResult.QueryOutput)) {
+        throw [System.InvalidOperationException]::new(
+            ("reg query failed for SAM Builtin Aliases\Members (load exit {0}, query exit {1}): full reg output: {2}" -f $membersResult.LoadExitCode, $membersResult.QueryExitCode, $membersResult.QueryOutput))
+    }
+    if (-not (Test-SeedMembersHasRid -RegOutput $membersResult.QueryOutput -RidHex '000003E8')) {
+        throw [System.InvalidOperationException]::new(
+            "harvested SAM Administrators alias has no RID 1000 member (MICPE is not in the Administrators group): full reg output: $($membersResult.QueryOutput)")
     }
 
     # SECURITY: Policy\Accounts must be populated (the reference has
@@ -677,33 +679,21 @@ function Get-SeedHiveVerification {
     # produce the same standard set -- require at least 10 and log
     # the full list for review).
     $secKey = "MICPE_SEED_SEC_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $secLoaded = $false
     $secAccounts = @()
-    try {
-        $LASTEXITCODE = 0
-        $null = & reg.exe load "HKLM\$secKey" $SecurityPath 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg load failed for harvested SECURITY $SecurityPath (exit code $LASTEXITCODE)")
-        }
-        $secLoaded = $true
-        $LASTEXITCODE = 0
-        $secOut = & reg.exe query "HKLM\$secKey\Policy\Accounts" /s 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg query failed for SECURITY Policy\Accounts (exit code $LASTEXITCODE): the harvested SECURITY has no policy database")
-        }
-        $secPrefix = "HKEY_LOCAL_MACHINE\$secKey\Policy\Accounts\"
-        $secAccounts = @(Get-SeedSecurityAccountsFromRegOutput -RegOutput $secOut -Prefix $secPrefix)
-        if ($secAccounts.Count -lt 10) {
-            throw [System.InvalidOperationException]::new(
-                "harvested SECURITY Policy\Accounts has only $($secAccounts.Count) account(s) (expected >= 10): $($secAccounts -join ', ')")
-        }
+    $secResult = Invoke-CleanSystemRegQuery -HiveFile $SecurityPath -HiveKey $secKey -QuerySubKey 'Policy\Accounts' -Recurse
+    if ($secResult.LoadExitCode -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            ("reg load failed for harvested SECURITY {0} (exit code {1}): full reg output: {2}" -f $SecurityPath, $secResult.LoadExitCode, $secResult.LoadOutput))
     }
-    finally {
-        if ($secLoaded) {
-            $null = & reg.exe unload "HKLM\$secKey" 2>&1
-        }
+    if (($secResult.QueryExitCode -ne 0) -or (Test-CleanRegOutputHasError -RegOutput $secResult.QueryOutput)) {
+        throw [System.InvalidOperationException]::new(
+            ("reg query failed for SECURITY Policy\Accounts (load exit {0}, query exit {1}): full reg output: {2}" -f $secResult.LoadExitCode, $secResult.QueryExitCode, $secResult.QueryOutput))
+    }
+    $secPrefix = "HKEY_LOCAL_MACHINE\$secKey\Policy\Accounts\"
+    $secAccounts = @(Get-SeedSecurityAccountsFromRegOutput -RegOutput $secResult.QueryOutput -Prefix $secPrefix)
+    if ($secAccounts.Count -lt 10) {
+        throw [System.InvalidOperationException]::new(
+            "harvested SECURITY Policy\Accounts has only $($secAccounts.Count) account(s) (expected >= 10): $($secAccounts -join ', '); full reg output: $($secResult.QueryOutput)")
     }
 
     return [pscustomobject]@{

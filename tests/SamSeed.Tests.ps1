@@ -1439,6 +1439,123 @@ HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S
         Test-SeedMembersHasRid -RegOutput $script:MembersOutNoMicpe -RidHex '000003E8' | Should -BeFalse
     }
 
+
+Describe 'seed SAM verification reads the hive as SYSTEM (round 42 rerun 15)' {
+    BeforeAll {
+        $script:RegistryLibText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'src/build/lib/Registry.ps1') -Raw
+
+        function script:Get-RegistryLibFunctionText($name) {
+            $start = $script:RegistryLibText.IndexOf("function $name")
+            if ($start -lt 0) { throw "function $name not found in lib/Registry.ps1" }
+            $open = $script:RegistryLibText.IndexOf('{', $start)
+            $depth = 0
+            $end = $open
+            for ($i = $open; $i -lt $script:RegistryLibText.Length; $i++) {
+                $ch = $script:RegistryLibText[$i]
+                if ($ch -eq '{') { $depth++ }
+                elseif ($ch -eq '}') {
+                    $depth--
+                    if ($depth -eq 0) { $end = $i; break }
+                }
+            }
+            return $script:RegistryLibText.Substring($start, $end - $start + 1)
+        }
+        . ([scriptblock]::Create((Get-RegistryLibFunctionText 'Test-CleanRegOutputHasError')))
+        . ([scriptblock]::Create((Get-RegistryLibFunctionText 'Get-CleanSystemRegQueryScript')))
+
+        # The exact shape run 46146459319 produced: reg.exe printed
+        # "ERROR: Access is denied." and still exited 0, so the
+        # Names parse saw an empty list. The output splits into 3
+        # lines (the failure message said "reg output had 3 line(s)").
+        $script:AccessDeniedOut = "ERROR: Access is denied.`r`n`r`n"
+        $script:KeyNotFoundOut = "ERROR: The system was unable to find the specified registry key or value.`r`n"
+        $script:CleanNamesOut = @'
+HKEY_LOCAL_MACHINE\MICPE_BUILD_SAM_ab12cd34\SAM\Domains\Account\Users\Names
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_BUILD_SAM_ab12cd34\SAM\Domains\Account\Users\Names\MICPE
+    (Default)    REG_NONE
+'@
+        # A value that mentions ERROR: mid-line must NOT count as a
+        # failed query -- only a line that starts with ERROR: does
+        # (reg.exe puts its own errors at the start of a line).
+        $script:ErrorWordInValueOut = @'
+HKEY_LOCAL_MACHINE\MICPE_BUILD_SAM_ab12cd34\SAM\Domains\Account\Users\Names\MICPE
+    Note    REG_SZ    ERROR: not a real error
+'@
+    }
+
+    It 'treats the run 46146459319 access-denied output as a failed query, not an empty database' {
+        Test-CleanRegOutputHasError -RegOutput $script:AccessDeniedOut | Should -BeTrue
+    }
+
+    It 'treats a key-not-found error line as a failed query' {
+        Test-CleanRegOutputHasError -RegOutput $script:KeyNotFoundOut | Should -BeTrue
+    }
+
+    It 'treats a clean Names listing as a successful query' {
+        Test-CleanRegOutputHasError -RegOutput $script:CleanNamesOut | Should -BeFalse
+    }
+
+    It 'treats empty output as a successful (empty) query' {
+        Test-CleanRegOutputHasError -RegOutput '' | Should -BeFalse
+    }
+
+    It 'does not mistake ERROR: inside a value for a failed query' {
+        Test-CleanRegOutputHasError -RegOutput $script:ErrorWordInValueOut | Should -BeFalse
+    }
+
+    It 'generates a SYSTEM task script that loads, queries and unloads the hive and records both exit codes' {
+        $generated = Get-CleanSystemRegQueryScript -HiveFile 'D:\micpe\staging\Windows\System32\config\SAM' -HiveKey 'MICPE_BUILD_SAM_ab12cd34' -QuerySubKey 'SAM\Domains\Account\Users\Names' -LoadOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\load.log' -QueryOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\query.log' -CodesFile 'C:\ProgramData\MICPE-SysRegQuery-test\codes.txt' -Recurse
+        $generated | Should -Match 'reg\.exe load'
+        $generated | Should -Match 'D:\\micpe\\staging\\Windows\\System32\\config\\SAM'
+        $generated | Should -Match 'MICPE_BUILD_SAM_ab12cd34'
+        $generated | Should -Match 'SAM\\Domains\\Account\\Users\\Names'
+        $generated | Should -Match 'reg\.exe query.* /s'
+        $generated | Should -Match 'reg\.exe unload'
+        $generated | Should -Match 'loadExit='
+        $generated | Should -Match 'queryExit='
+        $generated | Should -Match 'unloadExit='
+        $generated | Should -Match 'C:\\ProgramData\\MICPE-SysRegQuery-test\\load\.log'
+        $generated | Should -Match 'C:\\ProgramData\\MICPE-SysRegQuery-test\\query\.log'
+        $generated | Should -Match 'C:\\ProgramData\\MICPE-SysRegQuery-test\\codes\.txt'
+    }
+
+    It 'omits /s from the generated query when the caller does not ask to recurse' {
+        $generated = Get-CleanSystemRegQueryScript -HiveFile 'D:\micpe\staging\Windows\System32\config\SAM' -HiveKey 'MICPE_BUILD_SAM_ab12cd34' -QuerySubKey 'SAM\Domains\Account\Users\000003E8' -LoadOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\load.log' -QueryOutputFile 'C:\ProgramData\MICPE-SysRegQuery-test\query.log' -CodesFile 'C:\ProgramData\MICPE-SysRegQuery-test\codes.txt'
+        $generated | Should -Match 'reg\.exe query'
+        $generated | Should -Not -Match '/s'
+    }
+
+    It 'seed step queries the staged SAM as SYSTEM instead of running reg.exe as the admin' {
+        $script:CleanScriptText | Should -Match 'Invoke-CleanSystemRegQuery'
+        $start = $script:CleanScriptText.IndexOf('function Invoke-CleanSamSeedStep')
+        $step = $script:CleanScriptText.Substring($start, $script:CleanScriptText.IndexOf('function Invoke-CleanRegistryStep', $start) - $start)
+        $step | Should -Not -Match '& reg\.exe query'
+        $step | Should -Not -Match '& reg\.exe load'
+        $step | Should -Not -Match 'namesPreview'
+    }
+
+    It 'seed step logs the manifest hashes and the copy before verifying (the run 46146459319 log had neither)' {
+        $script:CleanScriptText | Should -Match 'seed manifest SAM'
+        $script:CleanScriptText | Should -Match 'seed manifest SECURITY'
+        $script:CleanScriptText | Should -Match 'seed copy'
+    }
+
+    It 'seed step failure message distinguishes a failed reg load from a failed reg query' {
+        $start = $script:CleanScriptText.IndexOf('function Invoke-CleanSamSeedStep')
+        $step = $script:CleanScriptText.Substring($start, $script:CleanScriptText.IndexOf('function Invoke-CleanRegistryStep', $start) - $start)
+        $step | Should -Match 'reg load failed for staged SAM'
+        $step | Should -Match 'reg query failed for staged SAM Users\\Names'
+        $step | Should -Match 'full reg output'
+    }
+
+    It 'seed-side verification queries the harvested hives as SYSTEM too (run 46134591088 died the same way)' {
+        $script:SeedScriptText | Should -Match 'Invoke-CleanSystemRegQuery'
+        $script:SeedScriptText | Should -Match 'full reg output'
+    }
+}
+
     It 'finds MICPE under a different domain SID (the check must not depend on the machine SID)' {
         Test-SeedMembersHasRid -RegOutput $script:MembersOutOtherDomain -RidHex '000003E8' | Should -BeTrue
     }

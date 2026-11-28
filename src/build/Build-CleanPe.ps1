@@ -1428,54 +1428,51 @@ function Invoke-CleanSamSeedStep {
         throw [System.InvalidOperationException]::new(
             "SAM/SECURITY seed inputs are not present in $seedDir (need SAM, SECURITY and manifest.json) -- run the seed job first: gh workflow run build.yml --ref seed/sam-seed-r42 -f seed=true")
     }
+    Write-Step 'seeding SAM + SECURITY into staging (round 42 Scheme A)'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $samHash = (Get-FileHash -LiteralPath $samSeed -Algorithm SHA256).Hash.ToLower()
     $secHash = (Get-FileHash -LiteralPath $secSeed -Algorithm SHA256).Hash.ToLower()
+    Write-SubStep ("seed manifest SAM: {0} bytes, SHA256 {1} (manifest expects {2})" -f (Get-Item -LiteralPath $samSeed).Length, $samHash, $manifest.sam.sha256)
+    Write-SubStep ("seed manifest SECURITY: {0} bytes, SHA256 {1} (manifest expects {2})" -f (Get-Item -LiteralPath $secSeed).Length, $secHash, $manifest.security.sha256)
     Assert-True -Condition ($samHash -eq $manifest.sam.sha256.ToLower()) -Message "seed SAM SHA256 mismatch: manifest says $($manifest.sam.sha256), file is $samHash"
     Assert-True -Condition ($secHash -eq $manifest.security.sha256.ToLower()) -Message "seed SECURITY SHA256 mismatch: manifest says $($manifest.security.sha256), file is $secHash"
     $configDir = Join-Path $StagingDir 'Windows\System32\config'
     Copy-Item -LiteralPath $samSeed -Destination (Join-Path $configDir 'SAM') -Force
+    Write-SubStep ("seed copy: SAM ({0} bytes) -> {1}" -f (Get-Item -LiteralPath $samSeed).Length, (Join-Path $configDir 'SAM'))
     Copy-Item -LiteralPath $secSeed -Destination (Join-Path $configDir 'SECURITY') -Force
+    Write-SubStep ("seed copy: SECURITY ({0} bytes) -> {1}" -f (Get-Item -LiteralPath $secSeed).Length, (Join-Path $configDir 'SECURITY'))
     $stagedSam = Join-Path $configDir 'SAM'
     $stagedSize = (Get-Item -LiteralPath $stagedSam).Length
     Assert-True -Condition ($stagedSize -gt 8192) -Message "seeded staging SAM is still an empty hive ($stagedSize bytes)"
 
-    # Confirm MICPE landed in the staged SAM (reg.exe only -- never
-    # the PowerShell provider: round 19 proved the provider holds an
-    # open handle and a later reg unload fails).
+    # Confirm MICPE landed in the staged SAM. The query runs as
+    # SYSTEM (round 42 rerun 15): the harvested SAM's keys carry
+    # the live-system DACL -- SYSTEM has KEY_ALL_ACCESS (0xF003F)
+    # but Administrators only READ_CONTROL|WRITE_DAC (0x60000),
+    # so an admin reg.exe query on Users\Names fails with
+    # "ERROR: Access is denied." while reg.exe still exits 0
+    # (run 46146459319). Load, query and unload all happen
+    # inside the SYSTEM task (the same one-shot schtasks
+    # mechanism Set-OfflineAdminState uses for SAM surgery), so
+    # the admin shell never touches the keys. A failed query is
+    # told apart from an empty database by the exit code AND by
+    # the output text (reg.exe can print ERROR: and exit 0), and
+    # the failure carries the FULL reg output, not a preview.
     $samKey = "MICPE_BUILD_SAM_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $samLoaded = $false
-    $names = @()
-    try {
-        $LASTEXITCODE = 0
-        $null = & reg.exe load "HKLM\$samKey" $stagedSam 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg load failed for staged SAM $stagedSam (exit code $LASTEXITCODE)")
-        }
-        $samLoaded = $true
-        $LASTEXITCODE = 0
-        $namesOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Account\Users\Names" /s 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw [System.InvalidOperationException]::new(
-                "reg query failed for staged SAM Users\Names (exit code $LASTEXITCODE): the seeded SAM has no account database")
-        }
-        $namesPrefix = "HKEY_LOCAL_MACHINE\$samKey\SAM\Domains\Account\Users\Names\"
-        $names = @($namesOut -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($namesPrefix, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { $_.Substring($namesPrefix.Length).Split('\')[0] } |
-            Where-Object { $_ } | Select-Object -Unique)
-        # Round 42 rerun 14: run 46134591088 failed the seed-side
-        # Names check on a SAM that contains MICPE, and the log
-        # carried no reg output at all -- record the output shape
-        # in the error so a recurrence is diagnosable.
-        $namesPreview = @($namesOut -split "`r?`n" | Where-Object { $_ } | Select-Object -First 5) -join '; '
-        Assert-True -Condition ($names -contains 'MICPE') -Message "seeded staging SAM Users\Names has no MICPE (found: $($names -join ', ')); reg output had $(@($namesOut -split "`r?`n").Count) line(s), first lines: $namesPreview"
+    $namesResult = Invoke-CleanSystemRegQuery -HiveFile $stagedSam -HiveKey $samKey -QuerySubKey 'SAM\Domains\Account\Users\Names' -Recurse
+    if ($namesResult.LoadExitCode -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            ("reg load failed for staged SAM {0} (exit code {1}): full reg output: {2}" -f $stagedSam, $namesResult.LoadExitCode, $namesResult.LoadOutput))
     }
-    finally {
-        if ($samLoaded) {
-            $null = & reg.exe unload "HKLM\$samKey" 2>&1
-        }
+    if (($namesResult.QueryExitCode -ne 0) -or (Test-CleanRegOutputHasError -RegOutput $namesResult.QueryOutput)) {
+        throw [System.InvalidOperationException]::new(
+            ("reg query failed for staged SAM Users\Names (load exit {0}, query exit {1}): full reg output: {2}" -f $namesResult.LoadExitCode, $namesResult.QueryExitCode, $namesResult.QueryOutput))
     }
+    $namesPrefix = "HKEY_LOCAL_MACHINE\$samKey\SAM\Domains\Account\Users\Names\"
+    $names = @($namesResult.QueryOutput -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($namesPrefix, [StringComparison]::OrdinalIgnoreCase) } |
+        ForEach-Object { $_.Substring($namesPrefix.Length).Split('\')[0] } |
+        Where-Object { $_ } | Select-Object -Unique)
+    Assert-True -Condition ($names -contains 'MICPE') -Message "seeded staging SAM Users\Names has no MICPE (found: $($names -join ', ')); reg output had $(@($namesResult.QueryOutput -split "`r?`n").Count) line(s): $($namesResult.QueryOutput)"
 
     Write-Step 'seeded SAM + SECURITY into staging (round 42 Scheme A)'
     Write-SubStep ("seed SAM: {0} bytes, SHA256 {1}" -f (Get-Item -LiteralPath $stagedSam).Length, $samHash)
