@@ -651,6 +651,43 @@ function Get-SeedHiveVerification {
     }
 }
 
+function Get-SeedHiveLogLines {
+    # The registry log files' state, as text lines, for a mounted
+    # config directory. Diagnostics only -- never copied out, never
+    # uploaded (the hives artifact takes only SAM, SECURITY and the
+    # verification report).
+    #
+    # Run 46123377266 died on this very step: Test-Path said SAM.LOG1
+    # was there and the very next Get-Item said it was not
+    # ("Could not find item V:\Windows\System32\config\SAM.LOG1",
+    # line 1071), and $ErrorActionPreference = 'Stop' turned that
+    # into exit 1 -- after the hives had already been copied, so the
+    # harvest died on its own diagnostics and the hives were lost
+    # with the runner. The two calls have no atomicity guarantee (the
+    # volume is a live mount), so there is exactly one call per file:
+    # Get-Item with -ErrorAction SilentlyContinue, and $null means
+    # "not present". The whole recording is best-effort: any
+    # unexpected failure is one warning line, never a broken harvest.
+    param([string] $ConfigDir)
+    try {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        foreach ($logName in 'SAM.LOG1', 'SAM.LOG2', 'SECURITY.LOG1', 'SECURITY.LOG2') {
+            $logPath = Join-Path $ConfigDir $logName
+            $logItem = Get-Item -LiteralPath $logPath -ErrorAction SilentlyContinue
+            if ($null -ne $logItem) {
+                $lines.Add(("hive log {0}: {1:N0} bytes" -f $logName, $logItem.Length))
+            }
+            else {
+                $lines.Add(("hive log {0}: not present" -f $logName))
+            }
+        }
+        return $lines.ToArray()
+    }
+    catch {
+        return @("hive log files: could not be recorded ($($_.Exception.Message))")
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 1. Official install.wim (same calls as Invoke-CleanBaseStep)
 # ---------------------------------------------------------------------------
@@ -1065,15 +1102,10 @@ try {
     # The .LOG files are diagnostics only: record their sizes here,
     # never copy them out and never upload them (the hives artifact
     # takes only SAM, SECURITY and the verification report).
-    foreach ($logName in 'SAM.LOG1', 'SAM.LOG2', 'SECURITY.LOG1', 'SECURITY.LOG2') {
-        $logPath = "V:\Windows\System32\config\$logName"
-        if (Test-Path -LiteralPath $logPath) {
-            $seedLogFiles += ("hive log {0}: {1:N0} bytes" -f $logName, (Get-Item -LiteralPath $logPath).Length)
-        }
-        else {
-            $seedLogFiles += ("hive log {0}: not present" -f $logName)
-        }
-    }
+    # Round 42 rerun 13: the recording is one helper call (see
+    # Get-SeedHiveLogLines -- it never throws, so a failure here is
+    # one warning line, never a broken harvest).
+    $seedLogFiles = Get-SeedHiveLogLines -ConfigDir 'V:\Windows\System32\config'
     $seedLogFiles | ForEach-Object { Write-VerifyLine $_ }
 }
 finally {

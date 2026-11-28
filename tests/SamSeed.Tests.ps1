@@ -1020,3 +1020,160 @@ Describe 'seed harvest failure still leaves numbers (round 42 rerun 12)' {
         $script:WorkflowText | Should -Match 'seed-out/SAM\s+seed-out/SECURITY\s+seed-out/micpe-seed-verify\.txt\s+retention-days'
     }
 }
+
+Describe 'seed hive log recording never breaks the harvest (round 42 rerun 13)' {
+    # Run 46123377266 died on the .LOG diagnostics themselves: after
+    # the hives were copied, Test-Path said SAM.LOG1 was there and
+    # the very next Get-Item said it was not ("Could not find item
+    # V:\Windows\System32\config\SAM.LOG1", line 1071), and
+    # $ErrorActionPreference = 'Stop' turned that into exit 1 -- the
+    # harvest died on its own diagnostics and the hives were lost
+    # with the runner. The recording is now one helper call per file
+    # (Get-Item -ErrorAction SilentlyContinue, $null means "not
+    # present") and the whole recording is best-effort.
+    BeforeAll {
+        # Extract the real Get-SeedHiveLogLines from the seed script
+        # (brace-counting scan, same pattern as the diskpart tests),
+        # so the tests exercise the shipped function, not a copy.
+        $start = $script:SeedScriptText.IndexOf('function Get-SeedHiveLogLines')
+        $open = $script:SeedScriptText.IndexOf('{', $start)
+        $depth = 0
+        $end = $open
+        for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
+            $ch = $script:SeedScriptText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $end = $i; break }
+            }
+        }
+        $script:SeedHiveLogFuncText = $script:SeedScriptText.Substring($start, $end - $start + 1)
+        . ([scriptblock]::Create($script:SeedHiveLogFuncText))
+    }
+
+    AfterEach {
+        Remove-Item function:Get-Item -ErrorAction SilentlyContinue
+    }
+
+    It 'records "not present" four times when no log file exists, without throwing' {
+        $dir = Join-Path $TestDrive 'logs-empty'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $lines = Get-SeedHiveLogLines -ConfigDir $dir
+        $lines.Count | Should -Be 4
+        $lines[0] | Should -Be 'hive log SAM.LOG1: not present'
+        $lines[1] | Should -Be 'hive log SAM.LOG2: not present'
+        $lines[2] | Should -Be 'hive log SECURITY.LOG1: not present'
+        $lines[3] | Should -Be 'hive log SECURITY.LOG2: not present'
+    }
+
+    It 'records byte counts for the files that exist and "not present" for the rest' {
+        $dir = Join-Path $TestDrive 'logs-partial'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $dir 'SAM.LOG1'), [byte[]]::new(1234))
+        [System.IO.File]::WriteAllBytes((Join-Path $dir 'SECURITY.LOG2'), [byte[]]::new(56))
+        $lines = Get-SeedHiveLogLines -ConfigDir $dir
+        $lines.Count | Should -Be 4
+        $lines[0] | Should -Be ("hive log {0}: {1:N0} bytes" -f 'SAM.LOG1', 1234)
+        $lines[1] | Should -Be 'hive log SAM.LOG2: not present'
+        $lines[2] | Should -Be 'hive log SECURITY.LOG1: not present'
+        $lines[3] | Should -Be ("hive log {0}: {1:N0} bytes" -f 'SECURITY.LOG2', 56)
+    }
+
+    It 'records "not present" when Get-Item returns $null for a file that exists (run 46123377266 repro: Test-Path said yes, Get-Item said no)' {
+        $dir = Join-Path $TestDrive 'logs-race'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $dir 'SAM.LOG1'), [byte[]]::new(100))
+        # The CI failure, reproduced: the file is on disk, but the
+        # Get-Item call sees nothing (the live mount changed under
+        # it). The old Test-Path + Get-Item pair threw here; the
+        # single non-throwing call must not.
+        function global:Get-Item {
+            [CmdletBinding()]
+            param([string] $LiteralPath, [string] $Path)
+            $key = if ($LiteralPath) { $LiteralPath } else { $Path }
+            if ($key -like '*SAM.LOG1') { return $null }
+            return Microsoft.PowerShell.Management\Get-Item -LiteralPath $key -ErrorAction $ErrorActionPreference
+        }
+        $lines = Get-SeedHiveLogLines -ConfigDir $dir
+        $lines.Count | Should -Be 4
+        Test-Path -LiteralPath (Join-Path $dir 'SAM.LOG1') | Should -BeTrue
+        $lines[0] | Should -Be 'hive log SAM.LOG1: not present'
+    }
+
+    It 'a throwing Get-Item yields one warning line and never throws (diagnostics must not break the harvest)' {
+        $dir = Join-Path $TestDrive 'logs-broken'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        function global:Get-Item {
+            [CmdletBinding()]
+            param([string] $LiteralPath, [string] $Path)
+            throw 'simulated provider failure'
+        }
+        # A throw here fails the test outright, which is exactly the
+        # "never throws" requirement (a Should -Not -Throw scriptblock
+        # cannot hand the result back: its assignment stays in the
+        # scriptblock's scope). The assertions below pin the
+        # best-effort result to one warning line. @(...) keeps the
+        # single line an array: a one-element return unwraps to a
+        # scalar, and $lines[0] would then be the first character.
+        $lines = @(Get-SeedHiveLogLines -ConfigDir $dir)
+        $lines.Count | Should -Be 1
+        $lines[0] | Should -Match 'hive log files: could not be recorded'
+    }
+}
+
+Describe 'seed harvest records the log files best-effort (round 42 rerun 13)' {
+    # The call site must use the helper (one non-throwing call per
+    # file, $null means "not present") and the old Test-Path +
+    # Get-Item pair must be gone; the recording happens while V: is
+    # still mounted, before the detach in the finally block.
+    It 'the harvest calls the helper with the mounted config directory, before the detach' {
+        $script:SeedScriptText | Should -Match "Get-SeedHiveLogLines -ConfigDir 'V:\\Windows\\System32\\config'"
+        $call = $script:SeedScriptText.IndexOf('Get-SeedHiveLogLines -ConfigDir')
+        $detach = $script:SeedScriptText.IndexOf('detaching the converted-back VHD after harvest')
+        $call | Should -BeGreaterThan 0
+        $detach | Should -BeGreaterThan $call
+    }
+
+    It 'the helper makes one non-throwing Get-Item call per file and treats $null as not present' {
+        $script:SeedScriptText | Should -Match 'Get-Item -LiteralPath \$logPath -ErrorAction SilentlyContinue'
+        $script:SeedScriptText | Should -Match '\$null -ne \$logItem'
+        $script:SeedScriptText | Should -Match 'hive log files: could not be recorded'
+    }
+
+    It 'the old Test-Path then Get-Item pair is gone (the two calls have no atomicity guarantee)' {
+        $script:SeedScriptText | Should -Not -Match 'Test-Path -LiteralPath \$logPath'
+        $script:SeedScriptText | Should -Not -Match '\(Get-Item -LiteralPath \$logPath\)\.Length'
+    }
+}
+
+Describe 'seed hives are uploaded even when the run fails (round 42 rerun 13)' {
+    # User 2026-11-28 18:13: even a crashed run must upload the
+    # harvested registry files -- run 46123377266 lost good hives
+    # because the upload only ran on success, and the hives died
+    # with the runner (another 2-hour round wasted). The upload step
+    # runs always; missing files only warn, so a harvest that never
+    # ran (UUP 504, QEMU never started) does not mask the real
+    # failure; a real upload failure still fails the job (no
+    # continue-on-error).
+    BeforeAll {
+        $script:WorkflowText = Get-Content -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/build.yml') -Raw
+        $start = $script:WorkflowText.IndexOf('name: Upload seed hives')
+        $next = $script:WorkflowText.IndexOf('name: Upload seed evidence', $start)
+        $script:HivesUploadBlock = $script:WorkflowText.Substring($start, $next - $start)
+    }
+
+    It 'the hives upload runs even when the seed script step failed (if: always())' {
+        $script:HivesUploadBlock | Should -Match 'if: always\(\)'
+    }
+
+    It 'missing files only warn and never mask the real failure (if-no-files-found: warn, no continue-on-error)' {
+        $script:HivesUploadBlock | Should -Match 'if-no-files-found: warn'
+        $script:HivesUploadBlock | Should -Not -Match 'continue-on-error'
+    }
+
+    It 'the upload list is still explicit files only (no glob, no .LOG files)' {
+        $script:HivesUploadBlock | Should -Match 'seed-out/SAM\s+seed-out/SECURITY\s+seed-out/micpe-seed-verify\.txt'
+        $script:HivesUploadBlock | Should -Not -Match '\*'
+        $script:HivesUploadBlock | Should -Not -Match '\.LOG'
+    }
+}

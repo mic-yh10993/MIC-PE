@@ -819,12 +819,22 @@ jobs:
           if (-not (Test-Path -LiteralPath $ovmf)) { throw "Seed: OVMF firmware file not found at '$ovmf'" }
           ./src/build/Invoke-CleanSamSeedRun.ps1 -WorkDir "$env:GITHUB_WORKSPACE\seed-out" -QemuPath $qemu -OvmfPath $ovmf
 
-      # The hives are the deliverable: a failed upload must fail the
-      # job (unlike the build's backup-channel artifacts, which ride
-      # continue-on-error). They are tiny (~160 KB total), so the
-      # stale-quota counter that hit the GB-scale build uploads does
-      # not apply here; if this step fails, re-run the workflow.
+      # The hives are the deliverable, and they upload even when the
+      # seed script step failed (if: always()): run 46123377266 lost
+      # good hives because the upload only ran on success -- the
+      # script died on its own .LOG diagnostics after the hives were
+      # copied, and the hives died with the runner (user 2026-11-28:
+      # a crashed run must still upload the registry files, or the
+      # 2-hour round is wasted). If the harvest never ran there are
+      # no files at all, so if-no-files-found only warns -- it must
+      # not mask the real failure. A real upload failure still fails
+      # the job (no continue-on-error, unlike the build's
+      # backup-channel artifacts). The hives are tiny (~160 KB
+      # total), so the stale-quota counter that hit the GB-scale
+      # build uploads does not apply here; if this step fails,
+      # re-run the workflow.
       - name: Upload seed hives
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: micpe-sam-seed-hives
@@ -833,6 +843,7 @@ jobs:
             seed-out/SECURITY
             seed-out/micpe-seed-verify.txt
           retention-days: 30
+          if-no-files-found: warn
           compression-level: 0
 
       - name: Upload seed evidence
