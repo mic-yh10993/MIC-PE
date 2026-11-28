@@ -106,8 +106,15 @@ Describe 'seed hive verification expects MICPE (round 42)' {
     }
 
     It 'requires MICPE in the Administrators alias (00000220) membership' {
+        # Round 42 rerun 14: Members is a direct child of Aliases,
+        # not of the 00000220 alias key (which has no subkeys, only
+        # a C value), and members are keyed by hex RID under the
+        # domain SID, not by decimal '-1000'.
         $script:SeedScriptText | Should -Match '00000220'
-        $script:SeedScriptText | Should -Match '-1000'
+        $script:SeedScriptText | Should -Match 'Builtin\\Aliases\\Members'
+        $script:SeedScriptText | Should -Match "RidHex '000003E8'"
+        $script:SeedScriptText | Should -Not -Match '00000220\\Members'
+        $script:SeedScriptText | Should -Not -Match "'-1000'"
     }
 }
 
@@ -1175,5 +1182,264 @@ Describe 'seed hives are uploaded even when the run fails (round 42 rerun 13)' {
         $script:HivesUploadBlock | Should -Match 'seed-out/SAM\s+seed-out/SECURITY\s+seed-out/micpe-seed-verify\.txt'
         $script:HivesUploadBlock | Should -Not -Match '\*'
         $script:HivesUploadBlock | Should -Not -Match '\.LOG'
+    }
+}
+
+Describe 'seed hive verification queries the right Members key (round 42 rerun 14)' {
+    # Run 46134591088 never reached the Members check (it died at
+    # Names first), but the check as written could never pass:
+    # 00000220 has no subkeys, only a C value -- Members is a direct
+    # child of Aliases, and members are keyed by hex RID under the
+    # domain SID (...\Members\S-1-5-21-<domain>\000003E8). The old
+    # query ...\00000220\Members does not exist, and '-1000' matches
+    # no Members line. Verified with regipy on the harvested SAM.
+    It 'queries Aliases\Members, not the alias key 00000220\Members' {
+        $script:SeedScriptText | Should -Match 'Builtin\\Aliases\\Members'
+        $script:SeedScriptText | Should -Not -Match '00000220\\Members'
+    }
+
+    It 'checks the hex RID 000003E8, not the decimal -1000' {
+        $script:SeedScriptText | Should -Match "RidHex '000003E8'"
+        $script:SeedScriptText | Should -Not -Match "'-1000'"
+    }
+}
+
+Describe 'seed hive verification parses real reg.exe output (round 42 rerun 14)' {
+    # Run 46134591088 failed at the Names check ("has no MICPE
+    # (found: )") on a SAM that regipy proves contains MICPE, and
+    # the old tests only checked the script text -- they never
+    # executed the parsing, so a parse bug could hide behind a green
+    # suite. These tests run the real parse helpers against
+    # realistic single-backslash reg.exe /s listings canned from the
+    # harvested hive's structure, with MICPE present and absent.
+    BeforeAll {
+        # Extract the real parse helpers from the seed script
+        # (brace-counting scan, same pattern as the .LOG tests), so
+        # the tests exercise the shipped functions, not copies.
+        function script:Get-ParseHelperText($name) {
+            $start = $script:SeedScriptText.IndexOf("function $name")
+            if ($start -lt 0) { throw "function $name not found in the seed script" }
+            $open = $script:SeedScriptText.IndexOf('{', $start)
+            $depth = 0
+            $end = $open
+            for ($i = $open; $i -lt $script:SeedScriptText.Length; $i++) {
+                $ch = $script:SeedScriptText[$i]
+                if ($ch -eq '{') { $depth++ }
+                elseif ($ch -eq '}') {
+                    $depth--
+                    if ($depth -eq 0) { $end = $i; break }
+                }
+            }
+            return $script:SeedScriptText.Substring($start, $end - $start + 1)
+        }
+        . ([scriptblock]::Create((Get-ParseHelperText 'Get-SeedNamesFromRegOutput')))
+        . ([scriptblock]::Create((Get-ParseHelperText 'Get-SeedSecurityAccountsFromRegOutput')))
+        . ([scriptblock]::Create((Get-ParseHelperText 'Test-SeedMembersHasRid')))
+
+        $script:NamesPrefix = 'HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\'
+        $script:SecPrefix = 'HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\'
+        $script:NamesOut = @'
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\Administrator
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\DefaultAccount
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\Guest
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\MICPE
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\WDAGUtilityAccount
+    (Default)    REG_NONE
+'@
+        $script:NamesOutNoMicpe = @'
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\Administrator
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\DefaultAccount
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\Guest
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Account\Users\Names\WDAGUtilityAccount
+    (Default)    REG_NONE
+'@
+        $script:SecOut = @'
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-1-0
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-19
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-20
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-21-57546213-1521319697-4108371156-501
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-32-544
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-32-545
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-32-551
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-32-555
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-32-559
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-6
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-80-0
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-80-3139157870-2983391045-3678747466-658725712-1809340420
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-90-0
+    (Default)    REG_NONE
+'@
+        $script:SecOutFew = @'
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-1-0
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-19
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SEC_ab12cd34\Policy\Accounts\S-1-5-20
+    (Default)    REG_NONE
+'@
+        $script:MembersOut = @'
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5\00000004
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5\0000000B
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5\00000011
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156\000001F4
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156\000001F5
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156\000001F7
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156\000003E8
+    (Default)    REG_NONE
+'@
+        $script:MembersOutNoMicpe = @'
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5\00000004
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5\0000000B
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5\00000011
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156\000001F4
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156\000001F5
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-57546213-1521319697-4108371156\000001F7
+    (Default)    REG_NONE
+'@
+        $script:MembersOutOtherDomain = @'
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-1111111111-2222222222-3333333333
+    (Default)    REG_NONE
+
+HKEY_LOCAL_MACHINE\MICPE_SEED_SAM_ab12cd34\SAM\Domains\Builtin\Aliases\Members\S-1-5-21-1111111111-2222222222-3333333333\000003E8
+    (Default)    REG_NONE
+'@
+    }
+
+    It 'parses all five account names from a realistic Names listing, including MICPE' {
+        $names = @(Get-SeedNamesFromRegOutput -RegOutput $script:NamesOut -Prefix $script:NamesPrefix)
+        $names.Count | Should -Be 5
+        $names | Should -Contain 'MICPE'
+        $names | Should -Contain 'Administrator'
+        $names | Should -Contain 'DefaultAccount'
+        $names | Should -Contain 'Guest'
+        $names | Should -Contain 'WDAGUtilityAccount'
+    }
+
+    It 'returns the four other accounts when MICPE is absent (the caller then throws "has no MICPE")' {
+        $names = @(Get-SeedNamesFromRegOutput -RegOutput $script:NamesOutNoMicpe -Prefix $script:NamesPrefix)
+        $names.Count | Should -Be 4
+        $names | Should -Not -Contain 'MICPE'
+    }
+
+    It 'parses all thirteen SECURITY account SIDs from a realistic Accounts listing' {
+        $accounts = @(Get-SeedSecurityAccountsFromRegOutput -RegOutput $script:SecOut -Prefix $script:SecPrefix)
+        $accounts.Count | Should -Be 13
+        $accounts | Should -Contain 'S-1-5-21-57546213-1521319697-4108371156-501'
+        $accounts | Should -Contain 'S-1-5-32-544'
+    }
+
+    It 'returns only three accounts from a sparse Accounts listing (the caller then throws "expected >= 10")' {
+        $accounts = @(Get-SeedSecurityAccountsFromRegOutput -RegOutput $script:SecOutFew -Prefix $script:SecPrefix)
+        $accounts.Count | Should -Be 3
+    }
+
+    It 'finds MICPE (hex RID 000003E8) in a realistic Members listing' {
+        Test-SeedMembersHasRid -RegOutput $script:MembersOut -RidHex '000003E8' | Should -BeTrue
+    }
+
+    It 'does not find MICPE when the Members listing has no 000003E8 entry' {
+        Test-SeedMembersHasRid -RegOutput $script:MembersOutNoMicpe -RidHex '000003E8' | Should -BeFalse
+    }
+
+    It 'finds MICPE under a different domain SID (the check must not depend on the machine SID)' {
+        Test-SeedMembersHasRid -RegOutput $script:MembersOutOtherDomain -RidHex '000003E8' | Should -BeTrue
     }
 }

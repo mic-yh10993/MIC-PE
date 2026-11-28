@@ -494,6 +494,63 @@ function Assert-SeedBcdbootPrerequisites {
     }
 }
 
+function Get-SeedNamesFromRegOutput {
+    # Parse a `reg.exe query ...\Users\Names /s` listing into the
+    # account names it contains. Pure: takes the listing text and
+    # the key prefix, so the parsing is testable without reg.exe
+    # (the old tests only checked the script text and never executed
+    # the parse). The child names are the lines that extend the
+    # queried key by exactly one segment.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RegOutput,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Prefix
+    )
+    return @($RegOutput -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase) } |
+        ForEach-Object { $_.Substring($Prefix.Length).Split('\')[0] } |
+        Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Get-SeedSecurityAccountsFromRegOutput {
+    # Same shape for a `reg.exe query ...\Policy\Accounts /s`
+    # listing: the SID account keys directly under Policy\Accounts.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RegOutput,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Prefix
+    )
+    return @($RegOutput -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase) } |
+        ForEach-Object { $_.Substring($Prefix.Length).Split('\')[0] } |
+        Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Test-SeedMembersHasRid {
+    # Does a `reg.exe query ...\Builtin\Aliases\Members /s` listing
+    # contain a member with the given hex RID? Members are subkeys
+    # named by SID under the domain SID
+    # (...\Members\S-1-5-21-<domain>\000003E8), so the check is the
+    # last path segment of a key line -- not a decimal RID match,
+    # which no Members line contains.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RegOutput,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RidHex
+    )
+    $found = @($RegOutput -split "`r?`n" | Where-Object { $_ } |
+        ForEach-Object { $_.Split('\')[-1] } |
+        Where-Object { $_ -eq $RidHex })
+    return $found.Count -gt 0
+}
+
 function Get-SeedHiveVerification {
     # Verify the harvested hives with reg.exe only (load, query,
     # unload -- never the PowerShell provider: round 19 proved the
@@ -546,12 +603,16 @@ function Get-SeedHiveVerification {
                 "reg query failed for SAM Users\Names (exit code $LASTEXITCODE): the harvested SAM has no account database")
         }
         $namesPrefix = "HKEY_LOCAL_MACHINE\$samKey\SAM\Domains\Account\Users\Names\"
-        $names = @($namesOut -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($namesPrefix, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { $_.Substring($namesPrefix.Length).Split('\')[0] } |
-            Where-Object { $_ } | Select-Object -Unique)
+        $names = @(Get-SeedNamesFromRegOutput -RegOutput $namesOut -Prefix $namesPrefix)
         if ($names -notcontains 'MICPE') {
+            # Round 42 rerun 14: run 46134591088 failed here on a SAM
+            # that contains MICPE, and the log carried no reg output
+            # at all -- an empty parse and an empty database looked
+            # identical. Record the output shape in the error so a
+            # recurrence is diagnosable instead of a black box.
+            $namesPreview = @($namesOut -split "`r?`n" | Where-Object { $_ } | Select-Object -First 5) -join '; '
             throw [System.InvalidOperationException]::new(
-                "harvested SAM Users\Names has no MICPE (found: $($names -join ', '))")
+                "harvested SAM Users\Names has no MICPE (found: $($names -join ', ')); reg output had $(@($namesOut -split "`r?`n").Count) line(s), first lines: $namesPreview")
         }
         $LASTEXITCODE = 0
         $fOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Account\Users\000003E8" 2>&1 | Out-String
@@ -571,7 +632,9 @@ function Get-SeedHiveVerification {
         }
         # ACB flags: DWORD at offset 0x38, ACB_DISABLED = 0x0001.
         # A UserAccounts-created admin is enabled by construction
-        # (0x0210 = ACB_NORMAL | ACB_PWNOEXP). The build still runs
+        # (0x0014 = ACB_NORMAL | ACB_PWNOTREQ, verified on the
+        # harvested SAM -- the old comment said 0x0210, which is a
+        # different flag combination). The build still runs
         # Set-OfflineAdminState on MICPE as a belt-and-braces step,
         # but a disabled MICPE here means the unattend did not do
         # what it was supposed to -- fail loudly instead of
@@ -585,15 +648,20 @@ function Get-SeedHiveVerification {
         }
         # Administrators alias (00000220) must list MICPE (RID 1000)
         # as a member: the unattend puts it in the Administrators
-        # group, and the PE logon needs an admin account. The member
-        # SIDs are the value names under the alias Members key.
+        # group, and the PE logon needs an admin account. Members
+        # are NOT under the alias key (00000220 has no subkeys, only
+        # a C value): they live directly under Aliases\Members, as
+        # subkeys named by SID under the domain SID, with the member
+        # RID as the last segment. Round 42 rerun 14: the old query
+        # under the alias key does not exist, and a decimal RID
+        # match hits no Members line -- check the hex RID instead.
         $LASTEXITCODE = 0
-        $membersOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Builtin\Aliases\00000220\Members" /s 2>&1 | Out-String
+        $membersOut = & reg.exe query "HKLM\$samKey\SAM\Domains\Builtin\Aliases\Members" /s 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
             throw [System.InvalidOperationException]::new(
-                "reg query failed for SAM Builtin Aliases\00000220\Members (exit code $LASTEXITCODE): cannot confirm MICPE is in the Administrators group")
+                "reg query failed for SAM Builtin Aliases\Members (exit code $LASTEXITCODE): cannot confirm MICPE is in the Administrators group")
         }
-        if ($membersOut -notmatch '-1000') {
+        if (-not (Test-SeedMembersHasRid -RegOutput $membersOut -RidHex '000003E8')) {
             throw [System.InvalidOperationException]::new(
                 "harvested SAM Administrators alias has no RID 1000 member (MICPE is not in the Administrators group): $membersOut")
         }
@@ -626,9 +694,7 @@ function Get-SeedHiveVerification {
                 "reg query failed for SECURITY Policy\Accounts (exit code $LASTEXITCODE): the harvested SECURITY has no policy database")
         }
         $secPrefix = "HKEY_LOCAL_MACHINE\$secKey\Policy\Accounts\"
-        $secAccounts = @($secOut -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($secPrefix, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { $_.Substring($secPrefix.Length).Split('\')[0] } |
-            Where-Object { $_ } | Select-Object -Unique)
+        $secAccounts = @(Get-SeedSecurityAccountsFromRegOutput -RegOutput $secOut -Prefix $secPrefix)
         if ($secAccounts.Count -lt 10) {
             throw [System.InvalidOperationException]::new(
                 "harvested SECURITY Policy\Accounts has only $($secAccounts.Count) account(s) (expected >= 10): $($secAccounts -join ', ')")

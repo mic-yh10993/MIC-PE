@@ -1464,7 +1464,12 @@ function Invoke-CleanSamSeedStep {
         $names = @($namesOut -split "`r?`n" | Where-Object { $_ -and $_.StartsWith($namesPrefix, [StringComparison]::OrdinalIgnoreCase) } |
             ForEach-Object { $_.Substring($namesPrefix.Length).Split('\')[0] } |
             Where-Object { $_ } | Select-Object -Unique)
-        Assert-True -Condition ($names -contains 'MICPE') -Message "seeded staging SAM Users\Names has no MICPE (found: $($names -join ', '))"
+        # Round 42 rerun 14: run 46134591088 failed the seed-side
+        # Names check on a SAM that contains MICPE, and the log
+        # carried no reg output at all -- record the output shape
+        # in the error so a recurrence is diagnosable.
+        $namesPreview = @($namesOut -split "`r?`n" | Where-Object { $_ } | Select-Object -First 5) -join '; '
+        Assert-True -Condition ($names -contains 'MICPE') -Message "seeded staging SAM Users\Names has no MICPE (found: $($names -join ', ')); reg output had $(@($namesOut -split "`r?`n").Count) line(s), first lines: $namesPreview"
     }
     finally {
         if ($samLoaded) {
